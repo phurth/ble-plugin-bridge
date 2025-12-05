@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OneControl BLE Bridge</string>
+    <string name="service_notification_title">OneControl BLE Bridge</string>
+    <string name="service_notification_text">Connected to OneControl Gateway</string>
+</resources>
+
