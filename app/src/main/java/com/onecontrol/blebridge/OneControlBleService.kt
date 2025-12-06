@@ -3083,15 +3083,16 @@ class OneControlBleService : Service() {
             // Track last requested non-zero so plain "ON" can restore it
             lastKnownDimmableBrightness[key] = targetBrightnessPct
 
-            // Turn on with minimal "on" value, then send Settings with scaled brightness to lock the level.
-            val onCmdId = getNextCommandId()
-            sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.On, 1, onCmdId)
-
-            val scaledBrightness = (targetBrightnessPct * 255 / 100).coerceIn(1, 255)
+            // Send a single Settings command with the requested 0-100 brightness (matches HA brightness_scale=100).
             val settingsCmdId = getNextCommandId()
-            handler.postDelayed({
-                sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Settings, scaledBrightness, settingsCmdId)
-            }, 200)
+            sendDimmableCommand(
+                writeChar,
+                tableId,
+                deviceId,
+                MyRvLinkCommandEncoder.DimmableLightCommand.Settings,
+                targetBrightnessPct,
+                settingsCmdId
+            )
 
             publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessPct.toString())
         } catch (e: Exception) {
