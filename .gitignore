@@ -10,6 +10,11 @@ local.properties
 .DS_Store
 Thumbs.db
 hci_capture_*.json
+/backups/
+# Docs are ignored except the root README
+*.md
+!README.md
+/backups/
 *.iml
 .gradle
 /local.properties
