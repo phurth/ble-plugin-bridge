@@ -97,7 +97,8 @@ object HomeAssistantMqttDiscovery {
             put("brightness_state_topic", brightnessTopic)
             // Route brightness commands to the same command topic we subscribe to
             put("brightness_command_topic", commandTopic)
-            put("brightness_scale", 100)
+            // Device expects 0-255 brightness; align HA slider scale
+            put("brightness_scale", 255)
             
             // Payloads
             put("payload_on", "ON")

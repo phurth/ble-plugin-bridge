@@ -35,15 +35,15 @@ object MyRvLinkCommandEncoder {
         deviceTableId: Byte,
         deviceId: Byte,
         command: DimmableLightCommand,
-        brightness: Int = 100
+        brightness: Int = 255  // expect 0-255
     ): ByteArray {
-        // Use 0-100 direct (matching HA brightness_scale=100). OFF=0x00, RESTORE=0x7F.
-        val pct = brightness.coerceIn(1, 100)
+        // OFF = 0x00, RESTORE = 0x7F, otherwise use 1-255 (min 1 for "on" commands)
+        val b = brightness.coerceIn(1, 255)
         val valueByte = when (command) {
             DimmableLightCommand.Off -> 0x00.toByte()
             DimmableLightCommand.Restore -> 0x7F.toByte()
-            DimmableLightCommand.On, DimmableLightCommand.Settings -> pct.toByte()
-            else -> pct.toByte()
+            DimmableLightCommand.On, DimmableLightCommand.Settings -> b.toByte()
+            else -> b.toByte()
         }
 
         // CommandId first, then CommandType (0x43), matching the capture payload order.

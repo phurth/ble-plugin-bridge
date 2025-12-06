@@ -137,7 +137,7 @@ class OneControlBleService : Service() {
     private var notificationSubscriptionsPending = 0  // Track pending descriptor writes
     private var allNotificationsSubscribed = false  // Flag when all subscriptions complete
     private var lastStatusSnapshot = StatusSnapshot()
-    private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId"
+    private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId", value: 1-255
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -2381,17 +2381,17 @@ class OneControlBleService : Service() {
             "dimmable" -> {
                 // HA may send brightness on a trailing /brightness topic; handle both forms.
                 if (parts.size >= 4 && parts[3].equals("brightness", true)) {
-                    val brightnessRaw = payload.toIntOrNull() ?: return
-                    val brightnessPct = ((brightnessRaw * 100) / 255).coerceIn(0, 100)
-                    Log.i(TAG, "MQTT cmd dimmable(brightness topic) table=$tableId device=$deviceId brightnessRaw=$brightnessRaw pct=$brightnessPct")
-                    if (deviceId != null) controlDimmableLight(deviceId.toByte(), brightnessPct)
+                val brightnessRaw = payload.toIntOrNull() ?: return
+                val brightnessByte = brightnessRaw.coerceIn(0, 255)
+                Log.i(TAG, "MQTT cmd dimmable(brightness topic) table=$tableId device=$deviceId brightnessRaw=$brightnessByte")
+                if (deviceId != null) controlDimmableLight(deviceId.toByte(), brightnessByte)
                     return
                 }
                 if (deviceId == null) return
                 val parsed = parseLightCommandPayload(payload)
                 if (parsed != null) {
                     Log.i(TAG, "MQTT cmd dimmable table=$tableId device=$deviceId brightness=$parsed")
-                    controlDimmableLight(deviceId.toByte(), parsed.coerceIn(0, 100))
+                    controlDimmableLight(deviceId.toByte(), parsed.coerceIn(0, 255))
                 } else {
                     Log.w(TAG, "MQTT dimmable command payload not understood: $payload")
                 }
@@ -2420,11 +2420,11 @@ class OneControlBleService : Service() {
                 val json = org.json.JSONObject(trimmed)
                 if (json.has("brightness")) {
                     val b = json.getInt("brightness")
-                    return (b * 100 / 255).coerceIn(0, 100)
+                    return b.coerceIn(0, 255)
                 }
                 if (json.has("state")) {
                     val state = json.getString("state")
-                    return if (state.equals("ON", true)) 100 else 0
+                    return if (state.equals("ON", true)) 255 else 0
                 }
             } catch (_: Exception) {
                 // ignore
@@ -2432,8 +2432,8 @@ class OneControlBleService : Service() {
         }
         // Legacy plain payloads
         val brightness = payload.toIntOrNull()
-        if (brightness != null) return brightness
-        if (payload.equals("on", true) || payload.equals("true", true)) return 100
+        if (brightness != null) return brightness.coerceIn(0, 255)
+        if (payload.equals("on", true) || payload.equals("true", true)) return 255
         if (payload.equals("off", true) || payload.equals("false", true)) return 0
         return null
     }
@@ -2728,7 +2728,8 @@ class OneControlBleService : Service() {
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightness.toString(), retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/type", "dimmable_light")
             if (brightness > 0) {
-                lastKnownDimmableBrightness[key] = brightness.coerceIn(1, 100)
+                // convert reported percent to 1-255 for future ON restores
+                lastKnownDimmableBrightness[key] = (brightness.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
             }
         }
     }
@@ -3079,22 +3080,22 @@ class OneControlBleService : Service() {
                 return
             }
 
-            val targetBrightnessPct = brightness.coerceIn(1, 100)
+            // HA now uses brightness_scale=255; accept 0-255 and pass through
+            val targetBrightnessByte = brightness.coerceIn(1, 255)
             // Track last requested non-zero so plain "ON" can restore it
-            lastKnownDimmableBrightness[key] = targetBrightnessPct
+            lastKnownDimmableBrightness[key] = targetBrightnessByte
 
-            // Send a single Settings command with the requested 0-100 brightness (matches HA brightness_scale=100).
             val settingsCmdId = getNextCommandId()
             sendDimmableCommand(
                 writeChar,
                 tableId,
                 deviceId,
                 MyRvLinkCommandEncoder.DimmableLightCommand.Settings,
-                targetBrightnessPct,
+                targetBrightnessByte,
                 settingsCmdId
             )
 
-            publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessPct.toString())
+            publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessByte.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
             broadcastLog("❌ Dimmable command failed: ${e.message}")
