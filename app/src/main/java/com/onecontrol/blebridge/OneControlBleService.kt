@@ -2357,6 +2357,26 @@ class OneControlBleService : Service() {
     }
 
     private fun handleMqttCommand(topic: String, payload: String) {
+        // Legacy brightness command path: onecontrol/ble/device/<table>/<device>/brightness/set
+        if (topic.startsWith("$MQTT_TOPIC_PREFIX/device/") && topic.endsWith("/brightness/set")) {
+            val parts = topic.split("/")
+            // onecontrol, ble, device, <tableId>, <deviceId>, brightness, set
+            if (parts.size >= 7) {
+                val tableId = parts[3].toIntOrNull()
+                val deviceId = parts[4].toIntOrNull()
+                if (tableId != null && deviceId != null) {
+                    val brightness = payload.toIntOrNull()?.coerceIn(0, 255)
+                    if (brightness != null) {
+                        Log.i(TAG, "MQTT cmd dimmable(legacy brightness topic) table=$tableId device=$deviceId brightnessRaw=$brightness")
+                        controlDimmableLight(deviceId.toByte(), brightness)
+                    } else {
+                        Log.w(TAG, "MQTT dimmable legacy payload not understood: $payload")
+                    }
+                }
+            }
+            return
+        }
+
         // Expect topics under onecontrol/ble/command/... (or legacy onecontrol-ble/command/...)
         if (!topic.startsWith("$MQTT_TOPIC_PREFIX/command/") && !topic.startsWith("onecontrol-ble/command/")) return
         val prefixStripped = if (topic.startsWith("$MQTT_TOPIC_PREFIX/command/")) {
@@ -2406,6 +2426,7 @@ class OneControlBleService : Service() {
         try {
             mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/command/#", 0)
             mqttClient?.subscribe("onecontrol-ble/command/#", 0) // legacy prefix fallback
+            mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/device/+/+/brightness/set", 0) // legacy HA brightness topic
             Log.i(TAG, "📡 Subscribed to MQTT commands at $MQTT_TOPIC_PREFIX/command/# and onecontrol-ble/command/#")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to subscribe to MQTT commands: ${e.message}")
