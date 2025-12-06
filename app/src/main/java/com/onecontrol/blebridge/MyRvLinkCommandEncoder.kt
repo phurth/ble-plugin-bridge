@@ -37,14 +37,14 @@ object MyRvLinkCommandEncoder {
         command: DimmableLightCommand,
         brightness: Int = 255  // expect 0-255
     ): ByteArray {
-        // OFF = 0x00, RESTORE = 0x7F, otherwise use 1-255 (min 1 for "on" commands)
-        val b = brightness.coerceIn(1, 255)
-        val valueByte = when (command) {
+        val b = brightness.coerceIn(0, 255)
+        val modeByte = when (command) {
             DimmableLightCommand.Off -> 0x00.toByte()
             DimmableLightCommand.Restore -> 0x7F.toByte()
-            DimmableLightCommand.On, DimmableLightCommand.Settings -> b.toByte()
-            else -> b.toByte()
+            else -> 0x01.toByte() // On/Settings use 0x01 per capture
         }
+        val brightnessByte = b.toByte()
+        val reservedByte = 0x00.toByte()
 
         // CommandId first, then CommandType (0x43), matching the capture payload order.
         val commandBytes = byteArrayOf(
@@ -53,13 +53,14 @@ object MyRvLinkCommandEncoder {
             0x43.toByte(),                                   // CommandType: ActionDimmable
             deviceTableId,
             deviceId,
-            valueByte
+            modeByte,
+            brightnessByte,
+            reservedByte
         )
         
         Log.d(TAG, "Encoded ActionDimmable (HCI format): cmdId=0x${commandId.toString(16)}, " +
                    "device=0x${deviceTableId.toString(16)}:${deviceId.toString(16)}, " +
-                   "value=0x${(valueByte.toInt() and 0xFF).toString(16)}, " +
-                   "size=6 bytes")
+                   "mode=0x${(modeByte.toInt() and 0xFF).toString(16)}, brightness=0x${(brightnessByte.toInt() and 0xFF).toString(16)}, size=8 bytes")
         Log.d(TAG, "Raw command bytes: ${commandBytes.joinToString(" ") { "%02X".format(it) }}")
         
         return commandBytes

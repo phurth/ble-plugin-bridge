@@ -42,6 +42,13 @@ Android foreground service that connects to a Lippert OneControl BLE gateway, au
 - Foreground service permissions/notifications enabled.
 - Stable MQTT broker reachable from the device.
 
+## Reliability checklist (tablet/kiosk use)
+- Keep the bridge running as a foreground service (notification visible).
+- Disable battery optimization for the app (system setting / toggle in UI).
+- Enable “Start on boot” so the service relaunches after reboot.
+- Enable the BLE/MQTT watchdog to auto-heal connections if they drop.
+- Prefer “Unrestricted”/“Don’t optimize” battery mode if the device offers it.
+
 ## Known/pending
 - Covers: discovery published; command handling present but may need real-world validation.
 - Tank sensors: retained placeholders; revisit parsing when live data available.

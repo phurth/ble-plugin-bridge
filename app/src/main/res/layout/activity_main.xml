@@ -102,5 +102,73 @@
             android:paddingVertical="4dp" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/settingsContainer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:background="@android:color/transparent"
+        app:layout_constraintTop_toBottomOf="@+id/statusChecklist"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/settingsTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Reliability settings"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:paddingBottom="8dp" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchBatteryOpt"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Disable battery optimization"
+            android:paddingVertical="4dp" />
+
+        <TextView
+            android:id="@+id/helpBatteryOpt"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Keeps Android from throttling the bridge. Opens system settings."
+            android:textSize="14sp"
+            android:paddingBottom="12dp" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchStartOnBoot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Start on boot"
+            android:paddingVertical="4dp" />
+
+        <TextView
+            android:id="@+id/helpStartOnBoot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Auto-launches the bridge after device reboots."
+            android:textSize="14sp"
+            android:paddingBottom="12dp" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchWatchdog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="BLE/MQTT watchdog"
+            android:paddingVertical="4dp" />
+
+        <TextView
+            android:id="@+id/helpWatchdog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Periodically checks BLE and MQTT; restarts them if they drop."
+            android:textSize="14sp"
+            android:paddingBottom="12dp" />
+
+    </LinearLayout>
+
 </androidx.constraintlayout.widget.ConstraintLayout>
 

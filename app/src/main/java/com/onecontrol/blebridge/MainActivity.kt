@@ -16,15 +16,25 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.content.SharedPreferences
 import android.widget.Button
+import android.widget.CompoundButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 class MainActivity : AppCompatActivity() {
+    
+    companion object {
+        private const val PREFS_NAME = "oc_settings"
+        private const val PREF_START_ON_BOOT = "pref_start_on_boot"
+        private const val PREF_DISABLE_BATT_OPT = "pref_disable_batt_opt"
+        private const val PREF_WATCHDOG = "pref_watchdog"
+    }
     
     private lateinit var statusText: TextView
     private lateinit var checkService: TextView
@@ -34,12 +44,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var checkMqtt: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+    private lateinit var switchBatteryOpt: SwitchCompat
+    private lateinit var switchStartOnBoot: SwitchCompat
+    private lateinit var switchWatchdog: SwitchCompat
     
     private val PERMISSIONS_REQUEST_CODE = 100
     
     private var bleService: OneControlBleService? = null
     private var serviceBinder: OneControlBleService.LocalBinder? = null
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var prefs: SharedPreferences
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             serviceBinder = service as? OneControlBleService.LocalBinder
@@ -88,6 +102,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         
         statusText = findViewById(R.id.statusText)
         startButton = findViewById(R.id.startServiceButton)
@@ -97,6 +112,9 @@ class MainActivity : AppCompatActivity() {
         checkBle = findViewById(R.id.checkBle)
         checkData = findViewById(R.id.checkData)
         checkMqtt = findViewById(R.id.checkMqtt)
+        switchBatteryOpt = findViewById(R.id.switchBatteryOpt)
+        switchStartOnBoot = findViewById(R.id.switchStartOnBoot)
+        switchWatchdog = findViewById(R.id.switchWatchdog)
         
         // Register broadcast receiver for service logs and state
         val filter = IntentFilter().apply {
@@ -115,9 +133,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             log("All permissions granted")
         }
-        
-        // Request battery optimization exemption
-        requestBatteryOptimizationExemption()
         
         // Button click handlers
         startButton.setOnClickListener {
@@ -140,6 +155,8 @@ class MainActivity : AppCompatActivity() {
         // Update UI based on service state
         updateServiceState()
         updateChecklist(null)
+        refreshSettingsToggles()
+        attachToggleHandlers()
         
         // Bind to service to access control methods (defer to avoid blocking onCreate)
         handler.postDelayed({
@@ -153,6 +170,7 @@ class MainActivity : AppCompatActivity() {
         updateServiceState()
         updateChecklist(null)
         updateDeviceStatuses()
+        refreshSettingsToggles()
     }
     
     override fun onPause() {
@@ -181,29 +199,81 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
+    private fun refreshSettingsToggles() {
+        val batteryIgnored = isIgnoringBatteryOptimizations()
+        switchBatteryOpt.isChecked = batteryIgnored
+        switchStartOnBoot.isChecked = prefs.getBoolean(PREF_START_ON_BOOT, false)
+        switchWatchdog.isChecked = prefs.getBoolean(PREF_WATCHDOG, false)
+    }
+    
+    private fun attachToggleHandlers() {
+        switchBatteryOpt.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
+            if (isChecked) {
+                if (isIgnoringBatteryOptimizations()) {
+                    prefs.edit().putBoolean(PREF_DISABLE_BATT_OPT, true).apply()
+                    Toast.makeText(this, "Battery optimization already disabled", Toast.LENGTH_SHORT).show()
+                    switchBatteryOpt.isChecked = true
+                } else {
+                    prefs.edit().putBoolean(PREF_DISABLE_BATT_OPT, true).apply()
+                    val opened = requestBatteryOptimizationExemption()
+                    if (!opened) {
+                        Toast.makeText(this, "Could not open battery optimization settings", Toast.LENGTH_LONG).show()
+                        switchBatteryOpt.isChecked = false
+                        prefs.edit().putBoolean(PREF_DISABLE_BATT_OPT, false).apply()
+                    }
+                }
+            } else {
+                prefs.edit().putBoolean(PREF_DISABLE_BATT_OPT, false).apply()
+                Toast.makeText(this, "Battery optimization may throttle the bridge", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        switchStartOnBoot.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
+            prefs.edit().putBoolean(PREF_START_ON_BOOT, isChecked).apply()
+        }
+        
+        switchWatchdog.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
+            prefs.edit().putBoolean(PREF_WATCHDOG, isChecked).apply()
+            bleService?.setWatchdogEnabled(isChecked)
+        }
+    }
+    
     private fun hasAllPermissions(): Boolean {
         return requiredPermissions.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
     
-    private fun requestBatteryOptimizationExemption() {
+    private fun requestBatteryOptimizationExemption(): Boolean {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         val packageName = packageName
-        
-        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-            log("Requesting battery optimization exemption...")
-            try {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-            } catch (e: Exception) {
-                log("Could not request battery optimization exemption: ${e.message}")
-            }
-        } else {
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) {
             log("✅ Battery optimization already disabled")
+            return true
         }
+        log("Requesting battery optimization exemption...")
+        return try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            log("Could not request battery optimization exemption: ${e.message}")
+            try {
+                val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                startActivity(fallback)
+                true
+            } catch (e2: Exception) {
+                log("Fallback battery optimization settings failed: ${e2.message}")
+                false
+            }
+        }
+    }
+    
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isIgnoringBatteryOptimizations(packageName)
     }
     
     private fun startBleService() {

@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -56,9 +57,19 @@ class OneControlBleService : Service() {
         private const val MQTT_TOPIC_PREFIX = "onecontrol/ble"
         private const val MQTT_USERNAME = "mqtt"
         private const val MQTT_PASSWORD = "mqtt"
+
+        // Preferences
+        private const val PREFS_NAME = "oc_settings"
+        private const val PREF_START_ON_BOOT = "pref_start_on_boot"
+        private const val PREF_DISABLE_BATT_OPT = "pref_disable_batt_opt"
+        private const val PREF_WATCHDOG = "pref_watchdog"
     }
     
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var prefs: SharedPreferences
+    private var watchdogEnabled = false
+    private var watchdogRunnable: Runnable? = null
+    private val WATCHDOG_INTERVAL_MS = 60000L
     
     inner class LocalBinder : Binder() {
         fun getService(): OneControlBleService = this@OneControlBleService
@@ -90,9 +101,19 @@ class OneControlBleService : Service() {
                 disconnect()
             }
         }
+        
+        fun setWatchdogEnabled(enabled: Boolean) {
+            handler.post {
+                updateWatchdogEnabled(enabled)
+            }
+        }
     }
     
     private val binder = LocalBinder()
+
+    fun setWatchdogEnabled(enabled: Boolean) {
+        updateWatchdogEnabled(enabled)
+    }
     
     // BLE components
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -139,7 +160,9 @@ class OneControlBleService : Service() {
     private var lastStatusSnapshot = StatusSnapshot()
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId", value: 1-255
     private val pendingDimmable = mutableMapOf<String, Pair<Int, Long>>()  // key: tableId:deviceId -> brightness(1-255), timestamp
-    private val DIMMER_PENDING_WINDOW_MS = 2500L
+    private val DIMMER_PENDING_WINDOW_MS = 12000L
+    private val pendingDimmableSend = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, ts)
+    private val DIMMER_DEBOUNCE_MS = 200L
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -226,6 +249,7 @@ class OneControlBleService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service onCreate")
+        prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Initializing..."))
         isServiceRunning = true
@@ -235,6 +259,12 @@ class OneControlBleService : Service() {
         val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         registerReceiver(bondStateReceiver, filter)
         Log.d(TAG, "Registered bond state receiver")
+        
+        // Apply stored settings
+        watchdogEnabled = prefs.getBoolean(PREF_WATCHDOG, false)
+        if (watchdogEnabled) {
+            startWatchdog()
+        }
         
         // Initialize Bluetooth
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -298,6 +328,7 @@ class OneControlBleService : Service() {
         } catch (e: Exception) {
             Log.d(TAG, "Receiver not registered or already unregistered")
         }
+        stopWatchdog()
         stopScanning()
         disconnect()
         disconnectMqtt()
@@ -1645,6 +1676,46 @@ class OneControlBleService : Service() {
             Log.d(TAG, "💓 Heartbeat stopped")
         }
     }
+
+    private fun updateWatchdogEnabled(enabled: Boolean) {
+        watchdogEnabled = enabled
+        if (::prefs.isInitialized) {
+            prefs.edit().putBoolean(PREF_WATCHDOG, enabled).apply()
+        }
+        if (enabled) {
+            startWatchdog()
+        } else {
+            stopWatchdog()
+        }
+        Log.i(TAG, "🔎 Watchdog ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    private fun startWatchdog() {
+        stopWatchdog()
+        watchdogRunnable = object : Runnable {
+            override fun run() {
+                if (!watchdogEnabled) return
+                // If BLE is down, kick reconnect; if MQTT is down, reconnect.
+                if (!isConnected) {
+                    reconnectToBondedDevice()
+                }
+                if (!mqttConnected) {
+                    connectMqtt()
+                }
+                handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            }
+        }
+        handler.postDelayed(watchdogRunnable!!, WATCHDOG_INTERVAL_MS)
+        Log.i(TAG, "🔎 Watchdog started (every ${WATCHDOG_INTERVAL_MS}ms)")
+    }
+
+    private fun stopWatchdog() {
+        watchdogRunnable?.let {
+            handler.removeCallbacks(it)
+            watchdogRunnable = null
+            Log.d(TAG, "🔎 Watchdog stopped")
+        }
+    }
     
     // MARK: - Keepalive Reads (REMOVED - was causing disconnect loops)
     // The official app does NOT perform periodic characteristic reads for keepalive.
@@ -2359,6 +2430,7 @@ class OneControlBleService : Service() {
     }
 
     private fun handleMqttCommand(topic: String, payload: String) {
+        Log.i(TAG, "MQTT cmd inbound: $topic = $payload")
         // Legacy brightness command path: onecontrol/ble/device/<table>/<device>/brightness/set
         if (topic.startsWith("$MQTT_TOPIC_PREFIX/device/") && topic.endsWith("/brightness/set")) {
             val parts = topic.split("/")
@@ -2429,7 +2501,7 @@ class OneControlBleService : Service() {
             mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/command/#", 0)
             mqttClient?.subscribe("onecontrol-ble/command/#", 0) // legacy prefix fallback
             mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/device/+/+/brightness/set", 0) // legacy HA brightness topic
-            Log.i(TAG, "📡 Subscribed to MQTT commands at $MQTT_TOPIC_PREFIX/command/# and onecontrol-ble/command/#")
+            Log.i(TAG, "📡 Subscribed to MQTT commands at $MQTT_TOPIC_PREFIX/command/#, onecontrol-ble/command/#, and legacy brightness")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to subscribe to MQTT commands: ${e.message}")
         }
@@ -2739,35 +2811,43 @@ class OneControlBleService : Service() {
         val statuses = DeviceStatusParser.parseDimmableLightStatus(data)
         for (status in statuses) {
             val key = "${status.deviceTableId}:${status.deviceId}"
-            val brightness = status.brightness ?: 0
-            val isOn = status.isOn ?: (brightness > 0)
-            val brightnessRaw = (brightness.coerceIn(0, 100) * 255 / 100).coerceIn(0, 255)
+            // Brightness is reported raw 0-255 at statusBytes[3]; derive percent from raw
+            val modeByte = status.statusBytes.getOrNull(0)?.toInt() ?: 0
+            val brightnessRaw = (status.brightness ?: 0).coerceIn(0, 255)
+            val brightnessPct = ((brightnessRaw / 255.0) * 100).toInt().coerceIn(0, 100)
+            val isOn = status.isOn ?: (brightnessRaw > 0)
+            Log.i(TAG, "💡 Status raw bytes=${status.statusBytes.joinToString(" ") { "%02X".format(it) }} rawBrightness=$brightnessRaw pct=$brightnessPct")
 
-            // Optimistic guard: if we recently sent a brightness and this disagrees, ignore within window
+            // Pending guard: only suppress mismatches while a command is pending; accept matching brightness
             val pending = pendingDimmable[key]
             val now = System.currentTimeMillis()
-            if (pending != null && (now - pending.second) <= DIMMER_PENDING_WINDOW_MS) {
-                if (brightnessRaw == pending.first) {
-                    pendingDimmable.remove(key)
-                } else {
-                    Log.d(TAG, "Ignoring transient dimmer update for $key raw=$brightnessRaw pending=${pending.first}")
-                    continue
+            if (pending != null) {
+                val (desired, ts) = pending
+                val age = now - ts
+                if (age <= DIMMER_PENDING_WINDOW_MS) {
+                    if (brightnessRaw != desired || modeByte == 0) {
+                        if (VERBOSE_LOGGING) {
+                            Log.d(TAG, "Ignoring dimmer mismatch during pending window key=$key mode=$modeByte reported=$brightnessRaw pending=$desired age=${age}ms")
+                        }
+                        continue
+                    }
                 }
-            } else if (pending != null && (now - pending.second) > DIMMER_PENDING_WINDOW_MS) {
+                // Clear pending once we accept matching status or after the window
                 pendingDimmable.remove(key)
             }
 
-            deviceStatuses[key] = DeviceStatus.DimmableLight(status.deviceTableId, status.deviceId, isOn, brightness)
+            deviceStatuses[key] = DeviceStatus.DimmableLight(status.deviceTableId, status.deviceId, isOn, brightnessPct)
 
-            Log.i(TAG, "💡 Dimmable Light ${status.deviceId} (TableId=${status.deviceTableId}): ${if (isOn) "ON" else "OFF"}, Brightness=$brightness")
-            broadcastLog("💡 Light ${status.deviceId}: ${if (isOn) "ON" else "OFF"} @ $brightness")
+            Log.i(TAG, "💡 Dimmable Light ${status.deviceId} (TableId=${status.deviceTableId}): ${if (isOn) "ON" else "OFF"}, Brightness=$brightnessPct")
+            broadcastLog("💡 Light ${status.deviceId}: ${if (isOn) "ON" else "OFF"} @ $brightnessPct")
 
             publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = true)
+            // Publish only on actual dimmer status; no periodic defaults
+            Log.i(TAG, "MQTT pub dimmer state device=${status.deviceTableId}:${status.deviceId} raw=$brightnessRaw pct=$brightnessPct isOn=$isOn")
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/state", if (isOn) "ON" else "OFF", retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightnessRaw.toString(), retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/type", "dimmable_light")
-            if (brightness > 0) {
-                // convert reported percent to 1-255 for future ON restores
+            if (brightnessPct > 0) {
                 lastKnownDimmableBrightness[key] = brightnessRaw.coerceIn(1, 255)
             }
         }
@@ -3109,43 +3189,47 @@ class OneControlBleService : Service() {
             return
         }
 
-        try {
-            val tableId = if (deviceTableId == 0x00.toByte()) DEFAULT_DEVICE_TABLE_ID else deviceTableId
-            val key = "${tableId}:${deviceId}"
+        val tableId = if (deviceTableId == 0x00.toByte()) DEFAULT_DEVICE_TABLE_ID else deviceTableId
+        val key = "${tableId}:${deviceId}"
 
-            if (brightness <= 0) {
-                sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
-                publishMqtt("command/dimmable/$deviceId/brightness", "0")
-                publishMqtt("device/${tableId}/${deviceId}/state", "OFF", retain = true)
-                publishMqtt("device/${tableId}/${deviceId}/brightness", "0", retain = true)
-                pendingDimmable.remove(key)
-                return
-            }
-
-            // HA uses brightness_scale=255; accept 0-255 and pass through
-            val targetBrightnessByte = brightness.coerceIn(1, 255)
-            // Track last requested non-zero so plain "ON" can restore it
-            lastKnownDimmableBrightness[key] = targetBrightnessByte
-            pendingDimmable[key] = targetBrightnessByte to System.currentTimeMillis()
-
-            val settingsCmdId = getNextCommandId()
-            sendDimmableCommand(
-                writeChar,
-                tableId,
-                deviceId,
-                MyRvLinkCommandEncoder.DimmableLightCommand.Settings,
-                targetBrightnessByte,
-                settingsCmdId
-            )
-
-            // Optimistic publish to keep HA from snapping back; confirmed by status later
-            publishMqtt("device/${tableId}/${deviceId}/state", "ON", retain = true)
-            publishMqtt("device/${tableId}/${deviceId}/brightness", targetBrightnessByte.toString(), retain = true)
-            publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessByte.toString())
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
-            broadcastLog("❌ Dimmable command failed: ${e.message}")
+        if (brightness <= 0) {
+            sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
+            publishMqtt("command/dimmable/$deviceId/brightness", "0")
+            publishMqtt("device/${tableId}/${deviceId}/state", "OFF", retain = true)
+            publishMqtt("device/${tableId}/${deviceId}/brightness", "0", retain = true)
+            pendingDimmable.remove(key)
+            pendingDimmableSend.remove(key)
+            return
         }
+
+        // HA uses brightness_scale=255. Reuse last known if bare ON (255 from HA with stored brightness).
+        val lastKnown = lastKnownDimmableBrightness[key]
+        val requested = brightness.coerceIn(0, 255)
+        val targetBrightnessByte = if (requested == 255 && lastKnown != null) {
+            lastKnown
+        } else {
+            requested.coerceIn(1, 255)
+        }
+        val nowTs = System.currentTimeMillis()
+        pendingDimmableSend[key] = targetBrightnessByte to nowTs
+
+        handler.postDelayed({
+            val entry = pendingDimmableSend[key]
+            if (entry != null && entry.second == nowTs) {
+                pendingDimmableSend.remove(key)
+                sendDimmableCommand(
+                    writeChar,
+                    tableId,
+                    deviceId,
+                    MyRvLinkCommandEncoder.DimmableLightCommand.Settings,
+                    targetBrightnessByte
+                )
+                lastKnownDimmableBrightness[key] = targetBrightnessByte
+                pendingDimmable[key] = targetBrightnessByte to System.currentTimeMillis()
+                publishMqtt("device/${tableId}/${deviceId}/state", "ON", retain = true)
+                publishMqtt("device/${tableId}/${deviceId}/brightness", targetBrightnessByte.toString(), retain = true)
+            }
+        }, DIMMER_DEBOUNCE_MS)
     }
 
     private fun sendDimmableCommand(
@@ -3171,7 +3255,7 @@ class OneControlBleService : Service() {
         val writeResult = bluetoothGatt?.writeCharacteristic(writeChar)
         Log.i(
             TAG,
-            "📤 Dimmable cmd: cmd=${command.name}, DeviceId=$deviceId, Brightness=$brightness, CommandId=0x${commandId.toString(16)}, writeResult=$writeResult"
+            "📤 Dimmable cmd: cmd=${command.name}, DeviceId=$deviceId, Brightness=$brightness, CommandId=0x${commandId.toString(16)}, writeResult=$writeResult, payload=${commandBytes.joinToString(" ") { "%02X".format(it) }}, encoded=${encoded.joinToString(" ") { "%02X".format(it) }}"
         )
         broadcastLog("📤 Light $deviceId (${command.name}): $brightness")
     }
