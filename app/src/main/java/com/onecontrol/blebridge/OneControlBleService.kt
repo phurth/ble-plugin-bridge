@@ -2297,7 +2297,13 @@ class OneControlBleService : Service() {
     }
     
     private fun connectMqtt() {
-        if (mqttConnected || mqttClient == null) return
+        if (mqttClient == null) return
+        // If client reports connected, ensure post-connect steps and bail early
+        if (mqttClient?.isConnected == true) {
+            mqttConnected = true
+            onMqttConnected()
+            return
+        }
         
         try {
             val options = MqttConnectOptions().apply {
@@ -2317,25 +2323,36 @@ class OneControlBleService : Service() {
                     handler.post {
                         Log.i(TAG, "✅ MQTT connected")
                         mqttConnected = true
-                        publishDiagnosticsDiscovery()
-                        publishDiagnosticsState()
-                        broadcastServiceState()
-                        publishMqtt("status", "connected", retain = true)
-                        publishHaVoltage()
-                        subscribeMqttCommands()
-                        publishDiscoveryForKnownDevices()
+                        onMqttConnected()
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "MQTT connection failed: ${e.message}")
+                    val msg = e.message ?: ""
+                    Log.e(TAG, "MQTT connection failed: $msg")
                     mqttConnected = false
                     publishDiagnosticsState()
                     broadcastServiceState()
-                    handler.postDelayed({ connectMqtt() }, 5000)
+                    // If the client thinks it's already connected, force a disconnect and retry
+                    if (msg.contains("Client is connected", ignoreCase = true) || mqttClient?.isConnected == true) {
+                        safeDisconnectMqtt()
+                        handler.postDelayed({ connectMqtt() }, 1000)
+                    } else {
+                        handler.postDelayed({ connectMqtt() }, 5000)
+                    }
                 }
             }.start()
         } catch (e: Exception) {
             Log.e(TAG, "MQTT connect error: ${e.message}", e)
         }
+    }
+
+    private fun onMqttConnected() {
+        publishDiagnosticsDiscovery()
+        publishDiagnosticsState()
+        broadcastServiceState()
+        publishMqtt("status", "connected", retain = true)
+        publishHaVoltage()
+        subscribeMqttCommands()
+        publishDiscoveryForKnownDevices()
     }
 
     private fun handleMqttCommand(topic: String, payload: String) {
@@ -2429,6 +2446,17 @@ class OneControlBleService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "MQTT disconnect error: ${e.message}")
         }
+    }
+
+    private fun safeDisconnectMqtt() {
+        try {
+            mqttClient?.disconnectForcibly(1000, 1000)
+        } catch (_: Exception) {
+            // ignore
+        }
+        mqttConnected = false
+        publishDiagnosticsState()
+        broadcastServiceState()
     }
     
     private fun publishMqtt(topic: String, payload: String, retain: Boolean = false) {

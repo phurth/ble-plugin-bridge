@@ -40,11 +40,8 @@ object MyRvLinkCommandEncoder {
         val valueByte = when (command) {
             DimmableLightCommand.Off -> 0x00.toByte()
             DimmableLightCommand.Restore -> 0x7F.toByte()
-            DimmableLightCommand.On, DimmableLightCommand.Settings -> {
-                // Match HCI capture: use minimal "on" value 0x01 regardless of requested brightness
-                0x01.toByte()
-            }
-            else -> 0x01.toByte() // fallback minimal "on"
+            DimmableLightCommand.On, DimmableLightCommand.Settings -> brightness.coerceIn(1, 100).toByte()
+            else -> brightness.coerceIn(1, 100).toByte()
         }
 
         // CommandId first, then CommandType (0x43), matching the capture payload order.
