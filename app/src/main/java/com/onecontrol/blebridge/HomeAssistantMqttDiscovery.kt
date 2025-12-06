@@ -95,7 +95,8 @@ object HomeAssistantMqttDiscovery {
             
             // Brightness
             put("brightness_state_topic", brightnessTopic)
-            put("brightness_command_topic", "${brightnessTopic}/set")
+            // Route brightness commands to the same command topic we subscribe to
+            put("brightness_command_topic", commandTopic)
             put("brightness_scale", 100)
             
             // Payloads
