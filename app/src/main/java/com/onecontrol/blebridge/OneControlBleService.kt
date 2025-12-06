@@ -138,6 +138,8 @@ class OneControlBleService : Service() {
     private var allNotificationsSubscribed = false  // Flag when all subscriptions complete
     private var lastStatusSnapshot = StatusSnapshot()
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId", value: 1-255
+    private val pendingDimmable = mutableMapOf<String, Pair<Int, Long>>()  // key: tableId:deviceId -> brightness(1-255), timestamp
+    private val DIMMER_PENDING_WINDOW_MS = 2500L
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -2739,6 +2741,22 @@ class OneControlBleService : Service() {
             val key = "${status.deviceTableId}:${status.deviceId}"
             val brightness = status.brightness ?: 0
             val isOn = status.isOn ?: (brightness > 0)
+            val brightnessRaw = (brightness.coerceIn(0, 100) * 255 / 100).coerceIn(0, 255)
+
+            // Optimistic guard: if we recently sent a brightness and this disagrees, ignore within window
+            val pending = pendingDimmable[key]
+            val now = System.currentTimeMillis()
+            if (pending != null && (now - pending.second) <= DIMMER_PENDING_WINDOW_MS) {
+                if (brightnessRaw == pending.first) {
+                    pendingDimmable.remove(key)
+                } else {
+                    Log.d(TAG, "Ignoring transient dimmer update for $key raw=$brightnessRaw pending=${pending.first}")
+                    continue
+                }
+            } else if (pending != null && (now - pending.second) > DIMMER_PENDING_WINDOW_MS) {
+                pendingDimmable.remove(key)
+            }
+
             deviceStatuses[key] = DeviceStatus.DimmableLight(status.deviceTableId, status.deviceId, isOn, brightness)
 
             Log.i(TAG, "💡 Dimmable Light ${status.deviceId} (TableId=${status.deviceTableId}): ${if (isOn) "ON" else "OFF"}, Brightness=$brightness")
@@ -2746,11 +2764,11 @@ class OneControlBleService : Service() {
 
             publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/state", if (isOn) "ON" else "OFF", retain = true)
-            publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightness.toString(), retain = true)
+            publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightnessRaw.toString(), retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/type", "dimmable_light")
             if (brightness > 0) {
                 // convert reported percent to 1-255 for future ON restores
-                lastKnownDimmableBrightness[key] = (brightness.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
+                lastKnownDimmableBrightness[key] = brightnessRaw.coerceIn(1, 255)
             }
         }
     }
@@ -3098,13 +3116,17 @@ class OneControlBleService : Service() {
             if (brightness <= 0) {
                 sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
                 publishMqtt("command/dimmable/$deviceId/brightness", "0")
+                publishMqtt("device/${tableId}/${deviceId}/state", "OFF", retain = true)
+                publishMqtt("device/${tableId}/${deviceId}/brightness", "0", retain = true)
+                pendingDimmable.remove(key)
                 return
             }
 
-            // HA now uses brightness_scale=255; accept 0-255 and pass through
+            // HA uses brightness_scale=255; accept 0-255 and pass through
             val targetBrightnessByte = brightness.coerceIn(1, 255)
             // Track last requested non-zero so plain "ON" can restore it
             lastKnownDimmableBrightness[key] = targetBrightnessByte
+            pendingDimmable[key] = targetBrightnessByte to System.currentTimeMillis()
 
             val settingsCmdId = getNextCommandId()
             sendDimmableCommand(
@@ -3116,6 +3138,9 @@ class OneControlBleService : Service() {
                 settingsCmdId
             )
 
+            // Optimistic publish to keep HA from snapping back; confirmed by status later
+            publishMqtt("device/${tableId}/${deviceId}/state", "ON", retain = true)
+            publishMqtt("device/${tableId}/${deviceId}/brightness", targetBrightnessByte.toString(), retain = true)
             publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessByte.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
