@@ -3066,31 +3066,54 @@ class OneControlBleService : Service() {
         }
 
         try {
-            val commandId = getNextCommandId()
             val tableId = if (deviceTableId == 0x00.toByte()) DEFAULT_DEVICE_TABLE_ID else deviceTableId
-            val commandBytes = MyRvLinkCommandEncoder.encodeActionDimmable(
-                commandId = commandId,
-                deviceTableId = tableId,
-                deviceId = deviceId,
-                command = if (brightness <= 0) MyRvLinkCommandEncoder.DimmableLightCommand.Off else MyRvLinkCommandEncoder.DimmableLightCommand.On,
-                brightness = brightness.coerceIn(0, 100)
-            )
+            if (brightness <= 0) {
+                sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
+                publishMqtt("command/dimmable/$deviceId/brightness", "0")
+                return
+            }
 
-            // Use the same framing that worked in the previous debug flow: COBS + CRC with start frame.
-            val encoded = CobsDecoder.encode(commandBytes, prependStartFrame = true, useCrc = true)
-            writeChar.value = encoded
-            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT  // match HCI capture
+            // Turn on with minimal "on" value, then send Settings with scaled brightness to lock the level.
+            val onCmdId = getNextCommandId()
+            sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.On, 1, onCmdId)
 
-            val writeResult = bluetoothGatt?.writeCharacteristic(writeChar)
-            Log.i(TAG, "📤 Dimmable control: DeviceId=$deviceId, Brightness=$brightness%, CommandId=0x${commandId.toString(16)}, writeResult=$writeResult")
-            broadcastLog("📤 Light $deviceId: $brightness%")
+            val scaledBrightness = (brightness.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
+            val settingsCmdId = getNextCommandId()
+            sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Settings, scaledBrightness, settingsCmdId)
 
-            // Publish to MQTT
             publishMqtt("command/dimmable/$deviceId/brightness", brightness.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
             broadcastLog("❌ Dimmable command failed: ${e.message}")
         }
+    }
+
+    private fun sendDimmableCommand(
+        writeChar: BluetoothGattCharacteristic,
+        tableId: Byte,
+        deviceId: Byte,
+        command: MyRvLinkCommandEncoder.DimmableLightCommand,
+        brightness: Int,
+        commandId: UShort = getNextCommandId()
+    ) {
+        val commandBytes = MyRvLinkCommandEncoder.encodeActionDimmable(
+            commandId = commandId,
+            deviceTableId = tableId,
+            deviceId = deviceId,
+            command = command,
+            brightness = brightness
+        )
+
+        val encoded = CobsDecoder.encode(commandBytes, prependStartFrame = true, useCrc = true)
+        writeChar.value = encoded
+        writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+
+        val writeResult = bluetoothGatt?.writeCharacteristic(writeChar)
+        Log.i(
+            TAG,
+            "📤 Dimmable cmd: cmd=${command.name}, DeviceId=$deviceId, Brightness=$brightness, CommandId=0x${commandId.toString(16)}, writeResult=$writeResult"
+        )
+        broadcastLog("📤 Light $deviceId (${command.name}): $brightness")
     }
     
     /**
