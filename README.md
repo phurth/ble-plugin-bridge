@@ -2,6 +2,11 @@
 
 Android foreground service that connects to a Lippert OneControl BLE gateway, authenticates/unlocks it, and bridges device states and commands over MQTT for Home Assistant.
 
+## Initial setup/onboarding
+- Onboarding can be rough. The app may crash while requesting permissions. Accept the permissions request and it should launch cleanly.
+- Your OneControl unit must be in pairing mode (if yours is already paired with the Android device, it should work without re-pairing needed), then the app will pop up a pairing request.
+- After pairing, the app should connect to the OneControl unit and data should (in theory) begiin flowing to MQTT.
+
 ## What it does
 - Maintains a stable BLE connection to the OneControl gateway (scan/reconnect, bonding, auth/unlock).
 - Subscribes to gateway notifications, decodes MyRvLink events, and tracks device states.
