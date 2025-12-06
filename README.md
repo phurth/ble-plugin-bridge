@@ -30,6 +30,13 @@ Android foreground service that connects to a Lippert OneControl BLE gateway, au
 3. Build & deploy to device; service runs in foreground.
 4. Watch logcat tag `OneControlBleService` for connection and command flow.
 
+## System requirements
+- Android device with BLE and internet connectivity.
+- Minimum Android version: API 26 (Android 8.0) per `minSdk` in `app/build.gradle.kts`.
+- Target/compile SDK: 34.
+- Foreground service permissions/notifications enabled.
+- Stable MQTT broker reachable from the device.
+
 ## Known/pending
 - Covers: discovery published; command handling present but may need real-world validation.
 - Tank sensors: retained placeholders; revisit parsing when live data available.
