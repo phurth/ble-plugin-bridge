@@ -137,6 +137,7 @@ class OneControlBleService : Service() {
     private var notificationSubscriptionsPending = 0  // Track pending descriptor writes
     private var allNotificationsSubscribed = false  // Flag when all subscriptions complete
     private var lastStatusSnapshot = StatusSnapshot()
+    private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId"
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -2726,6 +2727,9 @@ class OneControlBleService : Service() {
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/state", if (isOn) "ON" else "OFF", retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightness.toString(), retain = true)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/type", "dimmable_light")
+            if (brightness > 0) {
+                lastKnownDimmableBrightness[key] = brightness.coerceIn(1, 100)
+            }
         }
     }
     
@@ -3067,24 +3071,29 @@ class OneControlBleService : Service() {
 
         try {
             val tableId = if (deviceTableId == 0x00.toByte()) DEFAULT_DEVICE_TABLE_ID else deviceTableId
+            val key = "${tableId}:${deviceId}"
+
             if (brightness <= 0) {
                 sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
                 publishMqtt("command/dimmable/$deviceId/brightness", "0")
                 return
             }
 
+            val targetBrightnessPct = brightness.coerceIn(1, 100)
+            // Track last requested non-zero so plain "ON" can restore it
+            lastKnownDimmableBrightness[key] = targetBrightnessPct
+
             // Turn on with minimal "on" value, then send Settings with scaled brightness to lock the level.
             val onCmdId = getNextCommandId()
             sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.On, 1, onCmdId)
 
-            val scaledBrightness = (brightness.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
+            val scaledBrightness = (targetBrightnessPct * 255 / 100).coerceIn(1, 255)
             val settingsCmdId = getNextCommandId()
-            // small delay to let the gateway accept ON before Settings brightness
             handler.postDelayed({
                 sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Settings, scaledBrightness, settingsCmdId)
-            }, 120)
+            }, 200)
 
-            publishMqtt("command/dimmable/$deviceId/brightness", brightness.toString())
+            publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessPct.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
             broadcastLog("❌ Dimmable command failed: ${e.message}")
