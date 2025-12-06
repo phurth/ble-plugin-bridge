@@ -3079,7 +3079,10 @@ class OneControlBleService : Service() {
 
             val scaledBrightness = (brightness.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
             val settingsCmdId = getNextCommandId()
-            sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Settings, scaledBrightness, settingsCmdId)
+            // small delay to let the gateway accept ON before Settings brightness
+            handler.postDelayed({
+                sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Settings, scaledBrightness, settingsCmdId)
+            }, 120)
 
             publishMqtt("command/dimmable/$deviceId/brightness", brightness.toString())
         } catch (e: Exception) {
