@@ -138,7 +138,6 @@ class OneControlBleService : Service() {
     private var allNotificationsSubscribed = false  // Flag when all subscriptions complete
     private var lastStatusSnapshot = StatusSnapshot()
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()  // key: "tableId:deviceId", value: 1-255
-    private val pendingDimmable = mutableMapOf<String, Pair<Int, Long>>()  // brightness (1-255) + timestamp ms
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -2740,16 +2739,6 @@ class OneControlBleService : Service() {
             val key = "${status.deviceTableId}:${status.deviceId}"
             val brightness = status.brightness ?: 0
             val isOn = status.isOn ?: (brightness > 0)
-
-            // Optimistic guard: if we very recently sent a >0 brightness, and the gateway reports 0,
-            // ignore this status to avoid HA slider snap-back. Window: 1.5s.
-            val now = System.currentTimeMillis()
-            val pending = pendingDimmable[key]
-            if (pending != null && pending.first > 0 && brightness == 0 && (now - pending.second) <= 1500) {
-                Log.d(TAG, "Ignoring transient dimmer 0% for $key within optimistic window; pending=${pending.first}")
-                continue
-            }
-
             deviceStatuses[key] = DeviceStatus.DimmableLight(status.deviceTableId, status.deviceId, isOn, brightness)
 
             // Convert reported percent (0-100) to raw 0-255 to match HA brightness_scale=255
@@ -3134,7 +3123,6 @@ class OneControlBleService : Service() {
 
             publishMqtt("device/${tableId}/${deviceId}/state", "ON", retain = true)
             publishMqtt("device/${tableId}/${deviceId}/brightness", targetBrightnessByte.toString(), retain = true)
-            pendingDimmable[key] = targetBrightnessByte to System.currentTimeMillis()
             publishMqtt("command/dimmable/$deviceId/brightness", targetBrightnessByte.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send dimmable command: ${e.message}", e)
