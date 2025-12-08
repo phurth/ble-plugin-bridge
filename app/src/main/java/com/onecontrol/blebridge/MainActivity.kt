@@ -19,6 +19,8 @@ import android.provider.Settings
 import android.content.SharedPreferences
 import android.widget.Button
 import android.widget.CompoundButton
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -47,6 +49,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchBatteryOpt: SwitchCompat
     private lateinit var switchStartOnBoot: SwitchCompat
     private lateinit var switchWatchdog: SwitchCompat
+    private lateinit var inputGatewayMac: EditText
+    private lateinit var inputGatewayPin: EditText
+    private lateinit var inputMqttHost: EditText
+    private lateinit var inputMqttPort: EditText
+    private lateinit var inputMqttTopicPrefix: EditText
+    private lateinit var inputMqttUser: EditText
+    private lateinit var inputMqttPassword: EditText
+    private lateinit var saveConfigButton: Button
+    private lateinit var configFields: LinearLayout
+    private var configExpanded = false
     
     private val PERMISSIONS_REQUEST_CODE = 100
     
@@ -60,6 +72,7 @@ class MainActivity : AppCompatActivity() {
             bleService = serviceBinder?.getService()
             log("✅ Service connected - device control available")
             updateDeviceStatuses()
+            loadConfigFieldsFromService()
         }
         
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -115,6 +128,15 @@ class MainActivity : AppCompatActivity() {
         switchBatteryOpt = findViewById(R.id.switchBatteryOpt)
         switchStartOnBoot = findViewById(R.id.switchStartOnBoot)
         switchWatchdog = findViewById(R.id.switchWatchdog)
+        inputGatewayMac = findViewById(R.id.inputGatewayMac)
+        inputGatewayPin = findViewById(R.id.inputGatewayPin)
+        inputMqttHost = findViewById(R.id.inputMqttHost)
+        inputMqttPort = findViewById(R.id.inputMqttPort)
+        inputMqttTopicPrefix = findViewById(R.id.inputMqttTopicPrefix)
+        inputMqttUser = findViewById(R.id.inputMqttUser)
+        inputMqttPassword = findViewById(R.id.inputMqttPassword)
+        saveConfigButton = findViewById(R.id.saveConfigButton)
+        configFields = findViewById(R.id.configFields)
         
         // Register broadcast receiver for service logs and state
         val filter = IntentFilter().apply {
@@ -157,6 +179,9 @@ class MainActivity : AppCompatActivity() {
         updateChecklist(null)
         refreshSettingsToggles()
         attachToggleHandlers()
+        attachConfigCollapseToggle()
+        loadConfigFieldsFromPrefs()
+        attachConfigSaveHandler()
         
         // Bind to service to access control methods (defer to avoid blocking onCreate)
         handler.postDelayed({
@@ -171,6 +196,7 @@ class MainActivity : AppCompatActivity() {
         updateChecklist(null)
         updateDeviceStatuses()
         refreshSettingsToggles()
+        loadConfigFieldsFromService()
     }
     
     override fun onPause() {
@@ -205,6 +231,44 @@ class MainActivity : AppCompatActivity() {
         switchStartOnBoot.isChecked = prefs.getBoolean(PREF_START_ON_BOOT, false)
         switchWatchdog.isChecked = prefs.getBoolean(PREF_WATCHDOG, false)
     }
+
+    private fun loadConfigFieldsFromService() {
+        val cfg = bleService?.getConfig()
+        if (cfg != null) {
+            inputGatewayMac.setText(cfg.gatewayMac)
+            inputGatewayPin.setText(cfg.gatewayPin)
+            inputMqttUser.setText(cfg.mqttUsername)
+            inputMqttPassword.setText(cfg.mqttPassword)
+            inputMqttTopicPrefix.setText(cfg.mqttTopicPrefix)
+            // Split broker into host/port if possible
+            parseBroker(cfg.mqttBroker)?.let { (host, port) ->
+                inputMqttHost.setText(host)
+                inputMqttPort.setText(port.toString())
+            }
+        } else {
+            loadConfigFieldsFromPrefs()
+        }
+    }
+
+    private fun loadConfigFieldsFromPrefs() {
+        inputGatewayMac.setText(prefs.getString("cfg_gateway_mac", OneControlBleService.DEFAULT_GATEWAY_MAC))
+        inputGatewayPin.setText(prefs.getString("cfg_gateway_pin", OneControlBleService.DEFAULT_GATEWAY_PIN))
+        inputMqttUser.setText(prefs.getString("cfg_mqtt_username", OneControlBleService.DEFAULT_MQTT_USERNAME))
+        inputMqttPassword.setText(prefs.getString("cfg_mqtt_password", OneControlBleService.DEFAULT_MQTT_PASSWORD))
+        inputMqttTopicPrefix.setText(prefs.getString("cfg_mqtt_topic_prefix", OneControlBleService.DEFAULT_MQTT_TOPIC_PREFIX))
+        val broker = prefs.getString("cfg_mqtt_broker", OneControlBleService.DEFAULT_MQTT_BROKER) ?: OneControlBleService.DEFAULT_MQTT_BROKER
+        val parsed = parseBroker(broker)
+        inputMqttHost.setText(parsed?.first ?: "10.115.19.131")
+        inputMqttPort.setText(parsed?.second?.toString() ?: "1883")
+    }
+
+    private fun attachConfigSaveHandler() {
+        saveConfigButton.setOnClickListener {
+            val newConfig = buildConfigFromInputs() ?: return@setOnClickListener
+            bleService?.updateConfig(newConfig)
+            Toast.makeText(this, "Settings saved and applied", Toast.LENGTH_SHORT).show()
+        }
+    }
     
     private fun attachToggleHandlers() {
         switchBatteryOpt.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
@@ -235,6 +299,63 @@ class MainActivity : AppCompatActivity() {
         switchWatchdog.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
             prefs.edit().putBoolean(PREF_WATCHDOG, isChecked).apply()
             bleService?.setWatchdogEnabled(isChecked)
+        }
+    }
+
+    private fun attachConfigCollapseToggle() {
+        val title = findViewById<TextView>(R.id.configTitle)
+        configExpanded = false
+        configFields.visibility = LinearLayout.GONE
+        title.setOnClickListener {
+            configExpanded = !configExpanded
+            configFields.visibility = if (configExpanded) LinearLayout.VISIBLE else LinearLayout.GONE
+            title.text = if (configExpanded) "Connection settings ▲" else "Connection settings ▼"
+        }
+        title.text = "Connection settings ▼"
+    }
+
+    private fun buildConfigFromInputs(): OneControlBleService.AppConfig? {
+        val mac = inputGatewayMac.text.toString().trim()
+        val pin = inputGatewayPin.text.toString().trim()
+        val host = inputMqttHost.text.toString().trim()
+        val portStr = inputMqttPort.text.toString().trim()
+        val topic = inputMqttTopicPrefix.text.toString().trim().ifEmpty { OneControlBleService.DEFAULT_MQTT_TOPIC_PREFIX }
+        val user = inputMqttUser.text.toString().trim()
+        val pass = inputMqttPassword.text.toString()
+
+        if (mac.isEmpty()) {
+            Toast.makeText(this, "Gateway MAC is required", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        if (host.isEmpty()) {
+            Toast.makeText(this, "MQTT host is required", Toast.LENGTH_SHORT).show()
+            return null
+        }
+        val port = portStr.toIntOrNull() ?: 1883
+        val broker = "tcp://$host:$port"
+        return OneControlBleService.AppConfig(
+            gatewayMac = mac,
+            gatewayPin = pin.ifEmpty { OneControlBleService.DEFAULT_GATEWAY_PIN },
+            gatewayCypher = OneControlBleService.DEFAULT_GATEWAY_CYPHER.toLong(),
+            mqttBroker = broker,
+            mqttClientId = OneControlBleService.DEFAULT_MQTT_CLIENT_ID,
+            mqttTopicPrefix = topic,
+            mqttUsername = user.ifEmpty { OneControlBleService.DEFAULT_MQTT_USERNAME },
+            mqttPassword = pass.ifEmpty { OneControlBleService.DEFAULT_MQTT_PASSWORD }
+        )
+    }
+
+    private fun parseBroker(broker: String): Pair<String, Int>? {
+        return try {
+            val clean = broker.removePrefix("tcp://").removePrefix("mqtt://")
+            val parts = clean.split(":")
+            if (parts.size == 2) {
+                val host = parts[0]
+                val port = parts[1].toIntOrNull() ?: return null
+                host to port
+            } else null
+        } catch (_: Exception) {
+            null
         }
     }
     

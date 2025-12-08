@@ -48,15 +48,15 @@ class OneControlBleService : Service() {
         var isServiceRunning = false
             private set
         
-        // Configuration (should be moved to SharedPreferences or config file)
-        private const val GATEWAY_MAC = "24:DC:C3:ED:1E:0A"  // TODO: Make configurable
-        private const val GATEWAY_PIN = "090336"  // TODO: Make configurable
-        private const val GATEWAY_CYPHER = 0x8100080DL  // TODO: Make configurable
-        private const val MQTT_BROKER = "tcp://10.115.19.131:1883"
-        private const val MQTT_CLIENT_ID = "onecontrol_ble_bridge"
-        private const val MQTT_TOPIC_PREFIX = "onecontrol/ble"
-        private const val MQTT_USERNAME = "mqtt"
-        private const val MQTT_PASSWORD = "mqtt"
+        // Default configuration (can be overridden via preferences)
+        const val DEFAULT_GATEWAY_MAC = "24:DC:C3:ED:1E:0A"
+        const val DEFAULT_GATEWAY_PIN = "090336"
+        const val DEFAULT_GATEWAY_CYPHER = 0x8100080DL
+        const val DEFAULT_MQTT_BROKER = "tcp://10.115.19.131:1883"
+        const val DEFAULT_MQTT_CLIENT_ID = "onecontrol_ble_bridge"
+        const val DEFAULT_MQTT_TOPIC_PREFIX = "onecontrol/ble"
+        const val DEFAULT_MQTT_USERNAME = "mqtt"
+        const val DEFAULT_MQTT_PASSWORD = "mqtt"
 
         // Preferences
         private const val PREFS_NAME = "oc_settings"
@@ -70,9 +70,18 @@ class OneControlBleService : Service() {
     private var watchdogEnabled = false
     private var watchdogRunnable: Runnable? = null
     private val WATCHDOG_INTERVAL_MS = 60000L
+    private var gatewayMac: String = DEFAULT_GATEWAY_MAC
+    private var gatewayPin: String = DEFAULT_GATEWAY_PIN
+    private var gatewayCypher: Long = DEFAULT_GATEWAY_CYPHER
+    private var mqttBroker: String = DEFAULT_MQTT_BROKER
+    private var mqttClientId: String = DEFAULT_MQTT_CLIENT_ID
+    private var mqttTopicPrefix: String = DEFAULT_MQTT_TOPIC_PREFIX
+    private var mqttUsername: String = DEFAULT_MQTT_USERNAME
+    private var mqttPassword: String = DEFAULT_MQTT_PASSWORD
     
     inner class LocalBinder : Binder() {
         fun getService(): OneControlBleService = this@OneControlBleService
+        fun getConfig(): AppConfig = this@OneControlBleService.getConfig()
         
         /**
          * Start scanning/connecting to gateway
@@ -114,6 +123,17 @@ class OneControlBleService : Service() {
     fun setWatchdogEnabled(enabled: Boolean) {
         updateWatchdogEnabled(enabled)
     }
+
+    fun getConfig(): AppConfig = AppConfig(
+        gatewayMac = gatewayMac,
+        gatewayPin = gatewayPin,
+        gatewayCypher = gatewayCypher,
+        mqttBroker = mqttBroker,
+        mqttClientId = mqttClientId,
+        mqttTopicPrefix = mqttTopicPrefix,
+        mqttUsername = mqttUsername,
+        mqttPassword = mqttPassword
+    )
     
     // BLE components
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -166,6 +186,17 @@ class OneControlBleService : Service() {
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
+
+    data class AppConfig(
+        val gatewayMac: String,
+        val gatewayPin: String,
+        val gatewayCypher: Long,
+        val mqttBroker: String,
+        val mqttClientId: String,
+        val mqttTopicPrefix: String,
+        val mqttUsername: String,
+        val mqttPassword: String
+    )
     
     // Device status tracking
     private val deviceStatuses = mutableMapOf<String, DeviceStatus>()  // Key: "deviceTableId:deviceId"
@@ -194,6 +225,50 @@ class OneControlBleService : Service() {
         AUTHENTICATING,
         READY
     }
+
+    private fun loadConfigFromPrefs() {
+        gatewayMac = prefs.getString("cfg_gateway_mac", DEFAULT_GATEWAY_MAC) ?: DEFAULT_GATEWAY_MAC
+        gatewayPin = prefs.getString("cfg_gateway_pin", DEFAULT_GATEWAY_PIN) ?: DEFAULT_GATEWAY_PIN
+        gatewayCypher = prefs.getLong("cfg_gateway_cypher", DEFAULT_GATEWAY_CYPHER.toLong())
+        mqttBroker = prefs.getString("cfg_mqtt_broker", DEFAULT_MQTT_BROKER) ?: DEFAULT_MQTT_BROKER
+        mqttClientId = prefs.getString("cfg_mqtt_client_id", DEFAULT_MQTT_CLIENT_ID) ?: DEFAULT_MQTT_CLIENT_ID
+        mqttTopicPrefix = prefs.getString("cfg_mqtt_topic_prefix", DEFAULT_MQTT_TOPIC_PREFIX) ?: DEFAULT_MQTT_TOPIC_PREFIX
+        mqttUsername = prefs.getString("cfg_mqtt_username", DEFAULT_MQTT_USERNAME) ?: DEFAULT_MQTT_USERNAME
+        mqttPassword = prefs.getString("cfg_mqtt_password", DEFAULT_MQTT_PASSWORD) ?: DEFAULT_MQTT_PASSWORD
+        Log.i(TAG, "Config loaded: mac=$gatewayMac broker=$mqttBroker topic=$mqttTopicPrefix user=$mqttUsername")
+    }
+
+    fun updateConfig(newConfig: AppConfig) {
+        gatewayMac = newConfig.gatewayMac
+        gatewayPin = newConfig.gatewayPin
+        gatewayCypher = newConfig.gatewayCypher
+        mqttBroker = newConfig.mqttBroker
+        mqttClientId = newConfig.mqttClientId
+        mqttTopicPrefix = newConfig.mqttTopicPrefix
+        mqttUsername = newConfig.mqttUsername
+        mqttPassword = newConfig.mqttPassword
+
+        prefs.edit()
+            .putString("cfg_gateway_mac", gatewayMac)
+            .putString("cfg_gateway_pin", gatewayPin)
+            .putLong("cfg_gateway_cypher", gatewayCypher)
+            .putString("cfg_mqtt_broker", mqttBroker)
+            .putString("cfg_mqtt_client_id", mqttClientId)
+            .putString("cfg_mqtt_topic_prefix", mqttTopicPrefix)
+            .putString("cfg_mqtt_username", mqttUsername)
+            .putString("cfg_mqtt_password", mqttPassword)
+            .apply()
+
+        // Restart MQTT with new settings
+        safeDisconnectMqtt()
+        connectMqtt()
+
+        // If MAC changed, reconnect BLE
+        handler.post {
+            disconnect()
+            reconnectToBondedDevice()
+        }
+    }
     
     override fun onBind(intent: Intent): IBinder = binder
     
@@ -207,7 +282,7 @@ class OneControlBleService : Service() {
                 val previousBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
                 
                 device?.let {
-                    if (it.address.equals(GATEWAY_MAC, ignoreCase = true) || it.address == currentDevice?.address) {
+                    if (it.address.equals(gatewayMac, ignoreCase = true) || it.address == currentDevice?.address) {
                         Log.i(TAG, "🔗 Bond state changed for ${it.address}: $previousBondState -> $bondState")
                         when (bondState) {
                             BluetoothDevice.BOND_BONDED -> {
@@ -250,6 +325,7 @@ class OneControlBleService : Service() {
         super.onCreate()
         Log.d(TAG, "Service onCreate")
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        loadConfigFromPrefs()
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Initializing..."))
         isServiceRunning = true
@@ -428,27 +504,27 @@ class OneControlBleService : Service() {
         publishHaDiagnosticBinarySensor(
             objectId = "service_running",
             name = "Service Running",
-            stateTopic = "$MQTT_TOPIC_PREFIX/diag/service_running"
+            stateTopic = "$mqttTopicPrefix/diag/service_running"
         )
         publishHaDiagnosticBinarySensor(
             objectId = "paired",
             name = "Paired",
-            stateTopic = "$MQTT_TOPIC_PREFIX/diag/paired"
+            stateTopic = "$mqttTopicPrefix/diag/paired"
         )
         publishHaDiagnosticBinarySensor(
             objectId = "ble_connected",
             name = "BLE Connected",
-            stateTopic = "$MQTT_TOPIC_PREFIX/diag/ble_connected"
+            stateTopic = "$mqttTopicPrefix/diag/ble_connected"
         )
         publishHaDiagnosticBinarySensor(
             objectId = "data_healthy",
             name = "Data Healthy",
-            stateTopic = "$MQTT_TOPIC_PREFIX/diag/data_healthy"
+            stateTopic = "$mqttTopicPrefix/diag/data_healthy"
         )
         publishHaDiagnosticBinarySensor(
             objectId = "mqtt_connected",
             name = "MQTT Connected",
-            stateTopic = "$MQTT_TOPIC_PREFIX/diag/mqtt_connected"
+            stateTopic = "$mqttTopicPrefix/diag/mqtt_connected"
         )
     }
 
@@ -500,7 +576,7 @@ class OneControlBleService : Service() {
             return
         }
         
-        Log.i(TAG, "🔍 Starting BLE scan for gateway: $GATEWAY_MAC")
+        Log.i(TAG, "🔍 Starting BLE scan for gateway: $gatewayMac")
         updateNotification("Scanning for gateway...")
         connectionState = ConnectionState.SCANNING
         
@@ -519,7 +595,7 @@ class OneControlBleService : Service() {
                 Log.d(TAG, "📡 BLE advertisement: $deviceName ($deviceAddress), RSSI: ${result.rssi}")
                 
                 // Check if this is our gateway by MAC address
-                val isTargetMac = deviceAddress.equals(GATEWAY_MAC, ignoreCase = true)
+                val isTargetMac = deviceAddress.equals(gatewayMac, ignoreCase = true)
                 
                 // Check for discovery service UUID in service UUIDs
                 val serviceUuids = scanRecord?.serviceUuids ?: emptyList()
@@ -587,7 +663,7 @@ class OneControlBleService : Service() {
         // Get bonded devices and find our gateway
         val bondedDevices = bluetoothAdapter!!.bondedDevices
         val gatewayDevice = bondedDevices.find { 
-            it.address.equals(GATEWAY_MAC, ignoreCase = true) 
+            it.address.equals(gatewayMac, ignoreCase = true) 
         }
         
         if (gatewayDevice != null) {
@@ -1149,7 +1225,7 @@ class OneControlBleService : Service() {
         
         // Gateway is locked - write PIN
         Log.d(TAG, "Gateway is locked, writing PIN...")
-        val pinBytes = GATEWAY_PIN.toByteArray(Charsets.UTF_8)
+        val pinBytes = gatewayPin.toByteArray(Charsets.UTF_8)
         unlockChar!!.value = pinBytes
         unlockChar!!.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         
@@ -1270,7 +1346,7 @@ class OneControlBleService : Service() {
         Log.d(TAG, "Read seed: 0x${seed.toString(16)}")
         
         // Encrypt seed with TEA
-        val encrypted = TeaEncryption.encrypt(GATEWAY_CYPHER.toLong(), seed)
+        val encrypted = TeaEncryption.encrypt(gatewayCypher, seed)
         Log.d(TAG, "Encrypted key: 0x${encrypted.toString(16)}")
         
         // Write encrypted key back
@@ -2341,7 +2417,7 @@ class OneControlBleService : Service() {
     private fun initializeMqtt() {
         Log.d(TAG, "Initializing MQTT client...")
         try {
-            mqttClient = MqttClient(MQTT_BROKER, MQTT_CLIENT_ID, null)
+            mqttClient = MqttClient(mqttBroker, mqttClientId, null)
             mqttClient?.setCallback(object : MqttCallback {
                 override fun connectionLost(cause: Throwable?) {
                     Log.w(TAG, "MQTT connection lost: ${cause?.message}")
@@ -2385,11 +2461,11 @@ class OneControlBleService : Service() {
                 isCleanSession = true
                 connectionTimeout = 30
                 keepAliveInterval = 60
-                userName = MQTT_USERNAME
-                password = MQTT_PASSWORD.toCharArray()
+                userName = mqttUsername
+                password = mqttPassword.toCharArray()
             }
             
-            Log.d(TAG, "Connecting to MQTT broker: $MQTT_BROKER")
+            Log.d(TAG, "Connecting to MQTT broker: $mqttBroker")
             // Use blocking connect in background thread
             Thread {
                 try {
@@ -2432,7 +2508,7 @@ class OneControlBleService : Service() {
     private fun handleMqttCommand(topic: String, payload: String) {
         Log.i(TAG, "MQTT cmd inbound: $topic = $payload")
         // Legacy brightness command path: onecontrol/ble/device/<table>/<device>/brightness/set
-        if (topic.startsWith("$MQTT_TOPIC_PREFIX/device/") && topic.endsWith("/brightness/set")) {
+        if (topic.startsWith("$mqttTopicPrefix/device/") && topic.endsWith("/brightness/set")) {
             val parts = topic.split("/")
             // onecontrol, ble, device, <tableId>, <deviceId>, brightness, set
             if (parts.size >= 7) {
@@ -2452,9 +2528,9 @@ class OneControlBleService : Service() {
         }
 
         // Expect topics under onecontrol/ble/command/... (or legacy onecontrol-ble/command/...)
-        if (!topic.startsWith("$MQTT_TOPIC_PREFIX/command/") && !topic.startsWith("onecontrol-ble/command/")) return
-        val prefixStripped = if (topic.startsWith("$MQTT_TOPIC_PREFIX/command/")) {
-            topic.removePrefix("$MQTT_TOPIC_PREFIX/command/")
+        if (!topic.startsWith("$mqttTopicPrefix/command/") && !topic.startsWith("onecontrol-ble/command/")) return
+        val prefixStripped = if (topic.startsWith("$mqttTopicPrefix/command/")) {
+            topic.removePrefix("$mqttTopicPrefix/command/")
         } else {
             topic.removePrefix("onecontrol-ble/command/")
         }
@@ -2498,10 +2574,10 @@ class OneControlBleService : Service() {
 
     private fun subscribeMqttCommands() {
         try {
-            mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/command/#", 0)
+            mqttClient?.subscribe("$mqttTopicPrefix/command/#", 0)
             mqttClient?.subscribe("onecontrol-ble/command/#", 0) // legacy prefix fallback
-            mqttClient?.subscribe("$MQTT_TOPIC_PREFIX/device/+/+/brightness/set", 0) // legacy HA brightness topic
-            Log.i(TAG, "📡 Subscribed to MQTT commands at $MQTT_TOPIC_PREFIX/command/#, onecontrol-ble/command/#, and legacy brightness")
+            mqttClient?.subscribe("$mqttTopicPrefix/device/+/+/brightness/set", 0) // legacy HA brightness topic
+            Log.i(TAG, "📡 Subscribed to MQTT commands at $mqttTopicPrefix/command/#, onecontrol-ble/command/#, and legacy brightness")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to subscribe to MQTT commands: ${e.message}")
         }
@@ -2559,7 +2635,7 @@ class OneControlBleService : Service() {
         if (!mqttConnected || mqttClient == null) return
         
         try {
-            val fullTopic = "$MQTT_TOPIC_PREFIX/$topic"
+            val fullTopic = "$mqttTopicPrefix/$topic"
             val message = MqttMessage(payload.toByteArray())
             message.qos = 0
             message.isRetained = retain
@@ -2612,14 +2688,18 @@ class OneControlBleService : Service() {
         val baseKey = "0x${"%02x".format(tableId.toUByte().toInt())}:${"%02x".format(deviceId.toUByte().toInt())}"
         val objectId = "light_$keyHex"
         val deviceName = "light_$keyHex"
-        val stateTopic = "$MQTT_TOPIC_PREFIX/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
-        val brightnessStateTopic = "$MQTT_TOPIC_PREFIX/device/${tableId.toUByte()}/${deviceId.toUByte()}/brightness"
-        val commandTopic = "$MQTT_TOPIC_PREFIX/command/dimmable/${tableId.toUByte()}/${deviceId.toUByte()}"
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
+        val brightnessStateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/brightness"
+        val commandTopic = "$mqttTopicPrefix/command/dimmable/${tableId.toUByte()}/${deviceId.toUByte()}"
 
         // Use MQTT light with brightness if supported, else switch
         if (supportsBrightness) {
             val key = "$objectId:light"
             if (haDiscoveryPublished.add(key)) {
+                // Clear legacy brightness sensor discovery that used unsupported device_class/units
+                val legacyConfigTopic = "homeassistant/sensor/onecontrol_${tableId.toUByte().toString(16)}_${deviceId.toUByte().toString(16)}_brightness/config"
+                publishMqttRaw(legacyConfigTopic, "", retain = true)
+
                 val payload = """
                     {
                       "name": "$deviceName",
@@ -2655,8 +2735,8 @@ class OneControlBleService : Service() {
         val baseKey = "0x${"%02x".format(tableId.toUByte().toInt())}:${"%02x".format(deviceId.toUByte().toInt())}"
         val objectId = "switch_$keyHex"
         val deviceName = "switch_$keyHex"
-        val stateTopic = "$MQTT_TOPIC_PREFIX/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
-        val commandTopic = "$MQTT_TOPIC_PREFIX/command/switch/${tableId.toUByte()}/${deviceId.toUByte()}"
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
+        val commandTopic = "$mqttTopicPrefix/command/switch/${tableId.toUByte()}/${deviceId.toUByte()}"
         val key = "$objectId:switch"
         if (haDiscoveryPublished.add(key)) {
             val payload = """
@@ -2684,8 +2764,8 @@ class OneControlBleService : Service() {
         val baseKey = "0x${"%02x".format(tableId.toUByte().toInt())}:${"%02x".format(deviceId.toUByte().toInt())}"
         val objectId = "cover_$keyHex"
         val deviceName = "cover_$keyHex"
-        val stateTopic = "$MQTT_TOPIC_PREFIX/device/${tableId.toUByte()}/${deviceId.toUByte()}/position"
-        val commandTopic = "$MQTT_TOPIC_PREFIX/command/cover/${tableId.toUByte()}/${deviceId.toUByte()}"
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
+        val commandTopic = "$mqttTopicPrefix/command/cover/${tableId.toUByte()}/${deviceId.toUByte()}"
         val key = "$objectId:cover"
         if (haDiscoveryPublished.add(key)) {
             val payload = """
@@ -2694,9 +2774,13 @@ class OneControlBleService : Service() {
                   "unique_id": "${objectId}_cover",
                   "state_topic": "$stateTopic",
                   "command_topic": "$commandTopic",
-                  "payload_open": "OPEN",
-                  "payload_close": "CLOSE",
-                  "payload_stop": "STOP",
+                  "payload_open": "open",
+                  "payload_close": "close",
+                  "payload_stop": "stop",
+                  "state_open": "open",
+                  "state_closed": "closed",
+                  "state_opening": "opening",
+                  "state_closing": "closing",
                   "device_class": "awning",
                   "optimistic": true,
                   "device": {
@@ -2708,7 +2792,9 @@ class OneControlBleService : Service() {
                 }
             """.trimIndent()
             publishMqttRaw("homeassistant/cover/$objectId/config", payload, retain = true)
-            publishMqtt("device/${tableId}/${deviceId}/position", "unknown", retain = true)
+            // Clear any old retained position topic (legacy) and publish supported state
+            publishMqtt("device/${tableId}/${deviceId}/position", "", retain = true)
+            publishMqtt("device/${tableId}/${deviceId}/state", "closed", retain = true)
         }
     }
 
@@ -2719,7 +2805,7 @@ class OneControlBleService : Service() {
                 {
                   "name": "System Voltage",
                   "unique_id": "system_voltage",
-                  "state_topic": "$MQTT_TOPIC_PREFIX/system/voltage",
+                  "state_topic": "$mqttTopicPrefix/system/voltage",
                   "unit_of_measurement": "V",
                   "device_class": "voltage",
                   "state_class": "measurement",
@@ -2885,8 +2971,8 @@ class OneControlBleService : Service() {
 
         publishHaDiscoveryCover(tableId, deviceId)
         publishMqtt("device/${tableId}/${deviceId}/type", "cover")
-        // Position/state parsing TBD; publish unknown placeholder
-        publishMqtt("device/${tableId}/${deviceId}/position", "unknown", retain = true)
+        // Position/state parsing TBD; publish a supported default state
+        publishMqtt("device/${tableId}/${deviceId}/state", "closed", retain = true)
         val key = "${tableId}:${deviceId}"
         deviceStatuses[key] = DeviceStatus.Cover(tableId, deviceId)
     }
