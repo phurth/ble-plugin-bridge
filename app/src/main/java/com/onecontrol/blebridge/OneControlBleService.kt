@@ -25,7 +25,10 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import org.eclipse.paho.client.mqttv3.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
 import java.util.*
+import java.util.Locale
 
 /**
  * Foreground service that manages BLE connection to OneControl gateway
@@ -67,6 +70,9 @@ class OneControlBleService : Service() {
         private const val PREF_START_ON_BOOT = "pref_start_on_boot"
         private const val PREF_DISABLE_BATT_OPT = "pref_disable_batt_opt"
         private const val PREF_WATCHDOG = "pref_watchdog"
+        private const val MAX_DEBUG_LOG_LINES = 2000
+        private const val TRACE_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
+        private const val TRACE_MAX_DURATION_MS = 10 * 60 * 1000L  // 10 minutes
     }
     
     private val handler = Handler(Looper.getMainLooper())
@@ -82,6 +88,13 @@ class OneControlBleService : Service() {
     private var mqttTopicPrefix: String = DEFAULT_MQTT_TOPIC_PREFIX
     private var mqttUsername: String = DEFAULT_MQTT_USERNAME
     private var mqttPassword: String = DEFAULT_MQTT_PASSWORD
+    private val debugLogBuffer: ArrayDeque<String> = ArrayDeque()
+    private var traceEnabled = false
+    private var traceFile: File? = null
+    private var traceWriter: java.io.BufferedWriter? = null
+    private var traceBytes: Long = 0
+    private var traceStartedAt: Long = 0
+    private var traceTimeout: Runnable? = null
     
     inner class LocalBinder : Binder() {
         fun getService(): OneControlBleService = this@OneControlBleService
@@ -120,6 +133,23 @@ class OneControlBleService : Service() {
                 updateWatchdogEnabled(enabled)
             }
         }
+
+        fun stopServiceAndDisconnect(): Boolean {
+            handler.post { stopServiceAndDisconnectInternal() }
+            return true
+        }
+
+        fun startBleTrace(): File? {
+            return startTrace()
+        }
+
+        fun stopBleTrace(reason: String = "stopped") : File? {
+            return stopTrace(reason)
+        }
+
+        fun isTraceActive(): Boolean = traceEnabled
+
+        fun exportDebugLog(): File? = createDebugLogFile()
     }
     
     private val binder = LocalBinder()
@@ -138,6 +168,11 @@ class OneControlBleService : Service() {
         mqttUsername = mqttUsername,
         mqttPassword = mqttPassword
     )
+
+    fun isTraceActive(): Boolean = traceEnabled
+    fun startBleTrace(): File? = startTrace()
+    fun stopBleTrace(reason: String = "stopped"): File? = stopTrace(reason)
+    fun exportDebugLog(): File? = createDebugLogFile()
     
     // BLE components
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -420,6 +455,7 @@ class OneControlBleService : Service() {
         stopScanning()
         disconnect()
         disconnectMqtt()
+        stopTrace("service destroy")
         isServiceRunning = false
         broadcastServiceState()
         super.onDestroy()
@@ -461,10 +497,115 @@ class OneControlBleService : Service() {
     }
     
     private fun broadcastLog(message: String) {
+        appendDebugLog(message)
         val intent = Intent(ACTION_LOG).apply {
             putExtra(EXTRA_LOG_MESSAGE, message)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
+    private fun appendDebugLog(message: String) {
+        val ts = System.currentTimeMillis()
+        val formatted = "${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(ts))} - $message"
+        debugLogBuffer.addLast(formatted)
+        while (debugLogBuffer.size > MAX_DEBUG_LOG_LINES) {
+            debugLogBuffer.removeFirst()
+        }
+        logTrace(message) // mirror into trace if enabled
+    }
+
+    private fun logTrace(message: String) {
+        if (!traceEnabled) return
+        try {
+            val writer = traceWriter ?: return
+            val line = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())} $message\n"
+            writer.write(line)
+            writer.flush()
+            traceBytes += line.toByteArray().size
+            if (traceBytes >= TRACE_MAX_BYTES) {
+                stopTrace("size limit reached")
+            }
+        } catch (_: Exception) {
+            stopTrace("trace write error")
+        }
+    }
+
+    private fun startTrace(): File? {
+        try {
+            val dir = File(getExternalFilesDir(null), "traces")
+            if (!dir.exists()) dir.mkdirs()
+            val macSafe = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.replace(":", "").lowercase()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val file = File(dir, "trace_${macSafe}_${ts}.log")
+            traceWriter = file.bufferedWriter()
+            traceFile = file
+            traceBytes = 0
+            traceStartedAt = System.currentTimeMillis()
+            traceEnabled = true
+            traceTimeout?.let { handler.removeCallbacks(it) }
+            traceTimeout = Runnable {
+                stopTrace("time limit reached")
+            }.also { handler.postDelayed(it, TRACE_MAX_DURATION_MS) }
+            logTrace("TRACE START mac=$gatewayMac ts=$ts")
+            return file
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start trace: ${e.message}")
+            stopTrace("error")
+            return null
+        }
+    }
+
+    private fun stopTrace(reason: String = "stopped"): File? {
+        if (!traceEnabled) return traceFile
+        logTrace("TRACE STOP reason=$reason")
+        traceTimeout?.let { handler.removeCallbacks(it) }
+        traceTimeout = null
+        traceEnabled = false
+        try {
+            traceWriter?.flush()
+            traceWriter?.close()
+        } catch (_: Exception) {}
+        traceWriter = null
+        return traceFile
+    }
+
+    private fun createDebugLogFile(): File? {
+        return try {
+            val dir = File(getExternalFilesDir(null), "logs")
+            if (!dir.exists()) dir.mkdirs()
+            val macSafe = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.replace(":", "").lowercase()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val file = File(dir, "debug_${macSafe}_${ts}.txt")
+            file.bufferedWriter().use { out ->
+                out.appendLine("OneControl BLE Bridge debug log")
+                out.appendLine("Timestamp: $ts")
+                out.appendLine("Gateway MAC: $gatewayMac")
+                out.appendLine("MQTT broker: $mqttBroker")
+                out.appendLine("MQTT topic prefix: $mqttTopicPrefix")
+                out.appendLine("Trace active: $traceEnabled")
+                traceFile?.let { out.appendLine("Trace file: ${it.absolutePath}") }
+                out.appendLine("")
+                out.appendLine("Recent events:")
+                debugLogBuffer.forEach { line -> out.appendLine(line) }
+            }
+            file
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write debug log: ${e.message}")
+            null
+        }
+    }
+
+    private fun stopServiceAndDisconnectInternal() {
+        Log.i(TAG, "Stopping service and disconnecting...")
+        isServiceRunning = false
+        stopHeartbeat()
+        stopWatchdog()
+        stopScanning()
+        disconnect()
+        disconnectMqtt()
+        stopForeground(true)
+        broadcastServiceState()
+        stopSelf()
     }
     
     private fun broadcastServiceState() {
@@ -679,6 +820,7 @@ class OneControlBleService : Service() {
                 if (serviceUuids.isNotEmpty()) {
                     Log.d(TAG, "  Service UUIDs: ${serviceUuids.joinToString { it.toString() }}")
                 }
+                logTrace("ADV name=$deviceName mac=$deviceAddress rssi=${result.rssi} svcUuid=$hasDiscoveryService svcData=$hasDiscoveryServiceData")
                 
                 // Check if this matches our gateway
                 if (isTargetMac || hasDiscoveryService || hasDiscoveryServiceData) {
@@ -984,6 +1126,7 @@ class OneControlBleService : Service() {
             if (value.isNotEmpty()) {
                 val hex = value.joinToString(" ") { "%02X".format(it) }
                 Log.d(TAG, "📨 Data: $hex")
+                logTrace("NOTIF uuid=$uuid len=${value.size} data=$hex")
                 // Set the value on the characteristic for legacy code compatibility
                 characteristic.value = value
                 handleCharacteristicNotification(characteristic)
@@ -1005,6 +1148,7 @@ class OneControlBleService : Service() {
             if (data != null && data.isNotEmpty()) {
                 val hex = data.joinToString(" ") { "%02X".format(it) }
                 Log.d(TAG, "📨 Data: $hex")
+                logTrace("NOTIF uuid=$uuid len=${data.size} data=$hex")
                 handleCharacteristicNotification(characteristic)
             } else {
                 Log.w(TAG, "📨 Empty notification from $uuid")

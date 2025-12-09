@@ -330,6 +330,49 @@
         </LinearLayout>
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/diagnosticsContainer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:background="@android:color/transparent"
+        app:layout_constraintTop_toBottomOf="@+id/configContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/diagnosticsTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Diagnostics"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:paddingBottom="8dp" />
+
+        <Button
+            android:id="@+id/buttonExportDebugLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Export debug log" />
+
+        <Button
+            android:id="@+id/buttonToggleTrace"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Start BLE trace" />
+
+        <TextView
+            android:id="@+id/textTraceStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Trace: inactive"
+            android:textSize="14sp" />
+    </LinearLayout>
+
     </androidx.constraintlayout.widget.ConstraintLayout>
 
 </ScrollView>

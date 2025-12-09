@@ -9,7 +9,6 @@ import android.content.ServiceConnection
 import android.os.IBinder
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -17,6 +16,8 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.content.SharedPreferences
+import android.net.Uri
+import androidx.core.content.FileProvider
 import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
@@ -28,6 +29,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
     
@@ -57,6 +59,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputMqttUser: EditText
     private lateinit var inputMqttPassword: EditText
     private lateinit var saveConfigButton: Button
+    private lateinit var buttonExportDebugLog: Button
+    private lateinit var buttonToggleTrace: Button
+    private lateinit var textTraceStatus: TextView
     private lateinit var configFields: LinearLayout
     private var configExpanded = false
     
@@ -73,6 +78,7 @@ class MainActivity : AppCompatActivity() {
             log("✅ Service connected - device control available")
             updateDeviceStatuses()
             loadConfigFieldsFromService()
+            updateTraceUi(bleService?.isTraceActive() == true, null)
         }
         
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -137,6 +143,9 @@ class MainActivity : AppCompatActivity() {
         inputMqttPassword = findViewById(R.id.inputMqttPassword)
         saveConfigButton = findViewById(R.id.saveConfigButton)
         configFields = findViewById(R.id.configFields)
+        buttonExportDebugLog = findViewById(R.id.buttonExportDebugLog)
+        buttonToggleTrace = findViewById(R.id.buttonToggleTrace)
+        textTraceStatus = findViewById(R.id.textTraceStatus)
         
         // Register broadcast receiver for service logs and state
         val filter = IntentFilter().apply {
@@ -182,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         attachConfigCollapseToggle()
         loadConfigFieldsFromPrefs()
         attachConfigSaveHandler()
+        attachDiagnosticsHandlers()
         
         // Bind to service to access control methods (defer to avoid blocking onCreate)
         handler.postDelayed({
@@ -267,6 +277,40 @@ class MainActivity : AppCompatActivity() {
             val newConfig = buildConfigFromInputs() ?: return@setOnClickListener
             bleService?.updateConfig(newConfig)
             Toast.makeText(this, "Settings saved and applied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun attachDiagnosticsHandlers() {
+        buttonExportDebugLog.setOnClickListener {
+            val file = bleService?.exportDebugLog()
+            if (file != null && file.exists()) {
+                shareFile(file, "text/plain")
+            } else {
+                Toast.makeText(this, "Could not create debug log", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        buttonToggleTrace.setOnClickListener {
+            val service = bleService
+            if (service == null) {
+                Toast.makeText(this, "Service not connected yet", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (service.isTraceActive()) {
+                val file = service.stopBleTrace("user stop")
+                updateTraceUi(false, file?.absolutePath)
+                val msg = file?.let { "Trace saved: ${it.absolutePath}" } ?: "Trace stopped"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            } else {
+                val file = service.startBleTrace()
+                if (file != null) {
+                    updateTraceUi(true, file.absolutePath)
+                    Toast.makeText(this, "Trace started", Toast.LENGTH_SHORT).show()
+                } else {
+                    updateTraceUi(false, null)
+                    Toast.makeText(this, "Failed to start trace", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -442,11 +486,11 @@ class MainActivity : AppCompatActivity() {
     
     private fun stopBleService() {
         log("Stopping BLE Bridge service...")
-        // Stop connection first
-        serviceBinder?.stopConnection()
-        // Then stop the service
         val intent = Intent(this, OneControlBleService::class.java)
-        stopService(intent)
+        val stopped = serviceBinder?.stopServiceAndDisconnect() ?: false
+        if (!stopped) {
+            stopService(intent)
+        }
         updateServiceState()
         Toast.makeText(this, "BLE Bridge service stopped", Toast.LENGTH_SHORT).show()
     }
@@ -463,11 +507,31 @@ class MainActivity : AppCompatActivity() {
         }
         startButton.isEnabled = !isRunning
         stopButton.isEnabled = isRunning
+        updateTraceUi(bleService?.isTraceActive() == true, null)
     }
     
     private fun log(message: String) {
         // Keep console logging for debugging; UI stays clean for kiosk use
         android.util.Log.d("MainActivity", message)
+    }
+
+    private fun updateTraceUi(active: Boolean, lastPath: String?) {
+        buttonToggleTrace.text = if (active) "Stop BLE trace" else "Start BLE trace"
+        textTraceStatus.text = if (active) {
+            "Trace: active"
+        } else {
+            lastPath?.let { "Trace: saved to $it" } ?: "Trace: inactive"
+        }
+    }
+
+    private fun shareFile(file: File, mime: String) {
+        val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Share log"))
     }
     
     override fun onDestroy() {
