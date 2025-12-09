@@ -17,8 +17,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            val storeFilePath = (findProperty("ONECONTROL_STORE_FILE") as? String)?.trim()
+                ?: error("ONECONTROL_STORE_FILE is not set")
+            storeFile = file(storeFilePath)
+            storePassword = (findProperty("ONECONTROL_STORE_PASSWORD") as? String)?.trim()
+                ?: error("ONECONTROL_STORE_PASSWORD is not set")
+            keyAlias = (findProperty("ONECONTROL_KEY_ALIAS") as? String)?.trim()
+                ?: error("ONECONTROL_KEY_ALIAS is not set")
+            keyPassword = (findProperty("ONECONTROL_KEY_PASSWORD") as? String)?.trim()
+                ?: error("ONECONTROL_KEY_PASSWORD is not set")
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
