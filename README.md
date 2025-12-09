@@ -42,6 +42,7 @@ Android foreground service that connects to a Lippert OneControl BLE gateway, au
 - Minimum Android version: API 26 (Android 8.0) per `minSdk` in `app/build.gradle.kts`.
 - Target/compile SDK: 34.
 - Foreground service permissions/notifications enabled.
+- Sideload install: enable “Install unknown apps” for the installer (e.g., browser/file manager). Developer options are not required.
 - Stable MQTT broker reachable from the device.
 
 ## Notes
