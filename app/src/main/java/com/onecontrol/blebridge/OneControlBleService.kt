@@ -183,6 +183,11 @@ class OneControlBleService : Service() {
     private val DIMMER_PENDING_WINDOW_MS = 12000L
     private val pendingDimmableSend = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, ts)
     private val DIMMER_DEBOUNCE_MS = 200L
+    private fun publishDimmableState(tableId: Byte, deviceId: Byte, isOn: Boolean, brightnessRaw: Int) {
+        // Classic MQTT light schema: state + brightness topics
+        publishMqtt("device/${tableId}/${deviceId}/state", if (isOn) "ON" else "OFF", retain = true)
+        publishMqtt("device/${tableId}/${deviceId}/brightness", brightnessRaw.toString(), retain = true)
+    }
 
     // Debug flag to prevent sending test command multiple times
     private var debugTestLightCommandSent = false
@@ -214,6 +219,7 @@ class OneControlBleService : Service() {
     private var mqttConnected = false
     private val haDiscoveryPublished = mutableSetOf<String>()  // Track HA discovery per device
     private var diagDiscoveryPublished = false
+    private var tankPlaceholdersPublished = false
     
     enum class ConnectionState {
         DISCONNECTED,
@@ -526,6 +532,8 @@ class OneControlBleService : Service() {
             name = "MQTT Connected",
             stateTopic = "$mqttTopicPrefix/diag/mqtt_connected"
         )
+
+        publishTankPlaceholdersIfNeeded()
     }
 
     private fun publishHaDiagnosticBinarySensor(objectId: String, name: String, stateTopic: String) {
@@ -536,6 +544,7 @@ class OneControlBleService : Service() {
               "state_topic": "$stateTopic",
               "payload_on": "ON",
               "payload_off": "OFF",
+              "entity_category": "diagnostic",
               "device": {
                 "identifiers": ["onecontrol_ble"],
                 "manufacturer": "Lippert",
@@ -2288,6 +2297,7 @@ class OneControlBleService : Service() {
             MyRvLinkEventType.TankSensorStatus, MyRvLinkEventType.TankSensorStatusV2 -> {
                 Log.i(TAG, "💧 TankSensorStatus event received")
                 broadcastLog("💧 TankSensorStatus event")
+                publishTankPlaceholdersIfNeeded()
             }
             MyRvLinkEventType.RealTimeClock -> {
                 Log.i(TAG, "🕐 RealTimeClock event received")
@@ -2505,6 +2515,16 @@ class OneControlBleService : Service() {
         publishDiscoveryForKnownDevices()
     }
 
+    private fun publishTankPlaceholdersIfNeeded() {
+        if (mqttClient == null || tankPlaceholdersPublished) return
+        tankPlaceholdersPublished = true
+        // Publish three tank sensors (retained 0) so they appear in HA even when empty.
+        for (tankId in 1..3) {
+            publishHaDiscoveryTankSensor(tankId)
+            publishMqtt("tank/$tankId", "0", retain = true)
+        }
+    }
+
     private fun handleMqttCommand(topic: String, payload: String) {
         Log.i(TAG, "MQTT cmd inbound: $topic = $payload")
         // Legacy brightness command path: onecontrol/ble/device/<table>/<device>/brightness/set
@@ -2589,6 +2609,10 @@ class OneControlBleService : Service() {
         if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
                 val json = org.json.JSONObject(trimmed)
+                if (json.has("effect")) {
+                    // Effect handled separately
+                    return null
+                }
                 if (json.has("brightness")) {
                     val b = json.getInt("brightness")
                     return b.coerceIn(0, 255)
@@ -2608,7 +2632,7 @@ class OneControlBleService : Service() {
         if (payload.equals("off", true) || payload.equals("false", true)) return 0
         return null
     }
-    
+
     private fun disconnectMqtt() {
         try {
             mqttClient?.disconnect()
@@ -2689,41 +2713,30 @@ class OneControlBleService : Service() {
         val objectId = "light_$keyHex"
         val deviceName = "light_$keyHex"
         val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/state"
-        val brightnessStateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/brightness"
         val commandTopic = "$mqttTopicPrefix/command/dimmable/${tableId.toUByte()}/${deviceId.toUByte()}"
 
         // Use MQTT light with brightness if supported, else switch
         if (supportsBrightness) {
             val key = "$objectId:light"
             if (haDiscoveryPublished.add(key)) {
-                // Clear legacy brightness sensor discovery that used unsupported device_class/units
                 val legacyConfigTopic = "homeassistant/sensor/onecontrol_${tableId.toUByte().toString(16)}_${deviceId.toUByte().toString(16)}_brightness/config"
                 publishMqttRaw(legacyConfigTopic, "", retain = true)
 
-                val payload = """
-                    {
-                      "name": "$deviceName",
-                      "unique_id": "${objectId}_light",
-                      "state_topic": "$stateTopic",
-                      "command_topic": "$commandTopic",
-                      "brightness_state_topic": "$brightnessStateTopic",
-                      "brightness_command_topic": "$commandTopic",
-                      "on_command_type": "first",
-                      "payload_on": "ON",
-                      "payload_off": "OFF",
-                      "brightness_state_topic": "$brightnessStateTopic",
-                      "device": {
-                        "identifiers": ["onecontrol_ble", "$objectId"],
-                        "manufacturer": "Lippert",
-                        "model": "OneControl Gateway",
-                        "name": "OneControl Gateway"
-                      }
-                    }
-                """.trimIndent()
-                publishMqttRaw("homeassistant/light/$objectId/config", payload, retain = true)
+                val brightnessStateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/brightness"
+                val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
+                    gatewayMac = gatewayMac,
+                    deviceAddr = ((tableId.toInt() and 0xFF) shl 8) or (deviceId.toInt() and 0xFF),
+                    deviceName = deviceName,
+                    stateTopic = stateTopic,
+                    commandTopic = commandTopic,
+                    brightnessTopic = brightnessStateTopic
+                )
+                val discoveryTopic = "homeassistant/light/$objectId/config"
+                publishMqttRaw(discoveryTopic, discovery.toString(), retain = true)
+                // Clear any prior effect select discovery to remove stray entities
+                publishMqttRaw("homeassistant/select/${objectId}_effect/config", "", retain = true)
                 // Initial retained state to avoid "unknown" in HA
-                publishMqtt("device/${tableId}/${deviceId}/state", "OFF", retain = true)
-                publishMqtt("device/${tableId}/${deviceId}/brightness", "0", retain = true)
+                publishDimmableState(tableId, deviceId, false, 0)
             }
         } else {
             publishHaDiscoverySwitch(tableId, deviceId)
@@ -2811,6 +2824,28 @@ class OneControlBleService : Service() {
                   "state_class": "measurement",
                   "device": {
                     "identifiers": ["onecontrol_ble", "system_voltage"],
+                    "manufacturer": "Lippert",
+                    "model": "OneControl Gateway",
+                    "name": "OneControl Gateway"
+                  }
+                }
+            """.trimIndent()
+            publishMqttRaw("homeassistant/sensor/$objectId/config", payload, retain = true)
+        }
+    }
+
+    private fun publishHaDiscoveryTankSensor(tankId: Int) {
+        val objectId = "tank_$tankId"
+        if (haDiscoveryPublished.add(objectId)) {
+            val stateTopic = "$mqttTopicPrefix/tank/$tankId"
+            val payload = """
+                {
+                  "name": "Tank $tankId",
+                  "unique_id": "onecontrol_tank_$tankId",
+                  "state_topic": "$stateTopic",
+                  "unit_of_measurement": "%",
+                  "device": {
+                    "identifiers": ["onecontrol_ble", "tank_$tankId"],
                     "manufacturer": "Lippert",
                     "model": "OneControl Gateway",
                     "name": "OneControl Gateway"
@@ -2930,15 +2965,14 @@ class OneControlBleService : Service() {
             publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = true)
             // Publish only on actual dimmer status; no periodic defaults
             Log.i(TAG, "MQTT pub dimmer state device=${status.deviceTableId}:${status.deviceId} raw=$brightnessRaw pct=$brightnessPct isOn=$isOn")
-            publishMqtt("device/${status.deviceTableId}/${status.deviceId}/state", if (isOn) "ON" else "OFF", retain = true)
-            publishMqtt("device/${status.deviceTableId}/${status.deviceId}/brightness", brightnessRaw.toString(), retain = true)
+            publishDimmableState(status.deviceTableId, status.deviceId, isOn, brightnessRaw)
             publishMqtt("device/${status.deviceTableId}/${status.deviceId}/type", "dimmable_light")
             if (brightnessPct > 0) {
                 lastKnownDimmableBrightness[key] = brightnessRaw.coerceIn(1, 255)
             }
         }
     }
-    
+
     /**
      * Handle RgbLightStatus event
      * Format: [EventType (1)][DeviceTableId (1)][DeviceId (1)][Status (8 bytes)]...
@@ -3281,8 +3315,7 @@ class OneControlBleService : Service() {
         if (brightness <= 0) {
             sendDimmableCommand(writeChar, tableId, deviceId, MyRvLinkCommandEncoder.DimmableLightCommand.Off, 0)
             publishMqtt("command/dimmable/$deviceId/brightness", "0")
-            publishMqtt("device/${tableId}/${deviceId}/state", "OFF", retain = true)
-            publishMqtt("device/${tableId}/${deviceId}/brightness", "0", retain = true)
+            publishDimmableState(tableId, deviceId, false, 0)
             pendingDimmable.remove(key)
             pendingDimmableSend.remove(key)
             return
@@ -3312,8 +3345,7 @@ class OneControlBleService : Service() {
                 )
                 lastKnownDimmableBrightness[key] = targetBrightnessByte
                 pendingDimmable[key] = targetBrightnessByte to System.currentTimeMillis()
-                publishMqtt("device/${tableId}/${deviceId}/state", "ON", retain = true)
-                publishMqtt("device/${tableId}/${deviceId}/brightness", targetBrightnessByte.toString(), retain = true)
+                publishDimmableState(tableId, deviceId, true, targetBrightnessByte)
             }
         }, DIMMER_DEBOUNCE_MS)
     }

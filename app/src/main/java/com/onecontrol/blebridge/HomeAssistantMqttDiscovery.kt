@@ -87,25 +87,23 @@ object HomeAssistantMqttDiscovery {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
             put("default_entity_id", "light.$objectId")  // Replace deprecated object_id
-            put("device", getDeviceInfo(gatewayMac))
-            
-            // State
+            // Match legacy per-entity device grouping used by other entities
+            put("device", JSONObject().apply {
+                put("identifiers", JSONArray().put("onecontrol_ble").put(objectId))
+                put("manufacturer", "Lippert")
+                put("model", "OneControl Gateway")
+                put("name", "OneControl Gateway")
+            })
+
+            // Classic MQTT light schema: state + brightness topics
             put("state_topic", stateTopic)
             put("command_topic", commandTopic)
-            
-            // Brightness
             put("brightness_state_topic", brightnessTopic)
-            // Route brightness commands to the same command topic we subscribe to
-            put("brightness_command_topic", commandTopic)
-            // Device expects 0-255 brightness; align HA slider scale
-            put("brightness_scale", 255)
-            
-            // Payloads
+            put("brightness_command_topic", "$commandTopic/brightness")
             put("payload_on", "ON")
             put("payload_off", "OFF")
+            put("on_command_type", "brightness")
             put("optimistic", false)  // Wait for state updates from gateway
-            
-            // Icon
             put("icon", "mdi:lightbulb")
         }
     }
