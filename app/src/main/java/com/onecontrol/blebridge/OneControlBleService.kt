@@ -47,6 +47,9 @@ class OneControlBleService : Service() {
         const val EXTRA_STATUS_AUTHENTICATED = "status_authenticated"
         const val EXTRA_STATUS_DATA_HEALTHY = "status_data_healthy"
         const val EXTRA_STATUS_MQTT_CONNECTED = "status_mqtt_connected"
+        const val ACTION_SCAN_MAC_RESULT = "com.onecontrol.blebridge.ACTION_SCAN_MAC_RESULT"
+        const val EXTRA_SCAN_MAC = "scan_mac"
+        const val EXTRA_SCAN_ERROR = "scan_error"
         
         @Volatile
         var isServiceRunning = false
@@ -120,6 +123,10 @@ class OneControlBleService : Service() {
                 updateWatchdogEnabled(enabled)
             }
         }
+
+        fun scanForGatewayMac() {
+            handler.post { startMacScan() }
+        }
     }
     
     private val binder = LocalBinder()
@@ -144,6 +151,9 @@ class OneControlBleService : Service() {
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var bluetoothGatt: BluetoothGatt? = null
     private var scanCallback: ScanCallback? = null
+    private var macScanCallback: ScanCallback? = null
+    private var macScanTimeout: Runnable? = null
+    private val MAC_SCAN_TIMEOUT_MS = 8000L
     
     // Service/Characteristic references
     private var canService: BluetoothGattService? = null
@@ -417,6 +427,7 @@ class OneControlBleService : Service() {
             Log.d(TAG, "Receiver not registered or already unregistered")
         }
         stopWatchdog()
+        stopMacScan()
         stopScanning()
         disconnect()
         disconnectMqtt()
@@ -717,6 +728,89 @@ class OneControlBleService : Service() {
             bluetoothLeScanner?.stopScan(it)
             scanCallback = null
         }
+    }
+
+    // One-time scan to discover gateway MAC without connecting
+    fun scanForGatewayMac() = startMacScan()
+
+    private fun startMacScan() {
+        if (!hasAllRuntimePermissions()) {
+            broadcastMacScanResult(null, "Missing BLE permissions")
+            return
+        }
+        if (bluetoothAdapter == null || bluetoothLeScanner == null) {
+            broadcastMacScanResult(null, "Bluetooth unavailable")
+            return
+        }
+
+        stopMacScan() // clear any prior attempt
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        macScanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val deviceName = result.device.name ?: ""
+                val deviceAddress = result.device.address ?: return
+                val scanRecord = result.scanRecord
+                val serviceUuids = scanRecord?.serviceUuids ?: emptyList()
+                val hasDiscoveryService = serviceUuids.any { uuid ->
+                    uuid.toString().lowercase() == Constants.DISCOVERY_SERVICE_UUID.lowercase()
+                }
+                val serviceData = scanRecord?.serviceData ?: emptyMap()
+                val hasDiscoveryServiceData = serviceData.keys.any { uuid ->
+                    uuid.toString().lowercase() == Constants.DISCOVERY_SERVICE_UUID.lowercase()
+                }
+
+                val matchesName = deviceName.startsWith("LCI", ignoreCase = true)
+                if (matchesName || hasDiscoveryService || hasDiscoveryServiceData) {
+                    Log.i(TAG, "📡 Gateway MAC discovered via scan: $deviceAddress (name=$deviceName)")
+                    stopMacScan()
+                    broadcastMacScanResult(deviceAddress, null)
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                Log.w(TAG, "Gateway MAC scan failed: $errorCode")
+                stopMacScan()
+                broadcastMacScanResult(null, "Scan failed ($errorCode)")
+            }
+        }
+
+        macScanTimeout = Runnable {
+            Log.w(TAG, "Gateway MAC scan timed out")
+            stopMacScan()
+            broadcastMacScanResult(null, "Gateway not found")
+        }.also { handler.postDelayed(it, MAC_SCAN_TIMEOUT_MS) }
+
+        try {
+            bluetoothLeScanner?.startScan(null, settings, macScanCallback)
+            Log.i(TAG, "🔍 Started gateway MAC scan (looking for name LCI* or discovery service)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start gateway MAC scan: ${e.message}")
+            stopMacScan()
+            broadcastMacScanResult(null, e.message ?: "Scan start failed")
+        }
+    }
+
+    private fun stopMacScan() {
+        macScanCallback?.let { bluetoothLeScanner?.stopScan(it) }
+        macScanCallback = null
+        macScanTimeout?.let { handler.removeCallbacks(it) }
+        macScanTimeout = null
+    }
+
+    private fun broadcastMacScanResult(mac: String?, error: String?) {
+        val intent = Intent(ACTION_SCAN_MAC_RESULT).apply {
+            if (mac != null) {
+                putExtra(EXTRA_SCAN_MAC, mac)
+            }
+            if (error != null) {
+                putExtra(EXTRA_SCAN_ERROR, error)
+            }
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
     
     // MARK: - BLE Connection
