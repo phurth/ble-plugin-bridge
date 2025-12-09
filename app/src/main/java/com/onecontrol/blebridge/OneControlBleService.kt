@@ -19,6 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import org.eclipse.paho.client.mqttv3.*
 import java.util.*
@@ -220,6 +221,8 @@ class OneControlBleService : Service() {
     private val haDiscoveryPublished = mutableSetOf<String>()  // Track HA discovery per device
     private var diagDiscoveryPublished = false
     private var tankPlaceholdersPublished = false
+    private val commandDebounceMap = mutableMapOf<String, Pair<String, Long>>() // key=kind:table:device -> (payload, ts)
+    private val COMMAND_DEBOUNCE_MS = 400L
     
     enum class ConnectionState {
         DISCONNECTED,
@@ -498,10 +501,33 @@ class OneControlBleService : Service() {
         val bleConnected: Boolean = false,
         val authenticated: Boolean = false,
         val dataHealthy: Boolean = false,
-        val mqttConnected: Boolean = false
+        val mqttConnected: Boolean = false,
+        val permissionsOk: Boolean = false
     )
 
     fun getStatusSnapshot(): StatusSnapshot = lastStatusSnapshot.copy()
+
+    private fun hasAllRuntimePermissions(): Boolean {
+        val ctx = applicationContext
+        val needsLocation = Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        val needsBtScan = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        val needsBtConnect = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        val needsPostNotif = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
+        if (needsLocation && ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+        if (needsBtScan && ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+        if (needsBtConnect && ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+        if (needsPostNotif && ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            return false
+        }
+        return true
+    }
 
     private fun publishDiagnosticsDiscovery() {
         if (diagDiscoveryPublished || mqttClient == null) return
@@ -531,6 +557,11 @@ class OneControlBleService : Service() {
             objectId = "mqtt_connected",
             name = "MQTT Connected",
             stateTopic = "$mqttTopicPrefix/diag/mqtt_connected"
+        )
+        publishHaDiagnosticBinarySensor(
+            objectId = "permissions_ok",
+            name = "Permissions OK",
+            stateTopic = "$mqttTopicPrefix/diag/permissions_ok"
         )
 
         publishTankPlaceholdersIfNeeded()
@@ -563,6 +594,7 @@ class OneControlBleService : Service() {
         publishMqtt("diag/ble_connected", if (isConnected) "ON" else "OFF", retain = true)
         publishMqtt("diag/data_healthy", if (computeDataHealthy()) "ON" else "OFF", retain = true)
         publishMqtt("diag/mqtt_connected", if (mqttConnected) "ON" else "OFF", retain = true)
+        publishMqtt("diag/permissions_ok", if (hasAllRuntimePermissions()) "ON" else "OFF", retain = true)
     }
     
     // MARK: - BLE Scanning
@@ -2561,12 +2593,24 @@ class OneControlBleService : Service() {
         val deviceId = parts[2].toIntOrNull()
         if (tableId == null) return
 
+        // Debounce identical commands per device/kind to avoid rapid duplicate writes
+        val debounceKey = "$kind:$tableId:${deviceId ?: -1}"
+        val now = System.currentTimeMillis()
+        val prev = commandDebounceMap[debounceKey]
+        if (prev != null && now - prev.second < COMMAND_DEBOUNCE_MS && prev.first == payload) {
+            Log.i(TAG, "MQTT cmd debounced key=$debounceKey payload=$payload age=${now - prev.second}ms")
+            return
+        }
+        commandDebounceMap[debounceKey] = payload to now
+
         when (kind) {
             "switch" -> {
                 if (deviceId == null) return
                 val turnOn = payload.equals("on", true) || payload == "1" || payload.equals("true", true)
                 Log.i(TAG, "MQTT cmd switch table=$tableId device=$deviceId turnOn=$turnOn")
                 controlSwitch(deviceId.toByte(), turnOn)
+                // Optimistic state publish so HA doesn't resend; actual state will follow from gateway
+                publishMqtt("device/${tableId}/${deviceId}/state", if (turnOn) "ON" else "OFF", retain = true)
             }
             "dimmable" -> {
                 // HA may send brightness on a trailing /brightness topic; handle both forms.
@@ -2575,13 +2619,15 @@ class OneControlBleService : Service() {
                 val brightnessByte = brightnessRaw.coerceIn(0, 255)
                 Log.i(TAG, "MQTT cmd dimmable(brightness topic) table=$tableId device=$deviceId brightnessRaw=$brightnessByte")
                 if (deviceId != null) controlDimmableLight(deviceId.toByte(), brightnessByte)
-                    return
+                return
                 }
                 if (deviceId == null) return
                 val parsed = parseLightCommandPayload(payload)
                 if (parsed != null) {
                     Log.i(TAG, "MQTT cmd dimmable table=$tableId device=$deviceId brightness=$parsed")
                     controlDimmableLight(deviceId.toByte(), parsed.coerceIn(0, 255))
+                    // Optimistic state publish so HA doesn't resend; actual state will follow from gateway
+                    publishDimmableState(tableId.toByte(), deviceId.toByte(), parsed > 0, parsed.coerceIn(0, 255))
                 } else {
                     Log.w(TAG, "MQTT dimmable command payload not understood: $payload")
                 }
