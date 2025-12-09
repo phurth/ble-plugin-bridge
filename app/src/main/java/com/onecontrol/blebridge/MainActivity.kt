@@ -56,7 +56,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputMqttTopicPrefix: EditText
     private lateinit var inputMqttUser: EditText
     private lateinit var inputMqttPassword: EditText
-    private lateinit var buttonScanGatewayMac: Button
     private lateinit var saveConfigButton: Button
     private lateinit var configFields: LinearLayout
     private var configExpanded = false
@@ -91,16 +90,6 @@ class MainActivity : AppCompatActivity() {
                     val isRunning = intent.getBooleanExtra(OneControlBleService.EXTRA_SERVICE_RUNNING, false)
                     updateServiceState(isRunning)
                     updateChecklist(intent)
-                }
-                OneControlBleService.ACTION_SCAN_MAC_RESULT -> {
-                    val mac = intent.getStringExtra(OneControlBleService.EXTRA_SCAN_MAC)
-                    val error = intent.getStringExtra(OneControlBleService.EXTRA_SCAN_ERROR)
-                    if (mac != null) {
-                        inputGatewayMac.setText(mac)
-                        Toast.makeText(this@MainActivity, "Gateway MAC found: $mac", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(this@MainActivity, error ?: "Gateway not found", Toast.LENGTH_SHORT).show()
-                    }
                 }
             }
         }
@@ -146,14 +135,12 @@ class MainActivity : AppCompatActivity() {
         inputMqttTopicPrefix = findViewById(R.id.inputMqttTopicPrefix)
         inputMqttUser = findViewById(R.id.inputMqttUser)
         inputMqttPassword = findViewById(R.id.inputMqttPassword)
-        buttonScanGatewayMac = findViewById(R.id.buttonScanGatewayMac)
         saveConfigButton = findViewById(R.id.saveConfigButton)
         configFields = findViewById(R.id.configFields)
         
         // Register broadcast receiver for service logs and state
         val filter = IntentFilter().apply {
             addAction(OneControlBleService.ACTION_SERVICE_STATE)
-            addAction(OneControlBleService.ACTION_SCAN_MAC_RESULT)
         }
         LocalBroadcastManager.getInstance(this).registerReceiver(serviceReceiver, filter)
         
@@ -195,7 +182,6 @@ class MainActivity : AppCompatActivity() {
         attachConfigCollapseToggle()
         loadConfigFieldsFromPrefs()
         attachConfigSaveHandler()
-        attachScanMacHandler()
         
         // Bind to service to access control methods (defer to avoid blocking onCreate)
         handler.postDelayed({
@@ -284,22 +270,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun attachScanMacHandler() {
-        buttonScanGatewayMac.setOnClickListener {
-            if (!hasAllPermissions()) {
-                Toast.makeText(this, "Grant BLE permissions first", Toast.LENGTH_SHORT).show()
-                ActivityCompat.requestPermissions(this, requiredPermissions, PERMISSIONS_REQUEST_CODE)
-                return@setOnClickListener
-            }
-            val service = bleService
-            if (service != null) {
-                Toast.makeText(this, "Scanning for gateway...", Toast.LENGTH_SHORT).show()
-                service.scanForGatewayMac()
-            } else {
-                Toast.makeText(this, "Service not connected yet", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
     
     private fun attachToggleHandlers() {
         switchBatteryOpt.setOnCheckedChangeListener { _: CompoundButton, isChecked: Boolean ->
