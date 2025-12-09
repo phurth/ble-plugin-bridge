@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -22,6 +23,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import org.eclipse.paho.client.mqttv3.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.*
 
 /**
@@ -530,61 +533,83 @@ class OneControlBleService : Service() {
     }
 
     private fun publishDiagnosticsDiscovery() {
-        if (diagDiscoveryPublished || mqttClient == null) return
+        if (mqttClient == null) return
+        // Always republish on (re)connect so new sensors show up and HA can recover after broker restart.
         diagDiscoveryPublished = true
+
+        val macId = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.replace(":", "").lowercase()
+        val nodeId = "onecontrol_ble_$macId"
+
+        // Clear legacy topics (pre-nodeId) so HA removes any stale entities.
+        listOf("service_running", "paired", "ble_connected", "data_healthy", "mqtt_connected", "permissions_ok").forEach {
+            publishMqttRaw("homeassistant/binary_sensor/$it/config", "", retain = true)
+        }
 
         publishHaDiagnosticBinarySensor(
             objectId = "service_running",
             name = "Service Running",
-            stateTopic = "$mqttTopicPrefix/diag/service_running"
+            stateTopic = "$mqttTopicPrefix/diag/service_running",
+            nodeId = nodeId
         )
         publishHaDiagnosticBinarySensor(
             objectId = "paired",
             name = "Paired",
-            stateTopic = "$mqttTopicPrefix/diag/paired"
+            stateTopic = "$mqttTopicPrefix/diag/paired",
+            nodeId = nodeId
         )
         publishHaDiagnosticBinarySensor(
             objectId = "ble_connected",
             name = "BLE Connected",
-            stateTopic = "$mqttTopicPrefix/diag/ble_connected"
+            stateTopic = "$mqttTopicPrefix/diag/ble_connected",
+            nodeId = nodeId
         )
         publishHaDiagnosticBinarySensor(
             objectId = "data_healthy",
             name = "Data Healthy",
-            stateTopic = "$mqttTopicPrefix/diag/data_healthy"
+            stateTopic = "$mqttTopicPrefix/diag/data_healthy",
+            nodeId = nodeId
         )
         publishHaDiagnosticBinarySensor(
             objectId = "mqtt_connected",
             name = "MQTT Connected",
-            stateTopic = "$mqttTopicPrefix/diag/mqtt_connected"
+            stateTopic = "$mqttTopicPrefix/diag/mqtt_connected",
+            nodeId = nodeId
         )
         publishHaDiagnosticBinarySensor(
             objectId = "permissions_ok",
             name = "Permissions OK",
-            stateTopic = "$mqttTopicPrefix/diag/permissions_ok"
+            stateTopic = "$mqttTopicPrefix/diag/permissions_ok",
+            nodeId = nodeId
         )
 
         publishTankPlaceholdersIfNeeded()
     }
 
-    private fun publishHaDiagnosticBinarySensor(objectId: String, name: String, stateTopic: String) {
-        val payload = """
-            {
-              "name": "$name",
-              "unique_id": "onecontrol_diag_$objectId",
-              "state_topic": "$stateTopic",
-              "payload_on": "ON",
-              "payload_off": "OFF",
-              "entity_category": "diagnostic",
-              "device": {
-                "identifiers": ["onecontrol_ble"],
-                "manufacturer": "Lippert",
-                "model": "OneControl Gateway",
-                "name": "OneControl Gateway"
-              }
-            }
-        """.trimIndent()
-        publishMqttRaw("homeassistant/binary_sensor/$objectId/config", payload, retain = true)
+    private fun publishHaDiagnosticBinarySensor(
+        objectId: String,
+        name: String,
+        stateTopic: String,
+        nodeId: String
+    ) {
+        val macId = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.replace(":", "").lowercase()
+        val uniqueId = "onecontrol_ble_${macId}_diag_$objectId"
+        val discoveryTopic = "homeassistant/binary_sensor/$nodeId/$objectId/config"
+        val payload = JSONObject().apply {
+            put("name", name)
+            put("unique_id", uniqueId)
+            put("state_topic", stateTopic)
+            put("payload_on", "ON")
+            put("payload_off", "OFF")
+            put("entity_category", "diagnostic")
+            put("device", JSONObject().apply {
+                // Match main device grouping used by other entities (identifiers = ["onecontrol_ble"])
+                put("identifiers", JSONArray().put("onecontrol_ble"))
+                put("manufacturer", "Lippert")
+                put("model", "OneControl Gateway")
+                put("name", "OneControl Gateway")
+            })
+        }.toString()
+        publishMqttRaw(discoveryTopic, payload, retain = true)
     }
 
     private fun publishDiagnosticsState() {
@@ -2538,13 +2563,11 @@ class OneControlBleService : Service() {
     }
 
     private fun onMqttConnected() {
-        publishDiagnosticsDiscovery()
+        republishAllDiscovery()
         publishDiagnosticsState()
         broadcastServiceState()
         publishMqtt("status", "connected", retain = true)
-        publishHaVoltage()
         subscribeMqttCommands()
-        publishDiscoveryForKnownDevices()
     }
 
     private fun publishTankPlaceholdersIfNeeded() {
@@ -2555,6 +2578,20 @@ class OneControlBleService : Service() {
             publishHaDiscoveryTankSensor(tankId)
             publishMqtt("tank/$tankId", "0", retain = true)
         }
+    }
+
+    /**
+     * Force re-publish of all discovery/config so HA can rediscover after cache clear or device removal.
+     */
+    private fun republishAllDiscovery() {
+        haDiscoveryPublished.clear()
+        diagDiscoveryPublished = false
+        tankPlaceholdersPublished = false
+
+        publishDiagnosticsDiscovery()
+        publishHaVoltage()
+        publishTankPlaceholdersIfNeeded()
+        publishDiscoveryForKnownDevices()
     }
 
     private fun handleMqttCommand(topic: String, payload: String) {
