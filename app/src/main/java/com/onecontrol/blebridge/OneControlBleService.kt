@@ -2526,10 +2526,17 @@ class OneControlBleService : Service() {
                 broadcastLog("🪟 H-bridge status event")
                 handleRelayHBridgeStatus(event.rawData)
             }
-            MyRvLinkEventType.TankSensorStatus, MyRvLinkEventType.TankSensorStatusV2 -> {
+            MyRvLinkEventType.TankSensorStatus -> {
                 Log.i(TAG, "💧 TankSensorStatus event received")
                 broadcastLog("💧 TankSensorStatus event")
                 publishTankPlaceholdersIfNeeded()
+                handleTankSensorStatus(event.rawData)
+            }
+            MyRvLinkEventType.TankSensorStatusV2 -> {
+                Log.i(TAG, "💧 TankSensorStatusV2 event received")
+                broadcastLog("💧 TankSensorStatusV2 event")
+                publishTankPlaceholdersIfNeeded()
+                handleTankSensorStatusV2(event.rawData)
             }
             MyRvLinkEventType.RealTimeClock -> {
                 Log.i(TAG, "🕐 RealTimeClock event received")
@@ -2753,6 +2760,44 @@ class OneControlBleService : Service() {
             publishHaDiscoveryTankSensor(tankId)
             publishMqtt("tank/$tankId", "0", retain = true)
         }
+    }
+
+    private fun handleTankSensorStatus(data: ByteArray) {
+        TankSensorStatusEvent.decode(data)?.let { evt ->
+            evt.tanks.forEach { tank ->
+                val normalized = normalizeTankPercent(tank.percent)
+                publishHaDiscoveryTankSensor(tank.deviceId.toInt() and 0xFF)
+                publishTankLevel(evt.deviceTableId, tank.deviceId, normalized)
+            }
+        }
+    }
+
+    private fun handleTankSensorStatusV2(data: ByteArray) {
+        TankSensorStatusV2Event.decode(data)?.let { evt ->
+            evt.percent?.let { raw ->
+                val normalized = normalizeTankPercent(raw)
+                publishHaDiscoveryTankSensor(evt.deviceId.toInt() and 0xFF)
+                publishTankLevel(evt.deviceTableId, evt.deviceId, normalized)
+            }
+        }
+    }
+
+    private fun normalizeTankPercent(raw: Int): Int {
+        return when (raw) {
+            0x00 -> 0
+            0x21 -> 33
+            0x42 -> 66
+            0x64 -> 100
+            in 0..100 -> raw
+            else -> 0
+        }
+    }
+
+    private fun publishTankLevel(tableId: Byte, deviceId: Byte, percent: Int) {
+        val tankId = deviceId.toInt() and 0xFF
+        val key = "${tableId}:${deviceId}"
+        deviceStatuses[key] = DeviceStatus.Tank(tableId, deviceId, percent)
+        publishMqtt("tank/$tankId", percent.toString(), retain = true)
     }
 
     /**
@@ -3098,6 +3143,7 @@ class OneControlBleService : Service() {
                 is DeviceStatus.DimmableLight -> publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = true)
                 is DeviceStatus.RgbLight -> publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = false)
                 is DeviceStatus.Cover -> publishHaDiscoveryCover(status.deviceTableId, status.deviceId)
+                is DeviceStatus.Tank -> publishHaDiscoveryTankSensor(status.deviceId.toInt() and 0xFF)
             }
         }
     }
@@ -3672,5 +3718,11 @@ sealed class DeviceStatus {
     data class Cover(
         override val deviceTableId: Byte,
         override val deviceId: Byte
+    ) : DeviceStatus()
+
+    data class Tank(
+        override val deviceTableId: Byte,
+        override val deviceId: Byte,
+        val percent: Int
     ) : DeviceStatus()
 }
