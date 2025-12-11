@@ -244,6 +244,7 @@ class OneControlBleService : Service() {
     
     // Device status tracking
     private val deviceStatuses = mutableMapOf<String, DeviceStatus>()  // Key: "deviceTableId:deviceId"
+    private val seenTankIds = mutableSetOf<Int>()
 
     // Active stream reading
     private val notificationQueue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
@@ -2529,13 +2530,11 @@ class OneControlBleService : Service() {
             MyRvLinkEventType.TankSensorStatus -> {
                 Log.i(TAG, "💧 TankSensorStatus event received")
                 broadcastLog("💧 TankSensorStatus event")
-                publishTankPlaceholdersIfNeeded()
                 handleTankSensorStatus(event.rawData)
             }
             MyRvLinkEventType.TankSensorStatusV2 -> {
                 Log.i(TAG, "💧 TankSensorStatusV2 event received")
                 broadcastLog("💧 TankSensorStatusV2 event")
-                publishTankPlaceholdersIfNeeded()
                 handleTankSensorStatusV2(event.rawData)
             }
             MyRvLinkEventType.RealTimeClock -> {
@@ -2752,22 +2751,11 @@ class OneControlBleService : Service() {
         subscribeMqttCommands()
     }
 
-    private fun publishTankPlaceholdersIfNeeded() {
-        if (mqttClient == null || tankPlaceholdersPublished) return
-        tankPlaceholdersPublished = true
-        // Publish three tank sensors (retained 0) so they appear in HA even when empty.
-        for (tankId in 1..3) {
-            publishHaDiscoveryTankSensor(tankId)
-            publishMqtt("tank/$tankId", "0", retain = true)
-        }
-    }
-
     private fun handleTankSensorStatus(data: ByteArray) {
         TankSensorStatusEvent.decode(data)?.let { evt ->
             evt.tanks.forEach { tank ->
                 val normalized = normalizeTankPercent(tank.percent)
-                publishHaDiscoveryTankSensor(tank.deviceId.toInt() and 0xFF)
-                publishTankLevel(evt.deviceTableId, tank.deviceId, normalized)
+                publishTankReading(evt.deviceTableId, tank.deviceId, normalized)
             }
         }
     }
@@ -2776,8 +2764,7 @@ class OneControlBleService : Service() {
         TankSensorStatusV2Event.decode(data)?.let { evt ->
             evt.percent?.let { raw ->
                 val normalized = normalizeTankPercent(raw)
-                publishHaDiscoveryTankSensor(evt.deviceId.toInt() and 0xFF)
-                publishTankLevel(evt.deviceTableId, evt.deviceId, normalized)
+                publishTankReading(evt.deviceTableId, evt.deviceId, normalized)
             }
         }
     }
@@ -2793,9 +2780,10 @@ class OneControlBleService : Service() {
         }
     }
 
-    private fun publishTankLevel(tableId: Byte, deviceId: Byte, percent: Int) {
+    private fun publishTankReading(tableId: Byte, deviceId: Byte, percent: Int) {
         val tankId = deviceId.toInt() and 0xFF
         val key = "${tableId}:${deviceId}"
+        seenTankIds.add(tankId)
         deviceStatuses[key] = DeviceStatus.Tank(tableId, deviceId, percent)
         publishMqtt("tank/$tankId", percent.toString(), retain = true)
     }
@@ -2806,12 +2794,12 @@ class OneControlBleService : Service() {
     private fun republishAllDiscovery() {
         haDiscoveryPublished.clear()
         diagDiscoveryPublished = false
-        tankPlaceholdersPublished = false
 
         publishDiagnosticsDiscovery()
         publishHaVoltage()
-        publishTankPlaceholdersIfNeeded()
         publishDiscoveryForKnownDevices()
+        // Cleanup any legacy placeholder tank configs (1..3) that were published before real IDs were known.
+        cleanupLegacyPlaceholderTanks()
     }
 
     private fun handleMqttCommand(topic: String, payload: String) {
@@ -3133,6 +3121,20 @@ class OneControlBleService : Service() {
     }
 
     /**
+     * Clear legacy placeholder tank configs (ids 1..3) if they are not in the observed tank set.
+     */
+    private fun cleanupLegacyPlaceholderTanks() {
+        val placeholderIds = listOf(1, 2, 3)
+        placeholderIds.forEach { id ->
+            if (!seenTankIds.contains(id)) {
+                // Publish empty config to remove old entity, and clear retained state.
+                publishMqttRaw("homeassistant/sensor/tank_$id/config", "", retain = true)
+                publishMqtt("tank/$id", "", retain = true)
+            }
+        }
+    }
+
+    /**
      * Re-publish discovery for devices we've already seen to restore entities after HA cache clear.
      */
     private fun publishDiscoveryForKnownDevices() {
@@ -3146,6 +3148,8 @@ class OneControlBleService : Service() {
                 is DeviceStatus.Tank -> publishHaDiscoveryTankSensor(status.deviceId.toInt() and 0xFF)
             }
         }
+        // Also republish known tank sensors tracked via seenTankIds (for completeness)
+        seenTankIds.forEach { publishHaDiscoveryTankSensor(it) }
     }
 
     
