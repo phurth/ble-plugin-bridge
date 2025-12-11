@@ -11,18 +11,19 @@ import org.json.JSONObject
  */
 object HomeAssistantMqttDiscovery {
     private const val TAG = "HADiscovery"
+    private const val DEVICE_ID_BASE = "onecontrol_ble_v2"
     
     /**
      * Generate device info object for Home Assistant
      * All entities will be grouped under this device
      */
-    fun getDeviceInfo(gatewayMac: String): JSONObject {
+    fun getDeviceInfo(gatewayMac: String, appVersion: String? = null): JSONObject {
         return JSONObject().apply {
-            put("identifiers", JSONArray().put("onecontrol_ble_$gatewayMac"))
-            put("name", "OneControl BLE ${formatMacForDisplay(gatewayMac)}")
-            put("manufacturer", "Lippert Components Inc. (LCI)")
+            put("identifiers", JSONArray().put("${DEVICE_ID_BASE}_$gatewayMac"))
+            put("name", "OneControl BLE Gateway")
             put("model", "OneControl Gateway")
-            put("sw_version", "MyRvLink Protocol v6")
+            appVersion?.let { put("sw_version", "App Version: $it") } ?: put("sw_version", "App Version: MyRvLink Protocol v6")
+            put("connections", JSONArray().put(JSONArray().put("mac").put(formatMacForDisplay(gatewayMac))))
             // Removed via_device to prevent "Unknown Device" parent device
         }
     }
@@ -78,7 +79,8 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         stateTopic: String,
         commandTopic: String,
-        brightnessTopic: String
+        brightnessTopic: String,
+        appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_light_${deviceAddr.toString(16)}"
         val objectId = "light_${deviceAddr.toString(16).padStart(4, '0')}"
@@ -89,10 +91,11 @@ object HomeAssistantMqttDiscovery {
             put("default_entity_id", "light.$objectId")  // Replace deprecated object_id
             // Match legacy per-entity device grouping used by other entities
             put("device", JSONObject().apply {
-                put("identifiers", JSONArray().put("onecontrol_ble").put(objectId))
-                put("manufacturer", "Lippert")
+                put("identifiers", JSONArray().put(DEVICE_ID_BASE).put(objectId))
                 put("model", "OneControl Gateway")
-                put("name", "OneControl Gateway")
+                put("name", "OneControl BLE Gateway")
+                appVersion?.let { put("sw_version", "App Version: $it") }
+                put("connections", JSONArray().put(JSONArray().put("mac").put(formatMacForDisplay(gatewayMac))))
             })
 
             // Classic MQTT light schema: state + brightness topics
@@ -116,7 +119,8 @@ object HomeAssistantMqttDiscovery {
         deviceAddr: Int,
         deviceName: String,
         stateTopic: String,
-        commandTopic: String
+        commandTopic: String,
+        appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_switch_${deviceAddr.toString(16)}"
         val objectId = "switch_${deviceAddr.toString(16).padStart(4, '0')}"
@@ -125,7 +129,7 @@ object HomeAssistantMqttDiscovery {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
             put("default_entity_id", "switch.$objectId")  // Replace deprecated object_id
-            put("device", getDeviceInfo(gatewayMac))
+            put("device", getDeviceInfo(gatewayMac, appVersion))
             
             // State
             put("state_topic", stateTopic)
@@ -150,7 +154,8 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         stateTopic: String,
         commandTopic: String,
-        positionTopic: String
+        positionTopic: String,
+        appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_cover_${deviceAddr.toString(16)}"
         val objectId = "cover_${deviceAddr.toString(16).padStart(4, '0')}"
@@ -159,7 +164,7 @@ object HomeAssistantMqttDiscovery {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
             put("default_entity_id", "cover.$objectId")  // Replace deprecated object_id
-            put("device", getDeviceInfo(gatewayMac))
+            put("device", getDeviceInfo(gatewayMac, appVersion))
             
             // State
             put("state_topic", stateTopic)
@@ -188,7 +193,8 @@ object HomeAssistantMqttDiscovery {
         stateTopic: String,
         unit: String? = null,
         deviceClass: String? = null,
-        icon: String? = null
+        icon: String? = null,
+        appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_${sanitizeName(sensorName)}"
         
@@ -196,7 +202,7 @@ object HomeAssistantMqttDiscovery {
             put("unique_id", uniqueId)
             put("name", sensorName)
             put("default_entity_id", "sensor.${sanitizeName(sensorName)}")  // Replace deprecated object_id
-            put("device", getDeviceInfo(gatewayMac))
+            put("device", getDeviceInfo(gatewayMac, appVersion))
             
             // State
             put("state_topic", stateTopic)

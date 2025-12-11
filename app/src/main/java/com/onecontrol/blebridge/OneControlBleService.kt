@@ -632,6 +632,7 @@ class OneControlBleService : Service() {
 
     private var lastDataTimestampMs: Long = 0L
     private val DATA_HEALTH_TIMEOUT_MS = 15_000L  // consider healthy if data seen within 15s
+    private val appVersionString: String by lazy { resolveAppVersionString() }
 
     private fun computeDataHealthy(): Boolean {
         val now = System.currentTimeMillis()
@@ -726,6 +727,33 @@ class OneControlBleService : Service() {
         publishTankPlaceholdersIfNeeded()
     }
 
+    private fun formatMacForDisplay(mac: String): String {
+        return if (mac.contains(":")) mac else mac.chunked(2).joinToString(":")
+    }
+
+    private fun resolveAppVersionString(): String {
+        return try {
+            val pkg = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode else pkg.versionCode.toLong()
+            "${pkg.versionName} ($code)"
+        } catch (e: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun buildDeviceInfo(vararg identifiers: String): JSONObject {
+        val deviceIdentifiers = JSONArray()
+        identifiers.forEach { deviceIdentifiers.put(it) }
+        val macDisplay = formatMacForDisplay(gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC })
+        return JSONObject().apply {
+            put("identifiers", deviceIdentifiers)
+            put("connections", JSONArray().put(JSONArray().put("mac").put(macDisplay)))
+            put("model", "OneControl Gateway")
+            put("name", "OneControl BLE Gateway")
+            put("sw_version", "App Version: $appVersionString")
+        }
+    }
+
     private fun publishHaDiagnosticBinarySensor(
         objectId: String,
         name: String,
@@ -733,7 +761,10 @@ class OneControlBleService : Service() {
         nodeId: String
     ) {
         val macId = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.replace(":", "").lowercase()
-        val uniqueId = "onecontrol_ble_${macId}_diag_$objectId"
+        val macDisplay = gatewayMac.ifBlank { DEFAULT_GATEWAY_MAC }.let { mac ->
+            if (mac.contains(":")) mac else mac.chunked(2).joinToString(":")
+        }
+        val uniqueId = "onecontrol_ble_v2_${macId}_diag_$objectId"
         val discoveryTopic = "homeassistant/binary_sensor/$nodeId/$objectId/config"
         val payload = JSONObject().apply {
             put("name", name)
@@ -744,10 +775,10 @@ class OneControlBleService : Service() {
             put("entity_category", "diagnostic")
             put("device", JSONObject().apply {
                 // Match main device grouping used by other entities (identifiers = ["onecontrol_ble"])
-                put("identifiers", JSONArray().put("onecontrol_ble"))
-                put("manufacturer", "Lippert")
+                put("identifiers", JSONArray().put("onecontrol_ble_v2"))
+                put("connections", JSONArray().put(JSONArray().put("mac").put(macDisplay)))
                 put("model", "OneControl Gateway")
-                put("name", "OneControl Gateway")
+                put("name", "OneControl BLE Gateway")
             })
         }.toString()
         publishMqttRaw(discoveryTopic, payload, retain = true)
@@ -2956,7 +2987,8 @@ class OneControlBleService : Service() {
                     deviceName = deviceName,
                     stateTopic = stateTopic,
                     commandTopic = commandTopic,
-                    brightnessTopic = brightnessStateTopic
+                    brightnessTopic = brightnessStateTopic,
+                    appVersion = appVersionString
                 )
                 val discoveryTopic = "homeassistant/light/$objectId/config"
                 publishMqttRaw(discoveryTopic, discovery.toString(), retain = true)
@@ -2979,23 +3011,16 @@ class OneControlBleService : Service() {
         val commandTopic = "$mqttTopicPrefix/command/switch/${tableId.toUByte()}/${deviceId.toUByte()}"
         val key = "$objectId:switch"
         if (haDiscoveryPublished.add(key)) {
-            val payload = """
-                {
-                  "name": "$deviceName",
-                  "unique_id": "${objectId}_switch",
-                  "state_topic": "$stateTopic",
-                  "command_topic": "$commandTopic",
-                  "payload_on": "ON",
-                  "payload_off": "OFF",
-                  "device": {
-                    "identifiers": ["onecontrol_ble", "$objectId"],
-                    "manufacturer": "Lippert",
-                    "model": "OneControl Gateway",
-                    "name": "OneControl Gateway"
-                  }
-                }
-            """.trimIndent()
-            publishMqttRaw("homeassistant/switch/$objectId/config", payload, retain = true)
+            val payload = JSONObject().apply {
+                put("name", deviceName)
+                put("unique_id", "${objectId}_switch")
+                put("state_topic", stateTopic)
+                put("command_topic", commandTopic)
+                put("payload_on", "ON")
+                put("payload_off", "OFF")
+                put("device", buildDeviceInfo("onecontrol_ble", objectId))
+            }
+            publishMqttRaw("homeassistant/switch/$objectId/config", payload.toString(), retain = true)
         }
     }
 
@@ -3008,30 +3033,23 @@ class OneControlBleService : Service() {
         val commandTopic = "$mqttTopicPrefix/command/cover/${tableId.toUByte()}/${deviceId.toUByte()}"
         val key = "$objectId:cover"
         if (haDiscoveryPublished.add(key)) {
-            val payload = """
-                {
-                  "name": "$deviceName",
-                  "unique_id": "${objectId}_cover",
-                  "state_topic": "$stateTopic",
-                  "command_topic": "$commandTopic",
-                  "payload_open": "open",
-                  "payload_close": "close",
-                  "payload_stop": "stop",
-                  "state_open": "open",
-                  "state_closed": "closed",
-                  "state_opening": "opening",
-                  "state_closing": "closing",
-                  "device_class": "awning",
-                  "optimistic": true,
-                  "device": {
-                    "identifiers": ["onecontrol_ble", "$objectId"],
-                    "manufacturer": "Lippert",
-                    "model": "OneControl Gateway",
-                    "name": "OneControl Gateway"
-                  }
-                }
-            """.trimIndent()
-            publishMqttRaw("homeassistant/cover/$objectId/config", payload, retain = true)
+            val payload = JSONObject().apply {
+                put("name", deviceName)
+                put("unique_id", "${objectId}_cover")
+                put("state_topic", stateTopic)
+                put("command_topic", commandTopic)
+                put("payload_open", "open")
+                put("payload_close", "close")
+                put("payload_stop", "stop")
+                put("state_open", "open")
+                put("state_closed", "closed")
+                put("state_opening", "opening")
+                put("state_closing", "closing")
+                put("device_class", "awning")
+                put("optimistic", true)
+                put("device", buildDeviceInfo("onecontrol_ble", objectId))
+            }
+            publishMqttRaw("homeassistant/cover/$objectId/config", payload.toString(), retain = true)
             // Clear any old retained position topic (legacy) and publish supported state
             publishMqtt("device/${tableId}/${deviceId}/position", "", retain = true)
             publishMqtt("device/${tableId}/${deviceId}/state", "closed", retain = true)
@@ -3041,23 +3059,16 @@ class OneControlBleService : Service() {
     private fun publishHaVoltage() {
         val objectId = "sensor_voltage"
         if (haDiscoveryPublished.add(objectId)) {
-            val payload = """
-                {
-                  "name": "System Voltage",
-                  "unique_id": "system_voltage",
-                  "state_topic": "$mqttTopicPrefix/system/voltage",
-                  "unit_of_measurement": "V",
-                  "device_class": "voltage",
-                  "state_class": "measurement",
-                  "device": {
-                    "identifiers": ["onecontrol_ble", "system_voltage"],
-                    "manufacturer": "Lippert",
-                    "model": "OneControl Gateway",
-                    "name": "OneControl Gateway"
-                  }
-                }
-            """.trimIndent()
-            publishMqttRaw("homeassistant/sensor/$objectId/config", payload, retain = true)
+            val payload = JSONObject().apply {
+                put("name", "System Voltage")
+                put("unique_id", "system_voltage")
+                put("state_topic", "$mqttTopicPrefix/system/voltage")
+                put("unit_of_measurement", "V")
+                put("device_class", "voltage")
+                put("state_class", "measurement")
+                put("device", buildDeviceInfo("onecontrol_ble", "system_voltage"))
+            }
+            publishMqttRaw("homeassistant/sensor/$objectId/config", payload.toString(), retain = true)
         }
     }
 
@@ -3065,21 +3076,14 @@ class OneControlBleService : Service() {
         val objectId = "tank_$tankId"
         if (haDiscoveryPublished.add(objectId)) {
             val stateTopic = "$mqttTopicPrefix/tank/$tankId"
-            val payload = """
-                {
-                  "name": "Tank $tankId",
-                  "unique_id": "onecontrol_tank_$tankId",
-                  "state_topic": "$stateTopic",
-                  "unit_of_measurement": "%",
-                  "device": {
-                    "identifiers": ["onecontrol_ble", "tank_$tankId"],
-                    "manufacturer": "Lippert",
-                    "model": "OneControl Gateway",
-                    "name": "OneControl Gateway"
-                  }
-                }
-            """.trimIndent()
-            publishMqttRaw("homeassistant/sensor/$objectId/config", payload, retain = true)
+            val payload = JSONObject().apply {
+                put("name", "Tank $tankId")
+                put("unique_id", "onecontrol_tank_$tankId")
+                put("state_topic", stateTopic)
+                put("unit_of_measurement", "%")
+                put("device", buildDeviceInfo("onecontrol_ble", "tank_$tankId"))
+            }
+            publishMqttRaw("homeassistant/sensor/$objectId/config", payload.toString(), retain = true)
         }
     }
 

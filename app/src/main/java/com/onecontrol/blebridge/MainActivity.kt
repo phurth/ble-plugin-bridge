@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     private lateinit var statusText: TextView
+    private lateinit var appVersionText: TextView
     private lateinit var checkService: TextView
     private lateinit var checkPaired: TextView
     private lateinit var checkBle: TextView
@@ -124,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         
         statusText = findViewById(R.id.statusText)
+        appVersionText = findViewById(R.id.appVersionText)
         startButton = findViewById(R.id.startServiceButton)
         stopButton = findViewById(R.id.stopServiceButton)
         checkService = findViewById(R.id.checkService)
@@ -192,6 +194,7 @@ class MainActivity : AppCompatActivity() {
         loadConfigFieldsFromPrefs()
         attachConfigSaveHandler()
         attachDiagnosticsHandlers()
+        appVersionText.text = "Version: ${getAppVersionString()}"
         
         // Bind to service to access control methods (defer to avoid blocking onCreate)
         handler.postDelayed({
@@ -257,6 +260,16 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             loadConfigFieldsFromPrefs()
+        }
+    }
+
+    private fun getAppVersionString(): String {
+        return try {
+            val pkg = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode else pkg.versionCode.toLong()
+            "${pkg.versionName} ($code)"
+        } catch (e: Exception) {
+            "unknown"
         }
     }
 

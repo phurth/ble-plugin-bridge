@@ -3,16 +3,41 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+import java.io.ByteArrayOutputStream
+
+fun runGitCommand(vararg args: String): String? {
+    return try {
+        val stdout = ByteArrayOutputStream()
+        exec {
+            commandLine("git", *args)
+            standardOutput = stdout
+            isIgnoreExitValue = true
+        }
+        stdout.toString().trim().ifEmpty { null }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+fun gitDescribe(): String? = runGitCommand("describe", "--tags", "--dirty")
+fun gitCommitCount(): Int? = runGitCommand("rev-list", "--count", "HEAD")?.toIntOrNull()
+
 android {
     namespace = "com.onecontrol.blebridge"
     compileSdk = 34
+
+    val defaultVersionName = "1.0.5"
+    val defaultVersionCode = 5
+    val isReleaseTask = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+    val gitVersionName = if (isReleaseTask) gitDescribe() else null
+    val gitVersionCode = if (isReleaseTask) gitCommitCount() else null
 
     defaultConfig {
         applicationId = "com.onecontrol.blebridge"
         minSdk = 26  // Android 8.0 (for BLE support)
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.0"
+        versionCode = gitVersionCode ?: defaultVersionCode
+        versionName = gitVersionName ?: defaultVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
