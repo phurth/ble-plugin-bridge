@@ -14,6 +14,7 @@ hci_capture_*.json
 # Docs are ignored except the root README
 *.md
 !README.md
+!docs/technical_spec.md
 /backups/
 *.iml
 .gradle
