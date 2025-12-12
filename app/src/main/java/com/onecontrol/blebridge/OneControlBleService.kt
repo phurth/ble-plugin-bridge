@@ -724,8 +724,6 @@ class OneControlBleService : Service() {
             stateTopic = "$mqttTopicPrefix/diag/permissions_ok",
             nodeId = nodeId
         )
-
-        publishTankPlaceholdersIfNeeded()
     }
 
     private fun formatMacForDisplay(mac: String): String {

@@ -7,6 +7,7 @@ local.properties
 *.keystore
 *.jks
 *.log
+*.apk
 .DS_Store
 Thumbs.db
 hci_capture_*.json
