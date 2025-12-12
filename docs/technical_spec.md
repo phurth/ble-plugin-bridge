@@ -21,19 +21,24 @@ This document summarizes the current Android BLE bridge, the rationale for choos
 - MTU/bonding: request MTU ≥ 185; require LE Secure Connections bonding. Notifications must be enabled (CCCD = 0x0001) on `00000034`; indications are not used.
 - **Services**
   - Auth Service `00000010-0200-a58e-e411-afe28044e62c`
-    - Challenge `00000012-...` (seed/unlock status)
-    - KEY `00000013-...` (4-byte write, WRITE_NO_RESPONSE; enables “data mode”)
+    - Challenge `00000012-...` (seed/unlock status; read to get challenge for KEY calculation)
+    - KEY `00000013-...` (4-byte write, WRITE_TYPE_NO_RESPONSE; **critical**—enables "data mode" without which notifications never flow)
     - Status `00000014-...`
   - Data Service `00000030-0200-a58e-e411-afe28044e62c`
-    - Write `00000033-...` (MyRvLink commands, WRITE_NO_RESPONSE)
-    - Read/Notify `00000034-...` (MyRvLink events)
-- **Startup sequence**
+    - Write `00000033-...` (MyRvLink commands, WRITE_TYPE_NO_RESPONSE)
+    - Read/Notify `00000034-...` (MyRvLink events; notifications only work after KEY write)
+- **Startup sequence** (order is critical):
 1) Connect and bond; negotiate MTU.  
 2) Discover services/characteristics.  
-3) Write KEY (`00000013`, 4 bytes) to enter data mode.  
-4) Enable notifications on `00000034` (write CCCD `0x2902` = `0x0001`).  
-5) Start stream reader consuming notifications only (no active reads).  
-6) Begin heartbeat (`GetDevices`) to keep link alive and refresh state.
+3) **Read challenge from `00000012`** (4-byte value).  
+4) **Calculate KEY** using TEA encryption (see Authentication section).  
+5) **Write KEY to `00000013`** (WRITE_TYPE_NO_RESPONSE; enables "data mode"—**required before notifications**).  
+6) Wait ~200ms for gateway to enter data mode.  
+7) **Read `00000012` again** to verify "Unlocked" status (optional but recommended).  
+8) Enable notifications on `00000034` (write CCCD `0x2902` = `0x0001`).  
+9) Start stream reader consuming notifications only (no active reads).  
+10) Begin heartbeat (`GetDevices`) to keep link alive and refresh state.
+- **Common pitfall**: Skipping the KEY write (step 5) will cause the CCCD subscription to succeed, but no notifications will arrive. The gateway accepts the subscription but remains in a non-data mode state, leading to timeouts and disconnects. This is easy to miss because the CCCD write callback indicates success, but the gateway simply won't send data.
 
 ## MyRvLink framing
 - Key observation: every BLE notification is a COBS frame ending with 0x00 and protected by CRC8 (init 0x55). Event byte is first, followed by type-specific payload; commands mirror this with a clientCommandId prefix before COBS/CRC8.
@@ -85,9 +90,13 @@ This document summarizes the current Android BLE bridge, the rationale for choos
   - State topics retain last values so HA recovers after restart.
 
 ## Authentication / Unlock
-- Key observation: unlocking requires a 4-byte KEY write to `00000013` after bonding/MTU. The KEY value differs by gateway/firmware; we currently use a captured value and can extend to derive session keys (TEA-based per decompiled code) if newer gateways demand it. Challenge/status chars (`00000012/00000014`) report success.
-- Data Service gateways require a 4-byte KEY write to `00000013` before notifications flow. Values observed vary per session. Current implementation writes a captured value (bundled in app config); extendable to compute session-specific keys (TEA-derived per decompiled OneControl code) if a gateway rejects the static key. Without a successful KEY write, notifications stay silent.
-- Challenge/status reads on `00000012/00000014` are used to confirm “Unlocked”.
+- **Critical discovery**: Data Service gateways require a 4-byte KEY write to `00000013` **before** enabling notifications. This was the missing piece that prevented notifications from flowing in early implementations.
+- **What wasn't working**: Without the KEY write, the gateway never enters "data mode". The CCCD subscription succeeds (gateway accepts the notification subscription), but the gateway has nothing to send because it's not in data mode. After ~8 seconds of inactivity, the gateway times out and disconnects. This led to the false impression that notifications were broken or that the gateway didn't support them.
+- **Why it wasn't obvious**: The KEY write uses `WRITE_TYPE_NO_RESPONSE`, so there's no callback to confirm it succeeded. The gateway doesn't reject the CCCD write—it accepts it silently but won't send notifications until data mode is enabled. This made debugging difficult because the subscription appeared successful.
+- **The solution**: Write the calculated KEY value to `00000013` after MTU negotiation and service discovery, then wait ~200ms before enabling notifications. The KEY is calculated dynamically using TEA encryption from a challenge read from `00000012` (see `docs/AUTHENTICATION_ALGORITHM.md` for the algorithm). The current implementation reads the challenge, calculates the KEY via TEA, writes it, then verifies unlock status before proceeding.
+- **Gateway state persistence**: Once the KEY is written successfully, the gateway remembers "data mode" across short disconnects/reconnects. The KEY write is typically only needed on first connection or after a long idle period/power cycle. Quick reconnects can skip the KEY write if the gateway is still in data mode.
+- **Timing observations**: KEY write happens after MTU exchange (~4 seconds after connection). After KEY write, wait ~200ms before writing CCCD. First notification typically arrives ~69ms after CCCD write. These timings match the official app's behavior.
+- Challenge/status reads on `00000012/00000014` are used to confirm "Unlocked" state after KEY write.
 
 ## Heartbeat / Keepalive
 - Periodic `GetDevices` (default 5s) keeps the gateway active and refreshes state; mirrors official app traces. If the heartbeat stops, some gateways slow or stop emitting notifications.
