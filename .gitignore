@@ -15,6 +15,7 @@ hci_capture_*.json
 *.md
 !README.md
 !docs/technical_spec.md
+!docs/AUTHENTICATION_ALGORITHM.md
 /backups/
 *.iml
 .gradle
