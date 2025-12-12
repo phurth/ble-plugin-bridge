@@ -25,6 +25,7 @@ Android foreground service that connects to a Lippert OneControl BLE gateway, au
 - Covers (slides & awnings): discovery published; command handling present but completely untested
 - Tank sensors: retained placeholders; revisit parsing when live data available.
 - DSI fault detection (e.g., gas water heater 0x0806): capture fault/normal frames, parse fault flag, and publish a diagnostic binary sensor.
+- Investigate extending the app to also bridge BLE from other manufacturer's devices
 
 ## MQTT topics (prefix `onecontrol/ble`)
 - State: `device/<tableId>/<deviceId>/...` (e.g., state, brightness, position)
