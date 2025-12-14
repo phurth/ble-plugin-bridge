@@ -415,6 +415,99 @@ data class TankSensorStatusV2Event(
 }
 
 // ============================================================================
+// HvacStatus Event (0x0B)
+// ============================================================================
+
+/**
+ * HVAC Status Event - Multiple zones per event
+ * Format: [EventType=0x0B][DeviceTableId][DeviceId1][8-byte status1][2-byte extended1][DeviceId2][8-byte status2][2-byte extended2]...
+ * 11 bytes per zone: DeviceId + 8-byte status + 2-byte extended
+ */
+data class HvacStatusEvent(
+    val deviceTableId: Byte,
+    val zones: List<HvacZoneStatus>
+) {
+    data class HvacZoneStatus(
+        val deviceId: Byte,
+        val commandByte: Byte,  // HeatMode, HeatSource, FanMode bitfields
+        val lowTripTempF: Int,  // Heat setpoint (°F)
+        val highTripTempF: Int, // Cool setpoint (°F)
+        val zoneStatus: Byte,   // Zone mode + failed thermistor flag
+        val indoorTempF: Float?, // Indoor temperature (°F) or null if invalid
+        val outdoorTempF: Float?, // Outdoor temperature (°F) or null if invalid
+        val dtc: Int  // Diagnostic Trouble Code (ushort)
+    ) {
+        // Decode command byte bitfields
+        val heatMode: Int get() = commandByte.toInt() and 0x07  // bits 0-2
+        val heatSource: Int get() = (commandByte.toInt() shr 4) and 0x03  // bits 4-5
+        val fanMode: Int get() = (commandByte.toInt() shr 6) and 0x03  // bits 6-7
+        val zoneMode: Int get() = zoneStatus.toInt() and 0x8F  // bits 0-6 (mask 0x8F)
+        val failedThermistor: Boolean get() = (zoneStatus.toInt() and 0x80) != 0
+    }
+
+    companion object {
+        private const val MIN_LENGTH = 13  // EventType (1) + DeviceTableId (1) + DeviceId (1) + Status (8) + Extended (2)
+        private const val BYTES_PER_ZONE = 11  // DeviceId (1) + Status (8) + Extended (2)
+        private val INVALID_TEMP_SENTINELS = setOf(0x8000, 0x2FF0)
+
+        fun decode(data: ByteArray): HvacStatusEvent? {
+            if (data.size < MIN_LENGTH) return null
+            if (data[0].toInt() and 0xFF != 0x0B) return null  // HvacStatus
+
+            val deviceTableId = data[1]
+            val zones = mutableListOf<HvacZoneStatus>()
+
+            // Parse zones: each zone is 11 bytes (DeviceId + 8-byte status + 2-byte extended)
+            var index = 2  // Start after EventType and DeviceTableId
+            while (index + BYTES_PER_ZONE <= data.size) {
+                val deviceId = data[index]
+                val commandByte = data[index + 1]  // First byte of 8-byte status
+                val lowTripTempF = data[index + 2].toInt() and 0xFF
+                val highTripTempF = data[index + 3].toInt() and 0xFF
+                val zoneStatus = data[index + 4]
+                
+                // Indoor temp: signed 8.8 fixed point, big-endian (bytes 5-6 of status)
+                val indoorTempRaw = ((data[index + 5].toInt() and 0xFF) shl 8) or (data[index + 6].toInt() and 0xFF)
+                val indoorTempF = decodeTemperature(indoorTempRaw)
+                
+                // Outdoor temp: signed 8.8 fixed point, big-endian (bytes 7-8 of status)
+                val outdoorTempRaw = ((data[index + 7].toInt() and 0xFF) shl 8) or (data[index + 8].toInt() and 0xFF)
+                val outdoorTempF = decodeTemperature(outdoorTempRaw)
+                
+                // DTC: ushort, big-endian (2-byte extended)
+                val dtc = ((data[index + 9].toInt() and 0xFF) shl 8) or (data[index + 10].toInt() and 0xFF)
+
+                zones.add(HvacZoneStatus(
+                    deviceId = deviceId,
+                    commandByte = commandByte,
+                    lowTripTempF = lowTripTempF,
+                    highTripTempF = highTripTempF,
+                    zoneStatus = zoneStatus,
+                    indoorTempF = indoorTempF,
+                    outdoorTempF = outdoorTempF,
+                    dtc = dtc
+                ))
+
+                index += BYTES_PER_ZONE
+            }
+
+            return if (zones.isNotEmpty()) HvacStatusEvent(deviceTableId, zones) else null
+        }
+
+        private fun decodeTemperature(raw: Int): Float? {
+            if (raw in INVALID_TEMP_SENTINELS) return null
+            // Signed 8.8 fixed point: if bit 15 is set, it's negative
+            val signed = if (raw and 0x8000 != 0) raw - 0x10000 else raw
+            return signed / 256.0f
+        }
+    }
+
+    override fun toString(): String {
+        return "HvacStatus(tableId=$deviceTableId, zones=${zones.size})"
+    }
+}
+
+// ============================================================================
 // Device State Tracker
 // ============================================================================
 

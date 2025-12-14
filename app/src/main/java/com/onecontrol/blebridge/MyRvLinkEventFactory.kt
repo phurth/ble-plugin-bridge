@@ -44,6 +44,7 @@ object MyRvLinkEventFactory {
     /**
      * Check if data looks like a MyRvLink command response
      * Format: [ClientCommandId (2 bytes)][CommandType (1 byte)][Response data...]
+     * Valid command types: 0x01 (GetDevices), 0x02 (GetDevicesMetadata)
      */
     fun isCommandResponse(data: ByteArray): Boolean {
         if (data.size < 3) {
@@ -51,7 +52,13 @@ object MyRvLinkEventFactory {
         }
         // Check if first 2 bytes form a reasonable command ID (1-0xFFFE)
         val commandId = ((data[1].toInt() and 0xFF) shl 8) or (data[0].toInt() and 0xFF)
-        return commandId in 1..0xFFFE
+        if (commandId !in 1..0xFFFE) {
+            return false
+        }
+        // Also verify that byte 2 is a valid command type (0x01 or 0x02)
+        // This prevents events from being misidentified as command responses
+        val commandType = data[2].toInt() and 0xFF
+        return commandType == 0x01 || commandType == 0x02
     }
 
     /**

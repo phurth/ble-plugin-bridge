@@ -18,7 +18,8 @@ class BootCompletedReceiver : BroadcastReceiver() {
         if (intent?.action == Intent.ACTION_BOOT_COMPLETED) {
             val prefs: SharedPreferences =
                 context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val startOnBoot = prefs.getBoolean(PREF_START_ON_BOOT, false)
+            // Default changed from false to true for better reliability
+            val startOnBoot = prefs.getBoolean(PREF_START_ON_BOOT, true)
             if (startOnBoot) {
                 Log.i("BootCompletedReceiver", "Starting OneControlBleService after boot")
                 val serviceIntent = Intent(context, OneControlBleService::class.java)

@@ -13,11 +13,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -245,6 +248,14 @@ class OneControlBleService : Service() {
     // Device status tracking
     private val deviceStatuses = mutableMapOf<String, DeviceStatus>()  // Key: "deviceTableId:deviceId"
     private val seenTankIds = mutableSetOf<Int>()
+    private val hvacZonesWithHeat = mutableSetOf<String>()  // Key: "deviceTableId:deviceId" - tracks zones that have heat capability
+    private val hvacLastHeatCapability = mutableMapOf<String, Boolean>()  // Track last known heat capability to detect changes
+    private val hvacHeatSourcePreference = mutableMapOf<String, Int>()  // Key: "deviceTableId:deviceId", value: 0=PreferGas, 1=PreferHeatPump, 2=Other, 3=Reserved
+    private val hvacZoneCapabilities = mutableMapOf<String, Pair<Boolean, Boolean>>()  // Key: "deviceTableId:deviceId", value: (hasGasFurnace, hasHeatPump)
+    
+    // Tank capability tracking (from device enumeration)
+    private val tankPrecisionType = mutableMapOf<String, Int>()  // Key: "deviceTableId:deviceId", value: 0=Low, 1=Medium, 2=High
+    private val tankFluidType = mutableMapOf<String, String>()  // Key: "deviceTableId:deviceId", value: "water" or "fuel"
 
     // Active stream reading
     private val notificationQueue = java.util.concurrent.ConcurrentLinkedQueue<ByteArray>()
@@ -385,10 +396,14 @@ class OneControlBleService : Service() {
         Log.d(TAG, "Registered bond state receiver")
         
         // Apply stored settings
-        watchdogEnabled = prefs.getBoolean(PREF_WATCHDOG, false)
+        // Enable watchdog by default (was false, now defaults to true for better reliability)
+        watchdogEnabled = prefs.getBoolean(PREF_WATCHDOG, true)  // Default changed from false to true
         if (watchdogEnabled) {
             startWatchdog()
         }
+        
+        // Request battery optimization exemption to prevent system from killing service
+        requestBatteryOptimizationExemption()
         
         // Initialize Bluetooth
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -467,7 +482,7 @@ class OneControlBleService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "OneControl BLE Bridge",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_HIGH  // Changed from IMPORTANCE_LOW to reduce kill risk
             ).apply {
                 description = "OneControl BLE Bridge Service"
             }
@@ -489,12 +504,39 @@ class OneControlBleService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)  // High priority to reduce kill risk
             .build()
     }
     
     private fun updateNotification(text: String) {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, createNotification(text))
+    }
+    
+    /**
+     * Request battery optimization exemption to prevent system from killing the service.
+     * This opens a system dialog that the user must approve.
+     */
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val packageName = packageName
+            
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    Log.i(TAG, "🔋 Requested battery optimization exemption")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to request battery optimization exemption: ${e.message}")
+                }
+            } else {
+                Log.d(TAG, "🔋 Battery optimization exemption already granted")
+            }
+        }
     }
     
     private fun broadcastLog(message: String) {
@@ -2449,33 +2491,75 @@ class OneControlBleService : Service() {
     private fun processMyRvLinkEvent(data: ByteArray) {
         if (data.isEmpty()) return
 
+        val isDataServiceGateway = (canService == null && dataService != null)
+        
+        // For Data Service gateways, try decoding without header stripping first
+        // If that fails, try with 2-byte header stripping (some frames may have headers)
+        var eventData = data
+        var triedStripping = false
+        
+        if (isDataServiceGateway && data.size >= 2) {
+            // First try: decode without stripping (in case frame doesn't have header)
+            var event = MyRvLinkEventFactory.tryDecodeEvent(data)
+            var isCommandResponse = MyRvLinkEventFactory.isCommandResponse(data)
+            
+            if (event == null && !isCommandResponse) {
+                // Didn't work without stripping - try with 2-byte header stripped
+                val header = String.format("%02X %02X", data[0].toInt() and 0xFF, data[1].toInt() and 0xFF)
+                eventData = data.sliceArray(2 until data.size)
+                triedStripping = true
+                Log.d(TAG, "🔍 Data Service: First decode failed, trying with 2-byte header stripped (0x$header)")
+                Log.d(TAG, "🔍 Original: ${data.sliceArray(0 until minOf(10, data.size)).joinToString(" ") { "%02X".format(it) }}${if (data.size > 10) "..." else ""}")
+                Log.d(TAG, "🔍 Stripped:  ${eventData.sliceArray(0 until minOf(10, eventData.size)).joinToString(" ") { "%02X".format(it) }}${if (eventData.size > 10) "..." else ""}")
+            } else {
+                Log.d(TAG, "✅ Data Service: Decoded without header stripping")
+            }
+        }
+
         // First try to decode as MyRvLink event. Some event frames (e.g., tank status)
         // can look like "valid" command IDs in the first two bytes; if we check command
         // responses first we drop real events.
-        val event = MyRvLinkEventFactory.tryDecodeEvent(data)
+        val event = MyRvLinkEventFactory.tryDecodeEvent(eventData)
         if (event != null) {
+            if (triedStripping) {
+                Log.d(TAG, "✅ Decoded as event (with header stripped): ${event.eventType.name} (0x${event.eventType.value.toString(16)})")
+            } else {
+                Log.d(TAG, "✅ Decoded as event (no stripping): ${event.eventType.name} (0x${event.eventType.value.toString(16)})")
+            }
             handleMyRvLinkEvent(event)
             return
         }
 
         // Otherwise treat as command response
-        if (MyRvLinkEventFactory.isCommandResponse(data)) {
-            val commandId = MyRvLinkEventFactory.extractCommandId(data)
+        if (MyRvLinkEventFactory.isCommandResponse(eventData)) {
+            val commandId = MyRvLinkEventFactory.extractCommandId(eventData)
             if (commandId != null) {
-                val commandType = data[2].toInt() and 0xFF
-                Log.i(TAG, "📦 Command Response: CommandId=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}, size=${data.size} bytes")
+                val commandType = eventData[2].toInt() and 0xFF
+                if (triedStripping) {
+                    Log.i(TAG, "📦 Command Response (with header stripped): CommandId=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}, size=${eventData.size} bytes")
+                } else {
+                    Log.i(TAG, "📦 Command Response (no stripping): CommandId=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}, size=${eventData.size} bytes")
+                }
                 broadcastLog("📦 Command Response: ID=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}")
                 
                 when (commandType) {
-                    0x01 -> handleGetDevicesResponse(data)          // GetDevices
-                    0x02 -> handleGetDevicesMetadataResponse(data)  // GetDevicesMetadata
+                    0x01 -> handleGetDevicesResponse(eventData)          // GetDevices
+                    0x02 -> handleGetDevicesMetadataResponse(eventData)  // GetDevicesMetadata
                 }
+            } else {
+                Log.w(TAG, "⚠️ Command response detected but couldn't extract command ID")
             }
             return
         }
 
         // Not a recognized event/response - log for debugging
-        Log.d(TAG, "⚠️ Unknown data format: ${data.size} bytes - ${data.joinToString(" ") { "%02X".format(it) }}")
+        Log.w(TAG, "⚠️ Unknown data format: ${data.size} bytes")
+        if (triedStripping) {
+            Log.w(TAG, "⚠️ Tried both with and without header stripping - both failed")
+        }
+        Log.w(TAG, "⚠️ Final attempt data: ${eventData.joinToString(" ") { "%02X".format(it) }}")
+        Log.w(TAG, "⚠️ First byte: 0x${(eventData[0].toInt() and 0xFF).toString(16)}")
+        Log.w(TAG, "⚠️ isDataServiceGateway: $isDataServiceGateway")
     }
 
     /**
@@ -2534,6 +2618,11 @@ class OneControlBleService : Service() {
                 Log.i(TAG, "💧 TankSensorStatusV2 event received")
                 broadcastLog("💧 TankSensorStatusV2 event")
                 handleTankSensorStatusV2(event.rawData)
+            }
+            MyRvLinkEventType.HvacStatus -> {
+                Log.i(TAG, "❄️ HvacStatus event received")
+                broadcastLog("❄️ HvacStatus event")
+                handleHvacStatus(event.rawData)
             }
             MyRvLinkEventType.RealTimeClock -> {
                 Log.i(TAG, "🕐 RealTimeClock event received")
@@ -2702,6 +2791,10 @@ class OneControlBleService : Service() {
         }
         
         try {
+            // Last Will and Testament: If app disconnects unexpectedly, broker will publish "offline"
+            val willTopic = "$mqttTopicPrefix/availability"
+            val willMessage = "offline".toByteArray()
+            
             val options = MqttConnectOptions().apply {
                 isAutomaticReconnect = true
                 isCleanSession = true
@@ -2709,7 +2802,11 @@ class OneControlBleService : Service() {
                 keepAliveInterval = 60
                 userName = mqttUsername
                 password = mqttPassword.toCharArray()
+                // Last Will and Testament: qos=1 (at least once), retained=true (so HA sees it immediately)
+                setWill(willTopic, willMessage, 1, true)
             }
+            
+            Log.d(TAG, "MQTT LWT configured: topic=$willTopic, message=offline")
             
             Log.d(TAG, "Connecting to MQTT broker: $mqttBroker")
             // Use blocking connect in background thread
@@ -2746,25 +2843,94 @@ class OneControlBleService : Service() {
         publishDiagnosticsState()
         broadcastServiceState()
         publishMqtt("status", "connected", retain = true)
+        // Publish "online" to availability topic to clear any "offline" LWT message
+        publishMqtt("availability", "online", retain = true)
+        Log.i(TAG, "📡 Published availability: online")
         subscribeMqttCommands()
     }
 
     private fun handleTankSensorStatus(data: ByteArray) {
         TankSensorStatusEvent.decode(data)?.let { evt ->
+            Log.d(TAG, "💧 handleTankSensorStatus: ${evt.tanks.size} tanks")
             evt.tanks.forEach { tank ->
+                val key = "${evt.deviceTableId}:${tank.deviceId}"
+                val deviceKey = deviceKey(evt.deviceTableId, tank.deviceId)
+                
+                // Check device enumeration for capability info
+                val deviceDef = deviceDefinitions[deviceKey]
+                val (precisionType, fluidType) = deviceDef?.rawCapability?.let { rawCap ->
+                    decodeTankCapability(rawCap)
+                } ?: Pair(null, null)
+                
+                // Store capability info if available
+                precisionType?.let { tankPrecisionType[key] = it }
+                fluidType?.let { tankFluidType[key] = it }
+                
                 val normalized = normalizeTankPercent(tank.percent)
-                publishTankReading(evt.deviceTableId, tank.deviceId, normalized)
+                Log.d(TAG, "💧 Tank ${tank.deviceId}: percent=$normalized, precision=$precisionType, fluid=$fluidType")
+                publishTankReading(evt.deviceTableId, tank.deviceId, normalized, precisionType, fluidType)
             }
+        } ?: run {
+            Log.w(TAG, "💧 Failed to decode TankSensorStatus event")
         }
     }
 
     private fun handleTankSensorStatusV2(data: ByteArray) {
         TankSensorStatusV2Event.decode(data)?.let { evt ->
             evt.percent?.let { raw ->
+                val key = "${evt.deviceTableId}:${evt.deviceId}"
+                val deviceKey = deviceKey(evt.deviceTableId, evt.deviceId)
+                
+                // Check device enumeration for capability info
+                val deviceDef = deviceDefinitions[deviceKey]
+                val (precisionType, fluidType) = deviceDef?.rawCapability?.let { rawCap ->
+                    decodeTankCapability(rawCap)
+                } ?: Pair(null, null)
+                
+                // Store capability info if available
+                precisionType?.let { tankPrecisionType[key] = it }
+                fluidType?.let { tankFluidType[key] = it }
+                
                 val normalized = normalizeTankPercent(raw)
-                publishTankReading(evt.deviceTableId, evt.deviceId, normalized)
+                publishTankReading(evt.deviceTableId, evt.deviceId, normalized, precisionType, fluidType)
             }
         }
+    }
+    
+    /**
+     * Decode tank sensor capability from rawCapability byte.
+     * Based on LogicalDeviceTankSensorCapability.cs
+     * 
+     * Bit layout:
+     * - Bit 0 (0x01): SensorFluidType (0=Water, 1=Fuel) AND also used for MediumPrecision
+     * - Bit 1 (0x02): SensorPrecisionType HighPrecision flag
+     * 
+     * Precision logic (from C# code):
+     * - If bit 1 (0x02) is set → HighPrecision
+     * - Else if bit 0 (0x01) is set → MediumPrecision
+     * - Otherwise → LowPrecision
+     * 
+     * @param rawCapability Raw capability byte from device enumeration
+     * @return Pair of (precisionType, fluidType) where:
+     *   precisionType: 0=Low, 1=Medium, 2=High, or null if unknown
+     *   fluidType: "water" or "fuel", or null if unknown
+     */
+    private fun decodeTankCapability(rawCapability: Int): Pair<Int?, String?> {
+        // Bit 0 (0x01): SensorFluidType - 0=Water, 1=Fuel
+        val isFuel = (rawCapability and 0x01) != 0
+        val fluidType = if (isFuel) "fuel" else "water"
+        
+        // SensorPrecisionType logic (from LogicalDeviceTankSensorCapability.cs):
+        // - If (RawValue & 2) == 2 → HighPrecision
+        // - Else if (RawValue & 1) == 1 → MediumPrecision
+        // - Otherwise → LowPrecision
+        val precisionType = when {
+            (rawCapability and 0x02) != 0 -> 2  // HighPrecision (bit 1 set)
+            (rawCapability and 0x01) != 0 -> 1  // MediumPrecision (bit 0 set, bit 1 not set)
+            else -> 0  // LowPrecision (neither bit set)
+        }
+        
+        return Pair(precisionType, fluidType)
     }
 
     private fun normalizeTankPercent(raw: Int): Int {
@@ -2778,12 +2944,146 @@ class OneControlBleService : Service() {
         }
     }
 
-    private fun publishTankReading(tableId: Byte, deviceId: Byte, percent: Int) {
+    private fun publishTankReading(tableId: Byte, deviceId: Byte, percent: Int, precisionType: Int? = null, fluidType: String? = null) {
         val tankId = deviceId.toInt() and 0xFF
         val key = "${tableId}:${deviceId}"
         seenTankIds.add(tankId)
-        deviceStatuses[key] = DeviceStatus.Tank(tableId, deviceId, percent)
-        publishMqtt("tank/$tankId", percent.toString(), retain = true)
+        
+        // Use stored capability if not provided
+        val finalPrecisionType = precisionType ?: tankPrecisionType[key]
+        val finalFluidType = fluidType ?: tankFluidType[key]
+        
+        deviceStatuses[key] = DeviceStatus.Tank(tableId, deviceId, percent, finalPrecisionType, finalFluidType)
+        
+        // Publish state as simple numeric value (not JSON) for better HA compatibility
+        // Home Assistant MQTT discovery sensors work better with simple state values
+        val stateTopic = "$mqttTopicPrefix/tank/$tankId"
+        publishMqttRaw(stateTopic, percent.toString(), retain = true)
+        Log.d(TAG, "💧 Published tank state: topic=$stateTopic, level=$percent%")
+        
+        // Publish discovery (force republish if capability info is newly available)
+        val objectId = "tank_$tankId"
+        val hadCapabilityBefore = tankPrecisionType.containsKey(key) || tankFluidType.containsKey(key)
+        val hasCapabilityNow = finalPrecisionType != null || finalFluidType != null
+        
+        // If capability info is newly available, force rediscovery
+        if (hasCapabilityNow && !hadCapabilityBefore) {
+            haDiscoveryPublished.remove(objectId)
+            Log.i(TAG, "💧 Tank $tankId capability info now available - forcing rediscovery")
+        }
+        
+        // Always try to publish discovery (will only publish if not already published, or if we removed it above)
+        // Note: State is published first so HA has something to read when discovery is processed
+        publishHaDiscoveryTankSensor(tankId, finalPrecisionType, finalFluidType)
+    }
+
+    private fun handleHvacStatus(data: ByteArray) {
+        try {
+            HvacStatusEvent.decode(data)?.let { event ->
+                event.zones.forEach { zone ->
+                    val key = "${event.deviceTableId}:${zone.deviceId}"
+                    val deviceKey = deviceKey(event.deviceTableId, zone.deviceId)
+                    
+                    // Check device enumeration for capability info (most reliable)
+                    val deviceDef = deviceDefinitions[deviceKey]
+                    val capabilityInfo = deviceDef?.rawCapability?.let { rawCap ->
+                        // ClimateZoneCapabilityFlag: GasFurnace=1, AirConditioner=2, HeatPump=4
+                        // Heat capability = GasFurnace OR (HeatPump AND AirConditioner)
+                        val hasGasHeat = (rawCap and 0x01) != 0  // Bit 0: GasFurnace
+                        val hasAirConditioner = (rawCap and 0x02) != 0  // Bit 1: AirConditioner
+                        val hasHeatPump = (rawCap and 0x04) != 0  // Bit 2: HeatPump
+                        val hasHeat = hasGasHeat || (hasHeatPump && hasAirConditioner)
+                        // Store capability info for heat source selection
+                        // For heat source select, we need both gas furnace AND heat pump available
+                        // hasHeatPump: true if heat pump exists (regardless of AC, since heat pump can provide heat)
+                        hvacZoneCapabilities[key] = Pair(hasGasHeat, hasHeatPump)
+                        hasHeat
+                    }
+                    val hasHeatFromCapability: Boolean? = capabilityInfo
+                    
+                    // Use capability if available (definitive), otherwise fall back to behavioral detection
+                    // IMPORTANT: If capability says NO heat, trust it (don't use behavioral fallback)
+                    // This prevents cool-only zones from being misclassified
+                    val hasHeat: Boolean = when {
+                        hasHeatFromCapability != null -> hasHeatFromCapability  // Trust capability if available
+                        else -> {
+                            // Fallback: Detect heat capability using behavioral indicators:
+                            // - heatMode 1 (Heating) or 3 (Both) = definitive evidence of heat capability
+                            // - zoneMode 3-6 (any heating operational state) = definitive evidence
+                            // Note: We do NOT use lowTripTempF setpoint values because the gateway
+                            // sends heat setpoints even for cool-only zones.
+                            zone.heatMode == 1 || zone.heatMode == 3 || (zone.zoneMode in 3..6)
+                        }
+                    }
+                    
+                    // Check previous state BEFORE potentially adding to set
+                    val previousHeatCapability = hvacZonesWithHeat.contains(key)
+                    
+                    // Once we detect heat capability, mark it permanently (never remove)
+                    // This prevents misclassification during summer when heat isn't actively used
+                    if (hasHeat) {
+                        hvacZonesWithHeat.add(key)
+                    }
+                    
+                    // If heat capability changed (newly detected or removed), force rediscovery and republish state
+                    if (hasHeat != previousHeatCapability) {
+                        val keyHex = "%02x%02x".format(event.deviceTableId.toUByte().toInt(), zone.deviceId.toUByte().toInt())
+                        val objectId = "climate_$keyHex"
+                        haDiscoveryPublished.remove("$objectId:climate")
+                        // Also clear heat source select discovery if it exists
+                        haDiscoveryPublished.remove("hvac_heat_source_$keyHex:select")
+                        val source = if (hasHeatFromCapability != null) "device capability" else "behavioral detection"
+                        if (hasHeat) {
+                            Log.i(TAG, "🔥 HVAC Zone ${zone.deviceId} detected as having heat capability (via $source) - updating discovery")
+                        } else {
+                            Log.i(TAG, "❄️ HVAC Zone ${zone.deviceId} detected as cool-only (via $source) - updating discovery")
+                        }
+                    }
+                    
+                    // Store current heat source preference from status (if not already stored)
+                    if (!hvacHeatSourcePreference.containsKey(key)) {
+                        hvacHeatSourcePreference[key] = zone.heatSource
+                    }
+                    
+                    val hvacStatus = DeviceStatus.Hvac(
+                        deviceTableId = event.deviceTableId,
+                        deviceId = zone.deviceId,
+                        heatMode = zone.heatMode,
+                        heatSource = zone.heatSource,
+                        fanMode = zone.fanMode,
+                        lowTripTempF = zone.lowTripTempF,
+                        highTripTempF = zone.highTripTempF,
+                        zoneMode = zone.zoneMode,
+                        indoorTempF = zone.indoorTempF,
+                        outdoorTempF = zone.outdoorTempF,
+                        failedThermistor = zone.failedThermistor,
+                        dtc = zone.dtc
+                    )
+                    deviceStatuses[key] = hvacStatus
+                    
+                    // For cool-only zones that were just detected, immediately republish state without heat_setpoint
+                    // This ensures HA gets the correct state even if discovery was already published
+                    if (!hasHeat && !previousHeatCapability) {
+                        publishHvacState(event.deviceTableId, zone.deviceId, hvacStatus)
+                    }
+                    
+                    val deviceAddr = ((zone.deviceId.toInt() and 0xFF) or ((event.deviceTableId.toInt() and 0xFF) shl 8))
+                    Log.i(TAG, "❄️ HVAC Zone ${zone.deviceId} (0x${zone.deviceId.toString(16)}): " +
+                          "mode=${zone.heatMode}, heat=${zone.lowTripTempF}°F, cool=${zone.highTripTempF}°F, " +
+                          "status=${zone.zoneMode}, indoor=${zone.indoorTempF?.let { "%.1f°F".format(it) } ?: "N/A"}, " +
+                          "hasHeat=$hasHeat")
+                    
+                    // Publish discovery and state (discovery will be updated if heat capability changes)
+                    publishHaDiscoveryHvac(event.deviceTableId, zone.deviceId)
+                    publishHvacState(event.deviceTableId, zone.deviceId, hvacStatus)
+                    // Publish heat source select entity if multiple sources available
+                    publishHaDiscoveryHvacHeatSource(event.deviceTableId, zone.deviceId)
+                    publishHvacHeatSourceState(event.deviceTableId, zone.deviceId, hvacStatus)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling HvacStatus: ${e.message}", e)
+        }
     }
 
     /**
@@ -2835,6 +3135,54 @@ class OneControlBleService : Service() {
         val tableId = parts[1].toIntOrNull()
         val deviceId = parts[2].toIntOrNull()
         if (tableId == null) return
+        
+        // Handle heat source select entity command (comes as JSON with heat_source field)
+        // This is handled before debounce because it's a preference change, not an immediate action
+        if (kind == "hvac" && deviceId != null) {
+            try {
+                val commandJson = JSONObject(payload)
+                val heatSourceStr = commandJson.optString("heat_source", null)
+                // Check if this is ONLY a heat_source command (no other fields)
+                val hasOnlyHeatSource = heatSourceStr != null && 
+                    commandJson.optString("mode", null) == null &&
+                    !commandJson.has("heat_setpoint") &&
+                    !commandJson.has("cool_setpoint") &&
+                    commandJson.optString("fan_mode", null) == null
+                
+                if (hasOnlyHeatSource) {
+                    val key = "${tableId}:${deviceId}"
+                    val heatSourceValue = when (heatSourceStr.lowercase()) {
+                        "prefer_gas" -> 0
+                        "prefer_heat_pump" -> 1
+                        "other" -> 2
+                        else -> 0  // Default to PreferGas
+                    }
+                    hvacHeatSourcePreference[key] = heatSourceValue
+                    Log.i(TAG, "🔥 Heat source preference updated: zone=$deviceId, preference=$heatSourceStr($heatSourceValue)")
+                    
+                    // If heat mode is active (heat or heat_cool), send command with new heat source
+                    val currentStatus = deviceStatuses[key] as? DeviceStatus.Hvac
+                    if (currentStatus != null && (currentStatus.heatMode == 1 || currentStatus.heatMode == 3)) {
+                        // Zone is in heat mode - apply the new heat source preference immediately
+                        controlHvac(
+                            deviceId.toByte(),
+                            currentStatus.heatMode,
+                            heatSourceValue,
+                            currentStatus.fanMode,
+                            currentStatus.lowTripTempF,
+                            currentStatus.highTripTempF
+                        )
+                    }
+                    // Publish updated state if status exists
+                    currentStatus?.let {
+                        publishHvacHeatSourceState(tableId.toByte(), deviceId.toByte(), it)
+                    }
+                    return  // Don't process as regular HVAC command
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse heat source command: ${e.message}", e)
+            }
+        }
 
         // Debounce identical commands per device/kind to avoid rapid duplicate writes
         val debounceKey = "$kind:$tableId:${deviceId ?: -1}"
@@ -2877,6 +3225,64 @@ class OneControlBleService : Service() {
             }
             "cover" -> {
                 Log.w(TAG, "Cover command handling not implemented yet: $topic = $payload")
+            }
+            "hvac" -> {
+                if (deviceId == null) return
+                try {
+                    // Parse JSON command payload
+                    val commandJson = JSONObject(payload)
+                    val mode = commandJson.optString("mode", null)
+                    val heatSetpoint = commandJson.optInt("heat_setpoint", -1)
+                    val coolSetpoint = commandJson.optInt("cool_setpoint", -1)
+                    val fanMode = commandJson.optString("fan_mode", null)
+                    val heatSourceStr = commandJson.optString("heat_source", null)
+                    
+                    // Get current HVAC status to preserve values not being changed
+                    val key = "${tableId}:${deviceId}"
+                    val currentStatus = deviceStatuses[key] as? DeviceStatus.Hvac
+                    
+                    // Map HA mode to heat mode
+                    val newHeatMode = when (mode?.lowercase()) {
+                        "off" -> 0
+                        "heat" -> 1
+                        "cool" -> 2
+                        "heat_cool" -> 3
+                        else -> currentStatus?.heatMode ?: 0
+                    }
+                    
+                    // Map HA fan mode to device fan mode
+                    val newFanMode = when (fanMode?.lowercase()) {
+                        "auto" -> 0
+                        "high" -> 1
+                        "low" -> 2
+                        else -> currentStatus?.fanMode ?: 0
+                    }
+                    
+                    val newHeatSetpoint = if (heatSetpoint >= 0) heatSetpoint else (currentStatus?.lowTripTempF ?: 70)
+                    val newCoolSetpoint = if (coolSetpoint >= 0) coolSetpoint else (currentStatus?.highTripTempF ?: 80)
+                    
+                    // Get heat source preference
+                    // Priority: 1) Command payload, 2) Stored preference, 3) Current status, 4) Default (PreferGas)
+                    val heatSourcePreference = when {
+                        heatSourceStr != null -> {
+                            val value = when (heatSourceStr.lowercase()) {
+                                "prefer_gas" -> 0
+                                "prefer_heat_pump" -> 1
+                                "other" -> 2
+                                else -> 0
+                            }
+                            // Store the preference for future use
+                            hvacHeatSourcePreference[key] = value
+                            value
+                        }
+                        else -> hvacHeatSourcePreference[key] ?: currentStatus?.heatSource ?: 0
+                    }
+                    
+                    Log.i(TAG, "MQTT cmd hvac table=$tableId device=$deviceId mode=$mode($newHeatMode) heat=$newHeatSetpoint cool=$newCoolSetpoint fan=$fanMode($newFanMode) heatSource=$heatSourcePreference")
+                    controlHvac(deviceId.toByte(), newHeatMode, heatSourcePreference, newFanMode, newHeatSetpoint, newCoolSetpoint)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse HVAC command: ${e.message}", e)
+                }
             }
         }
     }
@@ -2924,6 +3330,16 @@ class OneControlBleService : Service() {
 
     private fun disconnectMqtt() {
         try {
+            // Publish "offline" before disconnecting (for graceful shutdowns)
+            // Note: LWT will handle unexpected disconnects (killed app, crash, network loss)
+            if (mqttConnected && mqttClient?.isConnected == true) {
+                try {
+                    publishMqtt("availability", "offline", retain = true)
+                    Log.i(TAG, "📡 Published availability: offline (graceful disconnect)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to publish offline status: ${e.message}")
+                }
+            }
             mqttClient?.disconnect()
             mqttConnected = false
             publishDiagnosticsState()
@@ -3103,18 +3519,319 @@ class OneControlBleService : Service() {
         }
     }
 
-    private fun publishHaDiscoveryTankSensor(tankId: Int) {
-        val objectId = "tank_$tankId"
-        if (haDiscoveryPublished.add(objectId)) {
-            val stateTopic = "$mqttTopicPrefix/tank/$tankId"
+    private fun publishHaDiscoveryHvac(tableId: Byte, deviceId: Byte) {
+        val keyHex = "%02x%02x".format(tableId.toUByte().toInt(), deviceId.toUByte().toInt())
+        val objectId = "climate_$keyHex"
+        val deviceName = "HVAC Zone ${deviceId.toUByte()}"
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/hvac"
+        val commandTopic = "$mqttTopicPrefix/command/hvac/${tableId.toUByte()}/${deviceId.toUByte()}"
+        val key = "$objectId:climate"
+        val zoneKey = "${tableId}:${deviceId}"
+        val hasHeat = hvacZonesWithHeat.contains(zoneKey)
+        
+        val payload = JSONObject().apply {
+            put("name", deviceName)
+            put("unique_id", "onecontrol_hvac_${tableId.toUByte()}_${deviceId.toUByte()}")
+            put("state_topic", stateTopic)
+            put("command_topic", commandTopic)
+            put("temperature_unit", "F")
+            
+            // Modes: only include heat/heat_cool if zone has heat capability
+            val modes = JSONArray().apply {
+                put("off")
+                put("cool")
+                if (hasHeat) {
+                    put("heat")
+                    put("heat_cool")
+                }
+            }
+            put("modes", modes)
+            
+            put("fan_modes", JSONArray().apply {
+                put("auto")
+                put("high")
+                put("low")
+            })
+            
+            // Action (current operational state) - shows "cooling", "heating", "idle", "off"
+            put("action_topic", stateTopic)
+            put("action_template", "{{ value_json.action }}")
+            
+            put("mode_state_topic", stateTopic)
+            put("mode_state_template", "{{ value_json.mode }}")
+            put("mode_command_topic", commandTopic)
+            put("mode_command_template", "{\"mode\":\"{{ value }}\"}")
+            
+            put("current_temperature_topic", stateTopic)
+            put("current_temperature_template", "{{ value_json.current_temp }}")
+            
+            // Only include heat setpoint if zone has heat capability
+            if (hasHeat) {
+                put("temperature_low_state_topic", stateTopic)
+                put("temperature_low_state_template", "{{ value_json.heat_setpoint }}")
+                put("temperature_low_command_topic", commandTopic)
+                put("temperature_low_command_template", "{\"heat_setpoint\":{{ value }}}")
+            }
+            
+            put("temperature_high_state_topic", stateTopic)
+            put("temperature_high_state_template", "{{ value_json.cool_setpoint }}")
+            put("temperature_high_command_topic", commandTopic)
+            put("temperature_high_command_template", "{\"cool_setpoint\":{{ value }}}")
+            
+            put("fan_mode_state_topic", stateTopic)
+            put("fan_mode_state_template", "{{ value_json.fan_mode }}")
+            put("fan_mode_command_topic", commandTopic)
+            put("fan_mode_command_template", "{\"fan_mode\":\"{{ value }}\"}")
+            
+            put("device", buildDeviceInfo("onecontrol_ble", objectId))
+        }
+        // Force republish if already published (in case heat capability changed)
+        val wasAlreadyPublished = haDiscoveryPublished.contains(key)
+        if (wasAlreadyPublished) {
+            haDiscoveryPublished.remove(key)  // Force republish
+            Log.i(TAG, "❄️ HVAC discovery: forcing republish for zone $deviceId (heat capability changed: hasHeat=$hasHeat)")
+        }
+        publishMqttRaw("homeassistant/climate/$objectId/config", payload.toString(), retain = true)
+        haDiscoveryPublished.add(key)
+    }
+
+    private fun publishHvacState(tableId: Byte, deviceId: Byte, status: DeviceStatus.Hvac) {
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/hvac"
+        
+        // Map heat mode to HA mode
+        val haMode = when (status.heatMode) {
+            0 -> "off"
+            1 -> "heat"
+            2 -> "cool"
+            3 -> "heat_cool"
+            4 -> "heat_cool"  // RunSchedule -> heat_cool
+            else -> "off"
+        }
+        
+        // Map zoneMode to hvac_action (current operational state)
+        // zoneMode: 0=Off, 1=Idle, 2=Cooling, 3-6=Heating (various types), 7=DeadTime, 8=LoadShedding
+        // Based on HvacZoneViewModel.cs: FanOn state when heatMode=Off and fanMode is High/Low, or when idle with fan on
+        val haAction = when {
+            // Fan-only mode: heatMode is Off and fan is actively running (not Auto)
+            status.heatMode == 0 && status.fanMode != 0 -> "fan"  // Shows as "Recirculating" in HA
+            // Fan running while idle (heatMode active but not heating/cooling, fan not Auto)
+            status.zoneMode == 1 && status.fanMode != 0 && status.heatMode != 0 -> "fan"  // Shows as "Recirculating" in HA
+            // Normal operational states
+            status.zoneMode == 0 -> "off"
+            status.zoneMode == 1 -> "idle"
+            status.zoneMode == 2 -> "cooling"
+            status.zoneMode in 3..6 -> "heating"  // HeatingWithHeatPump(3), HeatingWithElectric(4), HeatingWithGasFurnace(5), HeatingWithGasOverride(6)
+            status.zoneMode in 7..8 -> "idle"  // DeadTime(7), LoadShedding(8)
+            else -> "off"
+        }
+        
+        // Map fan mode to HA fan mode
+        val haFanMode = when (status.fanMode) {
+            0 -> "auto"
+            1 -> "high"
+            2 -> "low"
+            else -> "auto"
+        }
+        
+        // Determine if zone has heat capability (for conditional heat_setpoint inclusion)
+        val zoneKey = "${tableId}:${deviceId}"
+        val hasHeat = hvacZonesWithHeat.contains(zoneKey)
+        
+        // Map zoneMode to heat source type for attributes
+        // zoneMode 3=HeatingWithHeatPump, 5=HeatingWithGasFurnace
+        val heatSourceType = when (status.zoneMode) {
+            3 -> "heat_pump"  // HeatingWithHeatPump
+            4 -> "electric"   // HeatingWithElectric
+            5 -> "gas_furnace" // HeatingWithGasFurnace
+            6 -> "gas_override" // HeatingWithGasOverride
+            else -> null
+        }
+        
+        val stateJson = JSONObject().apply {
+            put("mode", haMode)
+            put("action", haAction)  // Current operational state: "cooling", "heating", "idle", "off", "fan"
+            put("fan_mode", haFanMode)
+            // Only include heat_setpoint if zone has heat capability (prevents cool-only zones from showing it)
+            // IMPORTANT: Don't include heat_setpoint in state JSON for cool-only zones, even if gateway sends it
+            if (hasHeat) {
+                put("heat_setpoint", status.lowTripTempF)
+            }
+            put("cool_setpoint", status.highTripTempF)
+            status.indoorTempF?.let { put("current_temp", it.toInt()) }
+            // Add heat source as attribute when actively heating
+            heatSourceType?.let { put("heat_source_type", it) }
+        }
+        
+        publishMqttRaw(stateTopic, stateJson.toString(), retain = true)
+    }
+
+    /**
+     * Publish Home Assistant discovery for HVAC heat source select entity.
+     * Only published if zone has multiple heat sources (both gas furnace and heat pump).
+     */
+    private fun publishHaDiscoveryHvacHeatSource(tableId: Byte, deviceId: Byte) {
+        val keyHex = "%02x%02x".format(tableId.toUByte().toInt(), deviceId.toUByte().toInt())
+        val objectId = "hvac_heat_source_$keyHex"
+        val zoneKey = "${tableId}:${deviceId}"
+        val key = "$objectId:select"
+        
+        // Only publish if zone has multiple heat sources (both gas furnace AND heat pump)
+        val capabilities = hvacZoneCapabilities[zoneKey]
+        val hasGasFurnace = capabilities?.first ?: false
+        val hasHeatPump = capabilities?.second ?: false
+        
+        Log.i(TAG, "🔥 Heat source select check: zone=$deviceId, hasGasFurnace=$hasGasFurnace, hasHeatPump=$hasHeatPump, capabilities=$capabilities, zoneKey=$zoneKey")
+        
+        // If capabilities not yet available, don't publish (will be published when capabilities are detected)
+        if (capabilities == null) {
+            Log.d(TAG, "🔥 Heat source select: capabilities not yet available for zone $deviceId, will publish when available")
+            return
+        }
+        
+        if (!hasGasFurnace || !hasHeatPump) {
+            // Zone doesn't have multiple heat sources - don't publish select entity
+            // Clear any existing discovery if capabilities changed
+            if (haDiscoveryPublished.contains(key)) {
+                publishMqttRaw("homeassistant/select/$objectId/config", "", retain = true)
+                haDiscoveryPublished.remove(key)
+                Log.i(TAG, "🔥 Removed heat source select for zone $deviceId (missing capabilities: gas=$hasGasFurnace, hp=$hasHeatPump)")
+            }
+            return
+        }
+        
+        // Zone has both gas furnace and heat pump - publish select entity
+        // Force republish if already published (in case capabilities were updated)
+        val wasAlreadyPublished = haDiscoveryPublished.contains(key)
+        if (wasAlreadyPublished) {
+            haDiscoveryPublished.remove(key)  // Force republish
+            Log.i(TAG, "🔥 Heat source select: forcing republish for zone $deviceId (capabilities updated)")
+        }
+        
+        if (haDiscoveryPublished.add(key)) {
+            val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/heat_source"
+            val commandTopic = "$mqttTopicPrefix/command/hvac/${tableId.toUByte()}/${deviceId.toUByte()}"
+            
             val payload = JSONObject().apply {
-                put("name", "Tank $tankId")
+                put("name", "HVAC Zone ${deviceId.toUByte()} Heat Source")
+                put("unique_id", "onecontrol_hvac_heat_source_${tableId.toUByte()}_${deviceId.toUByte()}")
+                put("state_topic", stateTopic)
+                put("command_topic", commandTopic)
+                put("command_template", "{\"heat_source\":\"{{ value }}\"}")
+                put("options", JSONArray().apply {
+                    put("prefer_gas")
+                    put("prefer_heat_pump")
+                })
+                put("device", buildDeviceInfo("onecontrol_ble", "hvac_$keyHex"))
+            }
+            publishMqttRaw("homeassistant/select/$objectId/config", payload.toString(), retain = true)
+            Log.i(TAG, "🔥 Published HVAC heat source select discovery: $objectId")
+        }
+    }
+
+    /**
+     * Publish HVAC heat source state (for select entity).
+     */
+    private fun publishHvacHeatSourceState(tableId: Byte, deviceId: Byte, status: DeviceStatus.Hvac) {
+        val zoneKey = "${tableId}:${deviceId}"
+        val capabilities = hvacZoneCapabilities[zoneKey]
+        val hasGasFurnace = capabilities?.first ?: false
+        val hasHeatPump = capabilities?.second ?: false
+        
+        // Only publish if zone has multiple heat sources
+        if (!hasGasFurnace || !hasHeatPump) {
+            return
+        }
+        
+        val stateTopic = "$mqttTopicPrefix/device/${tableId.toUByte()}/${deviceId.toUByte()}/heat_source"
+        
+        // Use stored preference if available, otherwise use current status
+        val heatSourceToPublish = hvacHeatSourcePreference[zoneKey] ?: status.heatSource
+        
+        // Map heatSource to HA select entity value
+        val heatSourceValue = when (heatSourceToPublish) {
+            0 -> "prefer_gas"  // PreferGas
+            1 -> "prefer_heat_pump"  // PreferHeatPump
+            2 -> "other"  // Other
+            else -> "prefer_gas"  // Default
+        }
+        
+        publishMqttRaw(stateTopic, heatSourceValue, retain = true)
+    }
+
+    private fun publishHaDiscoveryTankSensor(tankId: Int, precisionType: Int? = null, fluidType: String? = null) {
+        val objectId = "tank_$tankId"
+        val stateTopic = "$mqttTopicPrefix/tank/$tankId"
+        
+        // Build name with fluid type if known
+        val baseName = "Tank $tankId"
+        val fluidTypeName = when (fluidType) {
+            "fuel" -> "Fuel"
+            "water" -> "Water"
+            else -> null
+        }
+        val name = if (fluidTypeName != null) "$fluidTypeName $baseName" else baseName
+        
+        // Determine display precision based on precision type
+        // Low precision (0) -> 0 decimals (discrete levels)
+        // Medium/High precision (1-2) -> 0-1 decimals (percentages)
+        val suggestedDisplayPrecision = when (precisionType) {
+            0 -> 0  // Low precision: discrete levels (EMPTY/1/3/2/3/FULL)
+            1, 2 -> 0  // Medium/High precision: percentages (0-100, no decimals needed for %)
+            else -> null
+        }
+        
+        val wasAlreadyPublished = !haDiscoveryPublished.add(objectId)
+        if (!wasAlreadyPublished) {
+            val payload = JSONObject().apply {
+                put("name", name)
                 put("unique_id", "onecontrol_tank_$tankId")
                 put("state_topic", stateTopic)
+                
+                // No value_template - state is published as simple numeric value (like voltage sensor)
+                // This is more compatible with recent HA versions
+                // Fluid type is indicated in the entity name (e.g., "Fuel Tank 11") rather than JSON attributes
+                // to avoid potential JSON schema issues in recent HA versions
+                
                 put("unit_of_measurement", "%")
+                // Note: "volume" is not a valid device_class in HA, so we omit it
+                // The sensor will still work as a generic sensor with percentage unit
+                put("state_class", "measurement")
+                suggestedDisplayPrecision?.let { put("suggested_display_precision", it) }
+                
                 put("device", buildDeviceInfo("onecontrol_ble", "tank_$tankId"))
             }
-            publishMqttRaw("homeassistant/sensor/$objectId/config", payload.toString(), retain = true)
+            val discoveryTopic = "homeassistant/sensor/$objectId/config"
+            val payloadStr = payload.toString()
+            publishMqttRaw(discoveryTopic, payloadStr, retain = true)
+            Log.i(TAG, "💧 Published tank discovery: topic=$discoveryTopic")
+            Log.i(TAG, "💧 Discovery payload: $payloadStr")
+            Log.i(TAG, "💧 Tank details: name=$name, stateTopic=$stateTopic, fluidType=$fluidType, precision=$precisionType")
+        } else {
+            Log.w(TAG, "💧 Tank discovery already marked as published for $objectId - forcing republish anyway to ensure it's on broker")
+            // Force republish even if marked as published, to ensure it's actually on the broker
+            val payload = JSONObject().apply {
+                put("name", name)
+                put("unique_id", "onecontrol_tank_$tankId")
+                put("state_topic", stateTopic)
+                
+                // No value_template - state is published as simple numeric value
+                if (fluidType != null) {
+                    val attributesTopic = "$mqttTopicPrefix/tank/$tankId/attributes"
+                    put("json_attributes_topic", attributesTopic)
+                }
+                
+                put("unit_of_measurement", "%")
+                // Note: "volume" is not a valid device_class in HA, so we omit it
+                // The sensor will still work as a generic sensor with percentage unit
+                put("state_class", "measurement")
+                suggestedDisplayPrecision?.let { put("suggested_display_precision", it) }
+                put("device", buildDeviceInfo("onecontrol_ble", "tank_$tankId"))
+            }
+            val discoveryTopic = "homeassistant/sensor/$objectId/config"
+            val payloadStr = payload.toString()
+            publishMqttRaw(discoveryTopic, payloadStr, retain = true)
+            Log.i(TAG, "💧 Force-republished tank discovery: topic=$discoveryTopic")
+            Log.i(TAG, "💧 Force-republish payload: $payloadStr")
         }
     }
 
@@ -3143,11 +3860,25 @@ class OneControlBleService : Service() {
                 is DeviceStatus.DimmableLight -> publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = true)
                 is DeviceStatus.RgbLight -> publishHaDiscovery(status.deviceTableId, status.deviceId, supportsBrightness = false)
                 is DeviceStatus.Cover -> publishHaDiscoveryCover(status.deviceTableId, status.deviceId)
-                is DeviceStatus.Tank -> publishHaDiscoveryTankSensor(status.deviceId.toInt() and 0xFF)
+                is DeviceStatus.Tank -> publishHaDiscoveryTankSensor(
+                    status.deviceId.toInt() and 0xFF,
+                    status.precisionType,
+                    status.fluidType
+                )
+                is DeviceStatus.Hvac -> {
+                    publishHaDiscoveryHvac(status.deviceTableId, status.deviceId)
+                    publishHaDiscoveryHvacHeatSource(status.deviceTableId, status.deviceId)
+                }
             }
         }
         // Also republish known tank sensors tracked via seenTankIds (for completeness)
-        seenTankIds.forEach { publishHaDiscoveryTankSensor(it) }
+        seenTankIds.forEach { tankId ->
+            // Find device status to get capability info
+            val tankStatus = deviceStatuses.values.firstOrNull { 
+                it is DeviceStatus.Tank && (it.deviceId.toInt() and 0xFF) == tankId 
+            } as? DeviceStatus.Tank
+            publishHaDiscoveryTankSensor(tankId, tankStatus?.precisionType, tankStatus?.fluidType)
+        }
     }
 
     
@@ -3629,6 +4360,73 @@ class OneControlBleService : Service() {
         }, DIMMER_DEBOUNCE_MS)
     }
 
+    /**
+     * Control HVAC zone
+     * @param deviceId Zone device ID (0-255)
+     * @param heatMode Heat mode (0=Off, 1=Heating, 2=Cooling, 3=Both, 4=RunSchedule)
+     * @param heatSource Heat source (0=PreferGas, 1=PreferHeatPump, 2=Other, 3=Reserved)
+     * @param fanMode Fan mode (0=Auto, 1=High, 2=Low)
+     * @param lowTripTempF Heat setpoint (°F, 0-255)
+     * @param highTripTempF Cool setpoint (°F, 0-255)
+     */
+    fun controlHvac(
+        deviceId: Byte,
+        heatMode: Int,
+        heatSource: Int,
+        fanMode: Int,
+        lowTripTempF: Int,
+        highTripTempF: Int
+    ) {
+        if (!isConnected || !isAuthenticated || bluetoothGatt == null) {
+            Log.w(TAG, "Cannot control HVAC - not ready")
+            return
+        }
+
+        if (deviceTableId == 0x00.toByte()) {
+            Log.w(TAG, "DeviceTableId not yet known - cannot send HVAC command")
+            return
+        }
+
+        val writeChar = canWriteChar ?: dataWriteChar
+        if (writeChar == null) {
+            Log.w(TAG, "No write characteristic available")
+            return
+        }
+
+        try {
+            val commandId = getNextCommandId()
+            val command = MyRvLinkCommandBuilder.buildActionHvac(
+                clientCommandId = commandId,
+                deviceTableId = deviceTableId,
+                deviceId = deviceId,
+                heatMode = heatMode.coerceIn(0, 4),
+                heatSource = heatSource.coerceIn(0, 3),
+                fanMode = fanMode.coerceIn(0, 2),
+                lowTripTempF = lowTripTempF.coerceIn(0, 255),
+                highTripTempF = highTripTempF.coerceIn(0, 255)
+            )
+
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+
+            val writeResult = bluetoothGatt?.writeCharacteristic(writeChar)
+            val modeStr = when (heatMode) {
+                0 -> "Off"
+                1 -> "Heat"
+                2 -> "Cool"
+                3 -> "Both"
+                4 -> "RunSchedule"
+                else -> "Unknown"
+            }
+            Log.i(TAG, "📤 HVAC control: Zone=$deviceId, Mode=$modeStr, Heat=${lowTripTempF}°F, Cool=${highTripTempF}°F, Fan=$fanMode, CommandId=0x${commandId.toString(16)}, writeResult=$writeResult")
+            broadcastLog("📤 HVAC $deviceId: $modeStr ${lowTripTempF}°F/${highTripTempF}°F")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send HVAC command: ${e.message}", e)
+            broadcastLog("❌ HVAC command failed: ${e.message}")
+        }
+    }
+
     private fun sendDimmableCommand(
         writeChar: BluetoothGattCharacteristic,
         tableId: Byte,
@@ -3725,6 +4523,23 @@ sealed class DeviceStatus {
     data class Tank(
         override val deviceTableId: Byte,
         override val deviceId: Byte,
-        val percent: Int
+        val percent: Int,
+        val precisionType: Int? = null,  // 0=Low, 1=Medium, 2=High
+        val fluidType: String? = null    // "water" or "fuel"
+    ) : DeviceStatus()
+
+    data class Hvac(
+        override val deviceTableId: Byte,
+        override val deviceId: Byte,
+        val heatMode: Int,  // 0=Off, 1=Heating, 2=Cooling, 3=Both, 4=RunSchedule
+        val heatSource: Int,  // 0=PreferGas, 1=PreferHeatPump, 2=Other, 3=Reserved
+        val fanMode: Int,  // 0=Auto, 1=High, 2=Low
+        val lowTripTempF: Int,  // Heat setpoint (°F)
+        val highTripTempF: Int,  // Cool setpoint (°F)
+        val zoneMode: Int,  // Current zone status (0=Off, 1=Idle, 2=Cooling, etc.)
+        val indoorTempF: Float?,  // Current indoor temp (°F) or null
+        val outdoorTempF: Float?,  // Current outdoor temp (°F) or null
+        val failedThermistor: Boolean,
+        val dtc: Int  // Diagnostic Trouble Code
     ) : DeviceStatus()
 }

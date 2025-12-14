@@ -136,5 +136,47 @@ object MyRvLinkCommandBuilder {
         
         return command
     }
+    
+    /**
+     * Build ActionHvac command
+     * Format: [ClientCommandId (2 bytes)][CommandType=0x45][DeviceTableId][DeviceId][Command (3 bytes)]
+     * Command payload: [command_byte][low_trip_temp][high_trip_temp]
+     * 
+     * @param clientCommandId Client command ID (incremented per command)
+     * @param deviceTableId Device table ID
+     * @param deviceId Device ID (zone ID)
+     * @param heatMode Heat mode (0=Off, 1=Heating, 2=Cooling, 3=Both, 4=RunSchedule)
+     * @param heatSource Heat source (0=PreferGas, 1=PreferHeatPump, 2=Other, 3=Reserved)
+     * @param fanMode Fan mode (0=Auto, 1=High, 2=Low)
+     * @param lowTripTempF Heat setpoint (°F, 0-255)
+     * @param highTripTempF Cool setpoint (°F, 0-255)
+     */
+    fun buildActionHvac(
+        clientCommandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        heatMode: Int,
+        heatSource: Int,
+        fanMode: Int,
+        lowTripTempF: Int,
+        highTripTempF: Int
+    ): ByteArray {
+        // Pack command byte: HeatMode (bits 0-2), HeatSource (bits 4-5), FanMode (bits 6-7)
+        val commandByte = ((heatMode and 0x07) or
+                          ((heatSource and 0x03) shl 4) or
+                          ((fanMode and 0x03) shl 6)).toByte()
+        
+        val command = ByteArray(8)
+        command[0] = (clientCommandId.toInt() and 0xFF).toByte()
+        command[1] = ((clientCommandId.toInt() shr 8) and 0xFF).toByte()
+        command[2] = 0x45.toByte()  // CommandType: ActionHvac (69 = 0x45)
+        command[3] = deviceTableId
+        command[4] = deviceId
+        command[5] = commandByte
+        command[6] = lowTripTempF.coerceIn(0, 255).toByte()
+        command[7] = highTripTempF.coerceIn(0, 255).toByte()
+        
+        return command
+    }
 }
 
