@@ -22,20 +22,26 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
+        android:name=".BlePluginBridgeApplication"
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light">
 
-        <!-- Main activity for manual testing -->
+        <!-- Service status and diagnostic UI -->
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.ServiceStatusActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        
+        <!-- MQTT testing activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false" />
         
         <!-- BLE Bridge Service -->
         <service
