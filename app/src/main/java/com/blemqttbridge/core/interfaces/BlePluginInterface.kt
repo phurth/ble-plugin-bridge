@@ -172,8 +172,14 @@ interface BlePluginInterface {
          */
         suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit>
         
-        /**
-         * Enable notifications on a characteristic.
+        /**         * Write to a characteristic with WRITE_TYPE_NO_RESPONSE (critical for OneControl KEY)
+         * @param uuid Characteristic UUID
+         * @param value Bytes to write
+         * @return Result indicating success or failure
+         */
+        suspend fun writeCharacteristicNoResponse(uuid: String, value: ByteArray): Result<Unit>
+        
+        /**         * Enable notifications on a characteristic.
          * @param uuid Characteristic UUID
          * @return Result indicating success or failure
          */

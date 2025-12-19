@@ -59,6 +59,7 @@ class BaseBleService : Service() {
     // Pending GATT operations: characteristic UUID -> result deferred
     private val pendingReads = mutableMapOf<String, CompletableDeferred<Result<ByteArray>>>()
     private val pendingWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
+    private val pendingDescriptorWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
     
     // Devices currently undergoing bonding process
     private val pendingBondDevices = mutableSetOf<String>()
@@ -298,6 +299,7 @@ class BaseBleService : Service() {
     
     /**
      * Bond state receiver for pairing events.
+     * Matches working OneControlBleService implementation.
      */
     private val bondStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -308,7 +310,9 @@ class BaseBleService : Service() {
                 val previousBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
                 
                 device?.let {
-                    if (pendingBondDevices.contains(it.address)) {
+                    // Check if this device is one we're managing (connected or pending bond)
+                    val isOurDevice = connectedDevices.containsKey(it.address) || pendingBondDevices.contains(it.address)
+                    if (isOurDevice) {
                         Log.i(TAG, "🔗 Bond state changed for ${it.address}: $previousBondState -> $bondState")
                         
                         when (bondState) {
@@ -317,11 +321,11 @@ class BaseBleService : Service() {
                                 pendingBondDevices.remove(it.address)
                                 updateNotification("Bonded - Discovering services...")
                                 
-                                // Now safe to discover services - find the gatt connection
+                                // Proceed with service discovery if connected
                                 val gatt = connectedDevices[it.address]?.first
                                 if (gatt != null) {
                                     serviceScope.launch {
-                                        delay(500) // Brief settle delay
+                                        delay(500) // Brief settle delay (matches working app)
                                         try {
                                             Log.i(TAG, "Starting service discovery after bonding")
                                             gatt.discoverServices()
@@ -340,8 +344,11 @@ class BaseBleService : Service() {
                             BluetoothDevice.BOND_NONE -> {
                                 pendingBondDevices.remove(it.address)
                                 if (previousBondState == BluetoothDevice.BOND_BONDING) {
+                                    // Bonding failed - matches working app: just log and notify
                                     Log.e(TAG, "❌ Bonding failed for ${it.address}!")
-                                    updateNotification("Pairing failed")
+                                    updateNotification("Pairing failed - try again")
+                                    // Working app does NOT proceed with service discovery here
+                                    // User needs to retry pairing
                                 } else {
                                     Log.w(TAG, "Bond removed for ${it.address}")
                                 }
@@ -376,7 +383,7 @@ class BaseBleService : Service() {
                         // Notify plugin of connection
                         plugin?.onDeviceConnected(device)
                         
-                        // Check bond state - pairing required for OneControl gateways
+                        // Check bond state
                         val bondState = device.bondState
                         Log.i(TAG, "Bond state after connection: $bondState (${when(bondState) {
                             BluetoothDevice.BOND_BONDED -> "BONDED"
@@ -385,41 +392,31 @@ class BaseBleService : Service() {
                             else -> "UNKNOWN"
                         }})")
                         
-                        if (bondState != BluetoothDevice.BOND_BONDED) {
-                            Log.i(TAG, "🔗 Device not bonded - initiating explicit bonding...")
-                            updateNotification("Connected - Pairing...")
-                            pendingBondDevices.add(device.address)
-                            
-                            try {
-                                val bondResult = device.createBond()
-                                if (bondResult) {
-                                    Log.i(TAG, "✅ Bonding initiated - waiting for user to accept pairing dialog...")
-                                    // Don't proceed until bonding completes (handled by bondStateReceiver)
-                                } else {
-                                    Log.e(TAG, "❌ Failed to initiate bonding!")
-                                    pendingBondDevices.remove(device.address)
-                                    updateNotification("Pairing failed - retrying...")
-                                }
-                            } catch (e: SecurityException) {
-                                Log.e(TAG, "Permission denied for bonding", e)
-                                pendingBondDevices.remove(device.address)
-                                updateNotification("Error: Pairing permission denied")
-                            }
-                        } else {
+                        // BONDING IS REQUIRED for OneControl gateways
+                        // From technical_spec.md: "require LE Secure Connections bonding"
+                        // Gateway returns status 137 (GATT_INSUFFICIENT_AUTHENTICATION) without it
+                        // NOTE: Do NOT call createBond() - it destabilizes connections.
+                        // Device must be pre-paired via Android Bluetooth Settings.
+                        if (bondState == BluetoothDevice.BOND_BONDED) {
                             Log.i(TAG, "✅ Device already bonded - proceeding with service discovery")
                             updateNotification("Connected - Discovering services...")
-                            
-                            // Already bonded - safe to discover services immediately
+                            delay(500)  // Brief settle delay (matches working app)
                             try {
                                 gatt.discoverServices()
                             } catch (e: SecurityException) {
                                 Log.e(TAG, "Permission denied for service discovery", e)
                             }
-                        }
-                        
-                        // Start polling if needed (after authentication)
-                        if (plugin != null && bondState == BluetoothDevice.BOND_BONDED) {
-                            startPollingIfNeeded(device, plugin)
+                        } else {
+                            // Device not bonded - proceed anyway, but warn
+                            // DO NOT call createBond() - it causes bond cycling issues
+                            Log.w(TAG, "⚠️ Device NOT bonded! May fail authentication. Please pair device in Bluetooth Settings first.")
+                            updateNotification("Warning: Device not paired")
+                            delay(500)
+                            try {
+                                gatt.discoverServices()
+                            } catch (e: SecurityException) {
+                                Log.e(TAG, "Permission denied for service discovery", e)
+                            }
                         }
                         
                         // Publish availability
@@ -498,16 +495,50 @@ class BaseBleService : Service() {
             }
         }
         
+        // New API 33+ callback - called on Android 13+
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            Log.i(TAG, "📨📨📨 onCharacteristicChanged (API33+) CALLED for $uuid: ${value.size} bytes")
             serviceScope.launch {
-                handleCharacteristicNotification(gatt.device, characteristic.uuid.toString(), value)
+                handleCharacteristicNotification(gatt.device, uuid, value)
             }
         }
         
+        // Legacy callback for API < 33 (deprecated but still needed for some devices)
+        @Deprecated("Deprecated in API 33")
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            @Suppress("DEPRECATION")
+            val value = characteristic.value ?: byteArrayOf()
+            Log.i(TAG, "📨📨📨 onCharacteristicChanged (legacy) CALLED for $uuid: ${value.size} bytes")
+            serviceScope.launch {
+                handleCharacteristicNotification(gatt.device, uuid, value)
+            }
+        }
+        
+        // Legacy callback for API < 33
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            @Suppress("DEPRECATION")
+            val value = characteristic.value ?: byteArrayOf()
+            Log.d(TAG, "📖 onCharacteristicRead (legacy) callback: uuid=$uuid, status=$status, ${value.size} bytes")
+            handleReadCallback(uuid, value, status)
+        }
+        
+        // New callback for API 33+
         override fun onCharacteristicRead(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -515,16 +546,23 @@ class BaseBleService : Service() {
             status: Int
         ) {
             val uuid = characteristic.uuid.toString().lowercase()
+            Log.d(TAG, "📖 onCharacteristicRead (API33+) callback: uuid=$uuid, status=$status, ${value.size} bytes")
+            handleReadCallback(uuid, value, status)
+        }
+        
+        private fun handleReadCallback(uuid: String, value: ByteArray, status: Int) {
             val deferred = pendingReads.remove(uuid)
             
             if (deferred != null) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Read success for $uuid: ${value.size} bytes")
+                    Log.d(TAG, "✅ Read success for $uuid: ${value.size} bytes")
                     deferred.complete(Result.success(value))
                 } else {
-                    Log.e(TAG, "Read failed for $uuid: status=$status")
+                    Log.e(TAG, "❌ Read failed for $uuid: status=$status")
                     deferred.complete(Result.failure(Exception("GATT read failed: status=$status")))
                 }
+            } else {
+                Log.w(TAG, "⚠️ onCharacteristicRead: No pending deferred for $uuid")
             }
         }
         
@@ -546,8 +584,25 @@ class BaseBleService : Service() {
                 }
             }
         }
+        
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            val charUuid = descriptor.characteristic.uuid.toString().lowercase()
+            val deferred = pendingDescriptorWrites.remove(charUuid)
+            
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "✅ Descriptor write success for $charUuid")
+                deferred?.complete(Result.success(Unit))
+            } else {
+                Log.e(TAG, "❌ Descriptor write failed for $charUuid: status=$status")
+                deferred?.complete(Result.failure(Exception("Descriptor write failed: status=$status")))
+            }
+        }
     }
-    
+
     /**
      * Handle characteristic notification from BLE device.
      */
@@ -714,18 +769,23 @@ class BaseBleService : Service() {
      */
     private inner class GattOperationsImpl(private val gatt: BluetoothGatt) : BlePluginInterface.GattOperations {
         
-        override suspend fun readCharacteristic(uuid: String): Result<ByteArray> = withContext(Dispatchers.IO) {
+        override suspend fun readCharacteristic(uuid: String): Result<ByteArray> = withContext(Dispatchers.Main) {
             val characteristic = findCharacteristic(uuid)
             if (characteristic == null) {
+                Log.e(TAG, "❌ readCharacteristic: Characteristic not found: $uuid")
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
             }
+            
+            Log.d(TAG, "📖 readCharacteristic: uuid=$uuid, props=0x${characteristic.properties.toString(16)}")
             
             val normalizedUuid = uuid.lowercase()
             val deferred = CompletableDeferred<Result<ByteArray>>()
             pendingReads[normalizedUuid] = deferred
             
             try {
+                @Suppress("DEPRECATION")
                 val success = gatt.readCharacteristic(characteristic)
+                Log.d(TAG, "📖 readCharacteristic initiated: success=$success for $uuid")
                 if (!success) {
                     pendingReads.remove(normalizedUuid)
                     return@withContext Result.failure(Exception("Failed to initiate read for $uuid"))
@@ -747,7 +807,7 @@ class BaseBleService : Service() {
             }
         }
         
-        override suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
+        override suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.Main) {
             val characteristic = findCharacteristic(uuid)
             if (characteristic == null) {
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
@@ -758,19 +818,11 @@ class BaseBleService : Service() {
             pendingWrites[normalizedUuid] = deferred
             
             try {
-                // Android 13+ (API 33) uses new writeCharacteristic signature
-                val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeCharacteristic(
-                        characteristic,
-                        value,
-                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    ) == BluetoothStatusCodes.SUCCESS
-                } else {
-                    @Suppress("DEPRECATION")
-                    characteristic.value = value
-                    @Suppress("DEPRECATION")
-                    gatt.writeCharacteristic(characteristic)
-                }
+                // Use legacy API on main thread - this is what the working original app does
+                @Suppress("DEPRECATION")
+                characteristic.value = value
+                @Suppress("DEPRECATION")
+                val success = gatt.writeCharacteristic(characteristic)
                 
                 if (!success) {
                     pendingWrites.remove(normalizedUuid)
@@ -793,17 +845,52 @@ class BaseBleService : Service() {
             }
         }
         
-        override suspend fun enableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.IO) {
+        override suspend fun writeCharacteristicNoResponse(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.Main) {
             val characteristic = findCharacteristic(uuid)
             if (characteristic == null) {
+                Log.e(TAG, "❌ writeCharacteristicNoResponse: Characteristic not found: $uuid")
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
             }
             
+            Log.d(TAG, "📝 writeCharacteristicNoResponse: uuid=$uuid, props=0x${characteristic.properties.toString(16)}, ${value.size} bytes")
+            
             try {
-                // Enable local notifications
-                val success = gatt.setCharacteristicNotification(characteristic, true)
-                if (!success) {
-                    return@withContext Result.failure(Exception("Failed to enable notifications for $uuid"))
+                // Use legacy API on main thread - this is what the working original app does
+                @Suppress("DEPRECATION")
+                characteristic.value = value
+                @Suppress("DEPRECATION")
+                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                @Suppress("DEPRECATION")
+                val success = gatt.writeCharacteristic(characteristic)
+                
+                if (success) {
+                    Log.d(TAG, "✅ No-response write initiated for $uuid")
+                    return@withContext Result.success(Unit)
+                } else {
+                    Log.e(TAG, "❌ No-response write returned false for $uuid")
+                    return@withContext Result.failure(Exception("Failed to initiate no-response write for $uuid"))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ writeCharacteristicNoResponse exception: ${e.message}", e)
+                return@withContext Result.failure(e)
+            }
+        }
+        
+        override suspend fun enableNotifications(uuid: String): Result<Unit> {
+            val characteristic = findCharacteristic(uuid)
+            if (characteristic == null) {
+                return Result.failure(Exception("Characteristic not found: $uuid"))
+            }
+            
+            val normalizedUuid = uuid.lowercase()
+            
+            return try {
+                // First: Enable local notifications on main thread
+                val localSuccess = withContext(Dispatchers.Main) {
+                    gatt.setCharacteristicNotification(characteristic, true)
+                }
+                if (!localSuccess) {
+                    return Result.failure(Exception("Failed to enable local notifications for $uuid"))
                 }
                 
                 // Write descriptor to enable notifications on remote device
@@ -812,31 +899,48 @@ class BaseBleService : Service() {
                 )
                 
                 if (descriptor != null) {
+                    val deferred = CompletableDeferred<Result<Unit>>()
+                    pendingDescriptorWrites[normalizedUuid] = deferred
+                    
                     val descriptorValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeDescriptor(descriptor, descriptorValue)
-                    } else {
+                    val writeSuccess = withContext(Dispatchers.Main) {
+                        // Use legacy API on main thread
                         @Suppress("DEPRECATION")
                         descriptor.value = descriptorValue
                         @Suppress("DEPRECATION")
                         gatt.writeDescriptor(descriptor)
                     }
                     
+                    if (!writeSuccess) {
+                        pendingDescriptorWrites.remove(normalizedUuid)
+                        return Result.failure(Exception("Failed to initiate descriptor write for $uuid"))
+                    }
+                    
+                    // Wait for callback with timeout
+                    withTimeout(5000) {
+                        deferred.await()
+                    }
+                    
                     Log.d(TAG, "Enabled notifications for $uuid")
+                    Result.success(Unit)
                 } else {
-                    Log.w(TAG, "No CCCD descriptor found for $uuid")
+                    Log.w(TAG, "No CCCD descriptor found for $uuid - notifications may not work")
+                    Result.success(Unit)
                 }
-                
-                Result.success(Unit)
+            } catch (e: TimeoutCancellationException) {
+                pendingDescriptorWrites.remove(normalizedUuid)
+                Result.failure(Exception("Descriptor write timeout for $uuid"))
             } catch (e: SecurityException) {
+                pendingDescriptorWrites.remove(normalizedUuid)
                 Result.failure(Exception("Permission denied for notifications: $uuid"))
             } catch (e: Exception) {
+                pendingDescriptorWrites.remove(normalizedUuid)
                 Result.failure(e)
             }
         }
         
-        override suspend fun disableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.IO) {
+        override suspend fun disableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.Main) {
             val characteristic = findCharacteristic(uuid)
             if (characteristic == null) {
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
@@ -852,14 +956,11 @@ class BaseBleService : Service() {
                 if (descriptor != null) {
                     val descriptorValue = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
                     
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeDescriptor(descriptor, descriptorValue)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        descriptor.value = descriptorValue
-                        @Suppress("DEPRECATION")
-                        gatt.writeDescriptor(descriptor)
-                    }
+                    // Use legacy API on main thread
+                    @Suppress("DEPRECATION")
+                    descriptor.value = descriptorValue
+                    @Suppress("DEPRECATION")
+                    gatt.writeDescriptor(descriptor)
                     
                     Log.d(TAG, "Disabled notifications for $uuid")
                 }

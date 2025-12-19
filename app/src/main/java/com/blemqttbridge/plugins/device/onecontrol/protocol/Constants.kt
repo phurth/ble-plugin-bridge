@@ -10,6 +10,7 @@ object Constants {
     const val SEED_CHAR_UUID = "00000011-0200-a58e-e411-afe28044e62c"  // SEED for TEA encryption
     const val UNLOCK_STATUS_CHAR_UUID = "00000012-0200-a58e-e411-afe28044e62c"  // Unlock status (reads "Unlocked" after KEY write)
     const val KEY_CHAR_UUID = "00000013-0200-a58e-e411-afe28044e62c"  // KEY for authentication/data mode
+    const val AUTH_STATUS_CHAR_UUID = "00000014-0200-a58e-e411-afe28044e62c"  // Auth Service status (READ, NOTIFY)
     
     // CAN Service (contains unlock characteristic and CAN read/write)
     const val CAN_SERVICE_UUID = "00000000-0200-a58e-e411-afe28044e62c"
