@@ -122,53 +122,127 @@ class OneControlPlugin : BlePluginInterface {
         Log.i(TAG, "🔐 Starting authentication for ${device.address}...")
         
         return try {
-            // STEP 1: PIN UNLOCK (Required before SEED will work)
-            Log.i(TAG, "Step 1: Checking gateway unlock status...")
+            // STEP 1: PIN UNLOCK (Only for CAN Service gateways)
+            // Data Service gateways (00000030) don't have UNLOCK_CHAR and skip this step
+            Log.i(TAG, "Step 1: Checking gateway type and unlock status...")
             val unlockStatusResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
             
-            if (unlockStatusResult.isFailure) {
-                return Result.failure(Exception("Failed to read unlock status: ${unlockStatusResult.exceptionOrNull()?.message}"))
-            }
+            val isDataServiceGateway = unlockStatusResult.isFailure
             
-            val unlockStatus = unlockStatusResult.getOrThrow()
-            if (unlockStatus.isEmpty()) {
-                return Result.failure(Exception("Unlock status returned empty data"))
-            }
-            
-            val status = unlockStatus[0].toInt() and 0xFF
-            Log.d(TAG, "Unlock status: 0x${status.toString(16)}")
-            
-            if (status == 0) {
-                // Gateway is locked - write PIN
-                Log.i(TAG, "Gateway is locked, writing PIN...")
-                val pinBytes = gatewayPin.toByteArray(Charsets.UTF_8)
-                val writeResult = gattOperations.writeCharacteristic(Constants.UNLOCK_CHAR_UUID, pinBytes)
+            if (isDataServiceGateway) {
+                // UNLOCK_CHAR not found - this is a Data Service gateway
+                // Data Service gateways use UNLOCK_STATUS challenge-response authentication
+                Log.i(TAG, "⏭️ Data Service gateway detected - using UNLOCK_STATUS challenge-response")
                 
-                if (writeResult.isFailure) {
-                    return Result.failure(Exception("Failed to write PIN: ${writeResult.exceptionOrNull()?.message}"))
+                // Step 1: Read UNLOCK_STATUS to get challenge
+                Log.i(TAG, "🔑 Step 1: Reading UNLOCK_STATUS for challenge...")
+                val challengeResult = gattOperations.readCharacteristic(Constants.UNLOCK_STATUS_CHAR_UUID)
+                if (challengeResult.isFailure) {
+                    return Result.failure(Exception("Failed to read UNLOCK_STATUS challenge: ${challengeResult.exceptionOrNull()?.message}"))
                 }
                 
-                // Wait for unlock to settle
-                Log.d(TAG, "Waiting ${Constants.UNLOCK_VERIFY_DELAY_MS}ms for unlock to complete...")
-                delay(Constants.UNLOCK_VERIFY_DELAY_MS)
-                
-                // Verify unlock
-                val verifyResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
-                if (verifyResult.isFailure) {
-                    return Result.failure(Exception("Failed to verify unlock: ${verifyResult.exceptionOrNull()?.message}"))
+                val challengeData = challengeResult.getOrThrow()
+                if (challengeData.size == 4) {
+                    // Calculate KEY from challenge (big-endian)
+                    val challenge = ((challengeData[0].toInt() and 0xFF) shl 24) or
+                                  ((challengeData[1].toInt() and 0xFF) shl 16) or
+                                  ((challengeData[2].toInt() and 0xFF) shl 8) or
+                                  (challengeData[3].toInt() and 0xFF)
+                    
+                    Log.d(TAG, "Challenge: 0x${challenge.toString(16).padStart(8, '0')}")
+                    
+                    // Encrypt with TEA (using gateway cypher)
+                    val keyValue = TeaEncryption.encrypt(gatewayCypher, challenge.toLong() and 0xFFFFFFFFL)
+                    Log.d(TAG, "KEY: 0x${keyValue.toString(16).padStart(8, '0')}")
+                    
+                    // Convert to big-endian bytes
+                    val keyBytes = byteArrayOf(
+                        ((keyValue shr 24) and 0xFF).toByte(),
+                        ((keyValue shr 16) and 0xFF).toByte(),
+                        ((keyValue shr 8) and 0xFF).toByte(),
+                        (keyValue and 0xFF).toByte()
+                    )
+                    
+                    // Step 2: Write KEY
+                    Log.i(TAG, "🔑 Step 2: Writing KEY response...")
+                    val writeResult = gattOperations.writeCharacteristic(Constants.KEY_CHAR_UUID, keyBytes)
+                    if (writeResult.isFailure) {
+                        return Result.failure(Exception("Failed to write KEY: ${writeResult.exceptionOrNull()?.message}"))
+                    }
+                    
+                    // Small delay for gateway to process
+                    delay(200)
+                    
+                    // Step 3: Verify unlock
+                    Log.i(TAG, "🔑 Step 3: Verifying unlock status...")
+                    val verifyResult = gattOperations.readCharacteristic(Constants.UNLOCK_STATUS_CHAR_UUID)
+                    if (verifyResult.isFailure) {
+                        return Result.failure(Exception("Failed to verify unlock: ${verifyResult.exceptionOrNull()?.message}"))
+                    }
+                    
+                    val unlockStatus = String(verifyResult.getOrThrow(), Charsets.UTF_8)
+                    if (unlockStatus.contains("Unlocked", ignoreCase = true)) {
+                        Log.i(TAG, "✅ Gateway authenticated! Status: $unlockStatus")
+                    } else {
+                        return Result.failure(Exception("Authentication failed - expected 'Unlocked', got: $unlockStatus"))
+                    }
+                } else {
+                    return Result.failure(Exception("Invalid challenge size: ${challengeData.size}, expected 4"))
                 }
                 
-                val verifyStatus = verifyResult.getOrThrow()
-                if (verifyStatus.isEmpty() || (verifyStatus[0].toInt() and 0xFF) == 0) {
-                    return Result.failure(Exception("Gateway unlock failed (PIN incorrect?)"))
+                // Subscribe to DATA notifications
+                Log.d(TAG, "Subscribing to DATA notifications: ${Constants.DATA_READ_CHAR_UUID}")
+                val notifyResult = gattOperations.enableNotifications(Constants.DATA_READ_CHAR_UUID)
+                if (notifyResult.isFailure) {
+                    Log.w(TAG, "⚠️ Failed to subscribe to DATA: ${notifyResult.exceptionOrNull()?.message}")
+                } else {
+                    Log.i(TAG, "✅ Subscribed to DATA notifications")
                 }
                 
-                Log.i(TAG, "✅ Gateway unlocked successfully!")
+                authenticatedDevices.add(device.address)
+                return Result.success(Unit)
             } else {
-                Log.i(TAG, "✅ Gateway already unlocked")
+                // CAN Service gateway - perform PIN unlock
+                val unlockStatus = unlockStatusResult.getOrThrow()
+                if (unlockStatus.isEmpty()) {
+                    return Result.failure(Exception("Unlock status returned empty data"))
+                }
+                
+                val status = unlockStatus[0].toInt() and 0xFF
+                Log.d(TAG, "Unlock status: 0x${status.toString(16)}")
+                
+                if (status == 0) {
+                    // Gateway is locked - write PIN
+                    Log.i(TAG, "Gateway is locked, writing PIN...")
+                    val pinBytes = gatewayPin.toByteArray(Charsets.UTF_8)
+                    val writeResult = gattOperations.writeCharacteristic(Constants.UNLOCK_CHAR_UUID, pinBytes)
+                    
+                    if (writeResult.isFailure) {
+                        return Result.failure(Exception("Failed to write PIN: ${writeResult.exceptionOrNull()?.message}"))
+                    }
+                    
+                    // Wait for unlock to settle
+                    Log.d(TAG, "Waiting ${Constants.UNLOCK_VERIFY_DELAY_MS}ms for unlock to complete...")
+                    delay(Constants.UNLOCK_VERIFY_DELAY_MS)
+                    
+                    // Verify unlock
+                    val verifyResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
+                    if (verifyResult.isFailure) {
+                        return Result.failure(Exception("Failed to verify unlock: ${verifyResult.exceptionOrNull()?.message}"))
+                    }
+                    
+                    val verifyStatus = verifyResult.getOrThrow()
+                    if (verifyStatus.isEmpty() || (verifyStatus[0].toInt() and 0xFF) == 0) {
+                        return Result.failure(Exception("Gateway unlock failed (PIN incorrect?)"))
+                    }
+                    
+                    Log.i(TAG, "✅ Gateway unlocked successfully!")
+                } else {
+                    Log.i(TAG, "✅ Gateway already unlocked")
+                }
+                
+                unlockedDevices.add(device.address)
             }
-            
-            unlockedDevices.add(device.address)
             
             // STEP 2: TEA AUTHENTICATION (SEED/KEY exchange)
             Log.i(TAG, "Step 2: Starting TEA authentication...")
