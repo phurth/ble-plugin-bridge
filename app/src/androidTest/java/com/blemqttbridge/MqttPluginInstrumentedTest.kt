@@ -23,10 +23,10 @@ import kotlin.test.assertTrue
 class MqttPluginInstrumentedTest {
     
     companion object {
-        // ⚙️ CONFIGURE YOUR MQTT BROKER HERE ⚙️
-        private const val BROKER_URL = "tcp://YOUR_BROKER_IP:1883"  // e.g., "tcp://192.168.1.100:1883"
-        private const val USERNAME = "YOUR_USERNAME"                 // or "" if no auth
-        private const val PASSWORD = "YOUR_PASSWORD"                 // or "" if no auth
+        // ⚙️ MQTT Broker Configuration ⚙️
+        private const val BROKER_URL = "tcp://10.115.19.131:1883"
+        private const val USERNAME = "mqtt"
+        private const val PASSWORD = "mqtt"
         private const val TOPIC_PREFIX = "test/ble_bridge"
     }
     

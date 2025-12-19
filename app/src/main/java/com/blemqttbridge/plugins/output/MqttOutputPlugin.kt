@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.suspendCancellableCoroutine
-import org.eclipse.paho.android.service.MqttAndroidClient
+import info.mqtt.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.*
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
