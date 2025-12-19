@@ -314,14 +314,8 @@ class BaseBleService : Service() {
                         plugin?.onDeviceDisconnected(device)
                         publishAvailability(device, false)
                         
-                        // Check if this was the last device using this plugin
-                        if (pluginId != null) {
-                            val stillUsed = connectedDevices.values.any { it.second == pluginId }
-                            if (!stillUsed) {
-                                Log.i(TAG, "No devices using plugin $pluginId, unloading")
-                                pluginRegistry.unloadBlePlugin(pluginId)
-                            }
-                        }
+                        // Note: Plugin remains loaded for quick reconnection
+                        // Plugins only unload on service stop or critical memory pressure
                     }
                     
                     gatt.close()
@@ -470,9 +464,10 @@ class BaseBleService : Service() {
         when (level) {
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
             ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> {
-                // Critical - disconnect devices to free memory
-                Log.w(TAG, "Critical memory - disconnecting devices")
+                // Critical - disconnect devices and unload plugins to free memory
+                Log.w(TAG, "Critical memory - disconnecting devices and unloading plugins")
                 disconnectAll()
+                pluginRegistry.cleanup()
             }
         }
         
