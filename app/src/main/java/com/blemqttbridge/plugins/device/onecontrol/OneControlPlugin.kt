@@ -6,6 +6,9 @@ import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.plugins.device.onecontrol.protocol.Constants
 import com.blemqttbridge.plugins.device.onecontrol.protocol.TeaEncryption
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 
 /**
  * OneControl BLE Gateway Plugin
@@ -45,7 +48,9 @@ class OneControlPlugin : BlePluginInterface {
     // Connection state tracking
     private val connectedDevices = mutableSetOf<String>()  // Device addresses
     private val authenticatedDevices = mutableSetOf<String>()  // Authenticated devices
+    private val unlockedDevices = mutableSetOf<String>()  // PIN-unlocked devices
     private var gattOperations: BlePluginInterface.GattOperations? = null
+    private var pendingSeedResponse: CompletableDeferred<ByteArray>? = null
     
     override fun getPluginId(): String = PLUGIN_ID
     
@@ -114,17 +119,70 @@ class OneControlPlugin : BlePluginInterface {
     ): Result<Unit> {
         this.gattOperations = gattOperations
         
-        Log.i(TAG, "🔐 Starting TEA authentication for ${device.address}...")
+        Log.i(TAG, "🔐 Starting authentication for ${device.address}...")
         
         return try {
-            // Step 1: Read SEED from gateway
-            Log.d(TAG, "Reading SEED from ${Constants.SEED_CHAR_UUID}")
+            // STEP 1: PIN UNLOCK (Required before SEED will work)
+            Log.i(TAG, "Step 1: Checking gateway unlock status...")
+            val unlockStatusResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
+            
+            if (unlockStatusResult.isFailure) {
+                return Result.failure(Exception("Failed to read unlock status: ${unlockStatusResult.exceptionOrNull()?.message}"))
+            }
+            
+            val unlockStatus = unlockStatusResult.getOrThrow()
+            if (unlockStatus.isEmpty()) {
+                return Result.failure(Exception("Unlock status returned empty data"))
+            }
+            
+            val status = unlockStatus[0].toInt() and 0xFF
+            Log.d(TAG, "Unlock status: 0x${status.toString(16)}")
+            
+            if (status == 0) {
+                // Gateway is locked - write PIN
+                Log.i(TAG, "Gateway is locked, writing PIN...")
+                val pinBytes = gatewayPin.toByteArray(Charsets.UTF_8)
+                val writeResult = gattOperations.writeCharacteristic(Constants.UNLOCK_CHAR_UUID, pinBytes)
+                
+                if (writeResult.isFailure) {
+                    return Result.failure(Exception("Failed to write PIN: ${writeResult.exceptionOrNull()?.message}"))
+                }
+                
+                // Wait for unlock to settle
+                Log.d(TAG, "Waiting ${Constants.UNLOCK_VERIFY_DELAY_MS}ms for unlock to complete...")
+                delay(Constants.UNLOCK_VERIFY_DELAY_MS)
+                
+                // Verify unlock
+                val verifyResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
+                if (verifyResult.isFailure) {
+                    return Result.failure(Exception("Failed to verify unlock: ${verifyResult.exceptionOrNull()?.message}"))
+                }
+                
+                val verifyStatus = verifyResult.getOrThrow()
+                if (verifyStatus.isEmpty() || (verifyStatus[0].toInt() and 0xFF) == 0) {
+                    return Result.failure(Exception("Gateway unlock failed (PIN incorrect?)"))
+                }
+                
+                Log.i(TAG, "✅ Gateway unlocked successfully!")
+            } else {
+                Log.i(TAG, "✅ Gateway already unlocked")
+            }
+            
+            unlockedDevices.add(device.address)
+            
+            // STEP 2: TEA AUTHENTICATION (SEED/KEY exchange)
+            Log.i(TAG, "Step 2: Starting TEA authentication...")
+            
+            // Read SEED characteristic
+            Log.d(TAG, "Reading SEED from ${Constants.SEED_CHAR_UUID}...")
             val seedResult = gattOperations.readCharacteristic(Constants.SEED_CHAR_UUID)
+            
             if (seedResult.isFailure) {
                 return Result.failure(Exception("Failed to read SEED: ${seedResult.exceptionOrNull()?.message}"))
             }
             
             val seedBytes = seedResult.getOrThrow()
+            
             if (seedBytes.size != 4) {
                 return Result.failure(Exception("Invalid SEED size: ${seedBytes.size}, expected 4"))
             }
@@ -137,11 +195,11 @@ class OneControlPlugin : BlePluginInterface {
             
             Log.d(TAG, "Seed: 0x${seed.toString(16).padStart(8, '0')}")
             
-            // Step 2: Encrypt seed with TEA using gateway cypher
+            // Step 3: Encrypt seed with TEA using gateway cypher
             val encryptedKey = TeaEncryption.encrypt(gatewayCypher, seed)
             Log.d(TAG, "Key: 0x${encryptedKey.toString(16).padStart(8, '0')}")
             
-            // Step 3: Convert encrypted key to bytes (little-endian)
+            // Step 4: Convert encrypted key to bytes (little-endian)
             val keyBytes = byteArrayOf(
                 (encryptedKey and 0xFF).toByte(),
                 ((encryptedKey shr 8) and 0xFF).toByte(),
@@ -149,7 +207,7 @@ class OneControlPlugin : BlePluginInterface {
                 ((encryptedKey shr 24) and 0xFF).toByte()
             )
             
-            // Step 4: Write encrypted key back to gateway
+            // Step 5: Write encrypted key back to gateway
             Log.d(TAG, "Writing KEY to ${Constants.KEY_CHAR_UUID}")
             val writeResult = gattOperations.writeCharacteristic(Constants.KEY_CHAR_UUID, keyBytes)
             if (writeResult.isFailure) {
@@ -158,7 +216,7 @@ class OneControlPlugin : BlePluginInterface {
             
             Log.i(TAG, "✅ Authentication complete!")
             
-            // Step 5: Subscribe to CAN notifications
+            // Step 6: Subscribe to CAN notifications
             Log.d(TAG, "Subscribing to CAN notifications: ${Constants.CAN_READ_CHAR_UUID}")
             val notifyResult = gattOperations.enableNotifications(Constants.CAN_READ_CHAR_UUID)
             if (notifyResult.isFailure) {
@@ -173,6 +231,7 @@ class OneControlPlugin : BlePluginInterface {
             
         } catch (e: Exception) {
             Log.e(TAG, "❌ Authentication failed: ${e.message}", e)
+            pendingSeedResponse = null
             Result.failure(e)
         }
     }
@@ -182,7 +241,9 @@ class OneControlPlugin : BlePluginInterface {
         
         connectedDevices.remove(device.address)
         authenticatedDevices.remove(device.address)
+        unlockedDevices.remove(device.address)
         gattOperations = null
+        pendingSeedResponse = null
     }
     
     override suspend fun onCharacteristicNotification(
@@ -194,6 +255,12 @@ class OneControlPlugin : BlePluginInterface {
         
         // Match characteristic UUID and parse data
         when (characteristicUuid.lowercase()) {
+            Constants.SEED_CHAR_UUID.lowercase() -> {
+                Log.d(TAG, "📨 Received SEED notification: ${value.toHexString()}")
+                // Complete the pending SEED request
+                pendingSeedResponse?.complete(value)
+                pendingSeedResponse = null
+            }
             Constants.CAN_READ_CHAR_UUID.lowercase() -> {
                 Log.d(TAG, "📨 CAN data received: ${value.toHexString()}")
                 // TODO: Decode COBS, parse CAN, extract device states
@@ -201,10 +268,6 @@ class OneControlPlugin : BlePluginInterface {
                     "status" to "online",
                     "last_update" to System.currentTimeMillis().toString()
                 )
-            }
-            Constants.SEED_CHAR_UUID.lowercase() -> {
-                Log.d(TAG, "📨 Received SEED notification")
-                // TODO: Perform TEA encryption authentication
             }
             Constants.UNLOCK_STATUS_CHAR_UUID.lowercase() -> {
                 val status = value.decodeToString()

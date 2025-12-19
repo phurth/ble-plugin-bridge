@@ -353,6 +353,14 @@ class BaseBleService : Service() {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.i(TAG, "Services discovered for ${gatt.device.address}")
                 
+                // Log all discovered services and characteristics
+                for (service in gatt.services) {
+                    Log.d(TAG, "Service: ${service.uuid}")
+                    for (char in service.characteristics) {
+                        Log.d(TAG, "  Char: ${char.uuid} properties=0x${char.properties.toString(16)}")
+                    }
+                }
+                
                 serviceScope.launch {
                     // Get the plugin for this device
                     val deviceInfo = connectedDevices[gatt.device.address]
