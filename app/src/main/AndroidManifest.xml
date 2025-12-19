@@ -53,6 +53,18 @@
         <!-- Paho MQTT Service -->
         <service android:name="info.mqtt.android.service.MqttService" />
 
+        <!-- Plugin Configuration Broadcast Receiver -->
+        <receiver
+            android:name=".receivers.PluginConfigReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.blemqttbridge.ENABLE_PLUGIN" />
+                <action android:name="com.blemqttbridge.DISABLE_PLUGIN" />
+                <action android:name="com.blemqttbridge.LIST_PLUGINS" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

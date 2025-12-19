@@ -44,6 +44,30 @@
             android:text="Refresh"/>
     </LinearLayout>
     
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingBottom="16dp">
+        
+        <Button
+            android:id="@+id/enableOneControlButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Enable OneControl"
+            android:textSize="11sp"
+            android:layout_marginEnd="4dp"/>
+        
+        <Button
+            android:id="@+id/disablePluginsButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Disable All"
+            android:textSize="11sp"/>
+    </LinearLayout>
+    
     <ScrollView
         android:id="@+id/scrollView"
         android:layout_width="match_parent"

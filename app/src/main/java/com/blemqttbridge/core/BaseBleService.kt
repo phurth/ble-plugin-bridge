@@ -29,6 +29,7 @@ class BaseBleService : Service() {
         
         const val ACTION_START_SCAN = "com.blemqttbridge.START_SCAN"
         const val ACTION_STOP_SCAN = "com.blemqttbridge.STOP_SCAN"
+        const val ACTION_STOP_SERVICE = "com.blemqttbridge.STOP_SERVICE"
         const val ACTION_DISCONNECT = "com.blemqttbridge.DISCONNECT"
         
         const val EXTRA_BLE_PLUGIN_ID = "ble_plugin_id"
@@ -100,6 +101,14 @@ class BaseBleService : Service() {
             
             ACTION_STOP_SCAN -> {
                 stopScanning()
+            }
+            
+            ACTION_STOP_SERVICE -> {
+                Log.i(TAG, "Stopping service...")
+                stopScanning()
+                disconnectAll()
+                stopForeground(true)
+                stopSelf()
             }
             
             ACTION_DISCONNECT -> {

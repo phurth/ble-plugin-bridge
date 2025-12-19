@@ -37,6 +37,8 @@ class ServiceStatusActivity : AppCompatActivity() {
     private lateinit var startServiceButton: Button
     private lateinit var stopServiceButton: Button
     private lateinit var refreshButton: Button
+    private lateinit var enableOneControlButton: Button
+    private lateinit var disablePluginsButton: Button
     
     private val permissionsRequestCode = 1001
     private val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -63,6 +65,8 @@ class ServiceStatusActivity : AppCompatActivity() {
         startServiceButton = findViewById(R.id.startServiceButton)
         stopServiceButton = findViewById(R.id.stopServiceButton)
         refreshButton = findViewById(R.id.refreshButton)
+        enableOneControlButton = findViewById(R.id.enableOneControlButton)
+        disablePluginsButton = findViewById(R.id.disablePluginsButton)
         
         startServiceButton.setOnClickListener {
             if (checkPermissions()) {
@@ -77,6 +81,20 @@ class ServiceStatusActivity : AppCompatActivity() {
         }
         
         refreshButton.setOnClickListener {
+            updateStatus()
+        }
+        
+        enableOneControlButton.setOnClickListener {
+            ServiceStateManager.enableBlePlugin(this, "onecontrol")
+            statusText.append("\n✅ Enabled OneControl plugin\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+            updateStatus()
+        }
+        
+        disablePluginsButton.setOnClickListener {
+            ServiceStateManager.setEnabledBlePlugins(this, emptySet())
+            statusText.append("\n❌ Disabled all plugins\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
             updateStatus()
         }
         
@@ -110,10 +128,24 @@ class ServiceStatusActivity : AppCompatActivity() {
     }
     
     private fun startBleService() {
+        // Get enabled plugins from ServiceStateManager
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(this)
+        
+        if (enabledPlugins.isEmpty()) {
+            statusText.append("\n⚠️ No plugins enabled! Enable a plugin first.\n")
+            statusText.append("Run: adb shell am broadcast -a com.blemqttbridge.ENABLE_PLUGIN --es plugin_id onecontrol\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+            return
+        }
+        
+        // Use first enabled plugin (for now - future: support multiple)
+        val blePluginId = enabledPlugins.first()
+        val outputPluginId = ServiceStateManager.getEnabledOutputPlugin(this) ?: "mqtt"
+        
         val intent = Intent(this, BaseBleService::class.java).apply {
             action = BaseBleService.ACTION_START_SCAN
-            putExtra(BaseBleService.EXTRA_BLE_PLUGIN_ID, "mock_battery")
-            putExtra(BaseBleService.EXTRA_OUTPUT_PLUGIN_ID, "mqtt")
+            putExtra(BaseBleService.EXTRA_BLE_PLUGIN_ID, blePluginId)
+            putExtra(BaseBleService.EXTRA_OUTPUT_PLUGIN_ID, outputPluginId)
         }
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -122,19 +154,31 @@ class ServiceStatusActivity : AppCompatActivity() {
             startService(intent)
         }
         
-        updateStatus()
-    }
-    
-    private fun stopBleService() {
-        val intent = Intent(this, BaseBleService::class.java).apply {
-            action = BaseBleService.ACTION_STOP_SCAN
-        }
-        startService(intent)
+        // Update UI after short delay to let service start
+        scrollView.postDelayed({ updateStatus() }, 500)
         
         updateStatus()
     }
     
+    private fun stopBleService() {
+        // Stop the service completely (not just scanning)
+        val intent = Intent(this, BaseBleService::class.java).apply {
+            action = BaseBleService.ACTION_STOP_SERVICE
+        }
+        startService(intent)
+        
+        // Update UI after short delay to let service stop
+        scrollView.postDelayed({ updateStatus() }, 500)
+    }
+    
     private fun updateStatus() {
+        // Update button states based on service status
+        val serviceRunning = ServiceStateManager.wasServiceRunning(this)
+        startServiceButton.isEnabled = !serviceRunning
+        stopServiceButton.isEnabled = serviceRunning
+        startServiceButton.alpha = if (serviceRunning) 0.5f else 1.0f
+        stopServiceButton.alpha = if (serviceRunning) 1.0f else 0.5f
+        
         val status = buildString {
             appendLine("=== BLE BRIDGE SERVICE STATUS ===")
             appendLine()
