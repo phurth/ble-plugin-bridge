@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat
 import com.blemqttbridge.R
 import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.PluginRegistry
+import com.blemqttbridge.core.ServiceStateManager
 
 /**
  * Diagnostic UI for testing and debugging BLE service.
@@ -180,16 +181,41 @@ class ServiceStatusActivity : AppCompatActivity() {
             appendLine("  ${if (locationEnabled) "✅ Enabled" else "❌ Disabled (required for BLE)"}")
             appendLine()
             
-            // Plugin Registry
-            appendLine("🔌 Plugin Registry:")
-            val registry = PluginRegistry.getInstance()
-            
-            appendLine("  Registered BLE Plugins:")
-            // Can't access internal plugin count directly, but we know MockBatteryPlugin should be registered
-            appendLine("    - MockBatteryPlugin (if registered in Application.onCreate)")
-            
+            // Service State
+            appendLine("⚙️ Service State:")
+            val serviceRunning = ServiceStateManager.wasServiceRunning(this@ServiceStatusActivity)
+            val autoStart = ServiceStateManager.isAutoStartEnabled(this@ServiceStatusActivity)
+            appendLine("  Running: ${if (serviceRunning) "✅ Yes" else "❌ No"}")
+            appendLine("  Auto-start: ${if (autoStart) "✅ Enabled" else "❌ Disabled"}")
             appendLine()
-            appendLine("  Loaded BLE Plugins:")
+            
+            // Plugin Configuration
+            appendLine("🔌 Plugin Configuration:")
+            val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(this@ServiceStatusActivity)
+            val enabledOutputPlugin = ServiceStateManager.getEnabledOutputPlugin(this@ServiceStatusActivity)
+            
+            appendLine("  Enabled BLE Plugins:")
+            if (enabledBlePlugins.isEmpty()) {
+                appendLine("    (none - configure in settings)")
+            } else {
+                for (pluginId in enabledBlePlugins) {
+                    appendLine("    ✅ $pluginId")
+                }
+            }
+            appendLine()
+            
+            appendLine("  Enabled Output Plugin:")
+            appendLine("    ${enabledOutputPlugin ?: "(none)"}")
+            appendLine()
+            
+            // Plugin Registry
+            appendLine("📦 Available Plugins:")
+            val registry = PluginRegistry.getInstance()
+            appendLine("  - onecontrol (OneControl Gateway)")
+            appendLine("  - mock_battery (Test Plugin)")
+            appendLine()
+            
+            appendLine("  Currently Loaded:")
             val loadedPlugins = registry.getLoadedBlePlugins()
             if (loadedPlugins.isEmpty()) {
                 appendLine("    (none)")
@@ -211,25 +237,33 @@ class ServiceStatusActivity : AppCompatActivity() {
             appendLine()
             
             // Service Instructions
-            appendLine("📋 Service Controls:")
-            appendLine("  1. Ensure all permissions are granted")
-            appendLine("  2. Enable Location Services")
-            appendLine("  3. Tap 'Start Service' to begin BLE scanning")
-            appendLine("  4. Watch logs: adb logcat -s BaseBleService PluginRegistry")
+            appendLine("📋 Quick Start:")
+            appendLine("  1. Ensure all permissions granted ✅")
+            appendLine("  2. Enable Location Services ✅")
+            appendLine("  3. Configure plugins (see below)")
+            appendLine("  4. Tap 'Start Service'")
+            appendLine()
+            
+            appendLine("🔧 Plugin Configuration:")
+            appendLine("  To enable OneControl plugin, run:")
+            appendLine("    adb shell 'am broadcast -a com.blemqttbridge.ENABLE_PLUGIN --es plugin_id onecontrol'")
+            appendLine()
+            appendLine("  To disable plugin, run:")
+            appendLine("    adb shell 'am broadcast -a com.blemqttbridge.DISABLE_PLUGIN --es plugin_id onecontrol'")
             appendLine()
             
             appendLine("🔍 Expected Behavior:")
-            appendLine("  - Service starts in foreground")
-            appendLine("  - BLE scanning begins")
-            appendLine("  - MockBatteryPlugin loads when 'MockBattery*' device found")
-            appendLine("  - MQTT connection established")
-            appendLine("  - Device state published to MQTT")
+            appendLine("  - Service persists state across restarts")
+            appendLine("  - If running when app closed, auto-starts on launch")
+            appendLine("  - Only enabled plugins are loaded")
+            appendLine("  - BLE scanning for configured device types")
             appendLine()
             
-            appendLine("⚠️ Known Limitations:")
-            appendLine("  - MockBatteryPlugin matches 'MockBattery*' device names")
-            appendLine("  - Need actual BLE hardware for full testing")
-            appendLine("  - Or use nRF Connect to advertise with name 'MockBatteryTest'")
+            appendLine("⚠️ Note:")
+            appendLine("  - Plugins NOT auto-loaded on app startup")
+            appendLine("  - User must enable plugins first")
+            appendLine("  - Service remembers last on/off state")
+            appendLine("  - For RV use, enable 'onecontrol' plugin")
         }
         
         statusText.text = status

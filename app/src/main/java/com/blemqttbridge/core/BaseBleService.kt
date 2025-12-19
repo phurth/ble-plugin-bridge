@@ -81,6 +81,10 @@ class BaseBleService : Service() {
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
+                // Mark service as running
+                ServiceStateManager.setServiceRunning(applicationContext, true)
+                Log.i(TAG, "Service marked as running")
+                
                 val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol"
                 val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
                 
@@ -111,6 +115,10 @@ class BaseBleService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service destroyed")
+        
+        // Mark service as stopped
+        ServiceStateManager.setServiceRunning(applicationContext, false)
+        Log.i(TAG, "Service marked as stopped")
         
         stopScanning()
         disconnectAll()

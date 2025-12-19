@@ -9,7 +9,10 @@ import com.blemqttbridge.plugins.output.MqttOutputPlugin
 
 /**
  * Application class for BLE Plugin Bridge.
- * Registers all available plugins on startup.
+ * 
+ * IMPORTANT: This class only REGISTERS plugin factories.
+ * Plugins are NOT loaded until user enables them through UI.
+ * Service state is persisted and restored on app launch.
  */
 class BlePluginBridgeApplication : Application() {
     
@@ -19,11 +22,12 @@ class BlePluginBridgeApplication : Application() {
     
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "Application starting - registering plugins")
+        Log.i(TAG, "Application starting - registering plugin factories")
         
         val registry = PluginRegistry.getInstance()
         
-        // Register BLE device plugins
+        // Register BLE device plugin FACTORIES (not instances)
+        // Plugins are instantiated only when user enables them
         registry.registerBlePlugin("onecontrol") {
             OneControlPlugin()
         }
@@ -32,13 +36,14 @@ class BlePluginBridgeApplication : Application() {
             MockBatteryPlugin()
         }
         
-        // Register output plugins  
+        // Register output plugin FACTORIES
         registry.registerOutputPlugin("mqtt") {
             MqttOutputPlugin(this@BlePluginBridgeApplication)
         }
         
-        Log.i(TAG, "Plugin registration complete")
-        Log.i(TAG, "  BLE plugins: onecontrol, mock_battery")
-        Log.i(TAG, "  Output plugins: mqtt")
+        Log.i(TAG, "Plugin factory registration complete")
+        Log.i(TAG, "  Available BLE plugins: onecontrol, mock_battery")
+        Log.i(TAG, "  Available output plugins: mqtt")
+        Log.i(TAG, "  No plugins loaded yet - waiting for user configuration")
     }
 }
