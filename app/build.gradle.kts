@@ -12,7 +12,7 @@ android {
         minSdk = 26  // Android 8.0
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0.0-phase1"
+        versionName = "1.0.0-phase2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -34,6 +34,12 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
     }
 
     buildFeatures {
