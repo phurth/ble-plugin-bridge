@@ -14,6 +14,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light">
 
+        <!-- Main activity for manual testing -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- Paho MQTT Service -->
         <service android:name="org.eclipse.paho.android.service.MqttService" />
 
