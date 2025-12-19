@@ -3,9 +3,11 @@ package com.blemqttbridge.core
 import android.app.*
 import android.bluetooth.*
 import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -58,6 +60,9 @@ class BaseBleService : Service() {
     private val pendingReads = mutableMapOf<String, CompletableDeferred<Result<ByteArray>>>()
     private val pendingWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
     
+    // Devices currently undergoing bonding process
+    private val pendingBondDevices = mutableSetOf<String>()
+    
     private var isScanning = false
     
     override fun onCreate() {
@@ -76,6 +81,11 @@ class BaseBleService : Service() {
             }
         })
         memoryManager.initialize()
+        
+        // Register bond state receiver
+        val bondFilter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        registerReceiver(bondStateReceiver, bondFilter)
+        Log.d(TAG, "Bond state receiver registered")
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
@@ -135,6 +145,14 @@ class BaseBleService : Service() {
         
         stopScanning()
         disconnectAll()
+        
+        // Unregister bond state receiver
+        try {
+            unregisterReceiver(bondStateReceiver)
+            Log.d(TAG, "Bond state receiver unregistered")
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Bond state receiver not registered")
+        }
         
         serviceScope.launch {
             pluginRegistry.cleanup()
@@ -279,6 +297,63 @@ class BaseBleService : Service() {
     }
     
     /**
+     * Bond state receiver for pairing events.
+     */
+    private val bondStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val action = intent.action
+            if (BluetoothDevice.ACTION_BOND_STATE_CHANGED == action) {
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                val previousBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
+                
+                device?.let {
+                    if (pendingBondDevices.contains(it.address)) {
+                        Log.i(TAG, "🔗 Bond state changed for ${it.address}: $previousBondState -> $bondState")
+                        
+                        when (bondState) {
+                            BluetoothDevice.BOND_BONDED -> {
+                                Log.i(TAG, "✅✅✅ Device ${it.address} bonded successfully!")
+                                pendingBondDevices.remove(it.address)
+                                updateNotification("Bonded - Discovering services...")
+                                
+                                // Now safe to discover services - find the gatt connection
+                                val gatt = connectedDevices[it.address]?.first
+                                if (gatt != null) {
+                                    serviceScope.launch {
+                                        delay(500) // Brief settle delay
+                                        try {
+                                            Log.i(TAG, "Starting service discovery after bonding")
+                                            gatt.discoverServices()
+                                        } catch (e: SecurityException) {
+                                            Log.e(TAG, "Permission denied for service discovery after bonding", e)
+                                        }
+                                    }
+                                } else {
+                                    Log.e(TAG, "GATT connection not found after bonding")
+                                }
+                            }
+                            BluetoothDevice.BOND_BONDING -> {
+                                Log.i(TAG, "⏳ Bonding in progress for ${it.address}...")
+                                updateNotification("Pairing in progress...")
+                            }
+                            BluetoothDevice.BOND_NONE -> {
+                                pendingBondDevices.remove(it.address)
+                                if (previousBondState == BluetoothDevice.BOND_BONDING) {
+                                    Log.e(TAG, "❌ Bonding failed for ${it.address}!")
+                                    updateNotification("Pairing failed")
+                                } else {
+                                    Log.w(TAG, "Bond removed for ${it.address}")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
      * GATT callback for BLE connections.
      */
     private val gattCallback = object : BluetoothGattCallback() {
@@ -301,15 +376,49 @@ class BaseBleService : Service() {
                         // Notify plugin of connection
                         plugin?.onDeviceConnected(device)
                         
-                        // Discover services
-                        try {
-                            gatt.discoverServices()
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "Permission denied for service discovery", e)
+                        // Check bond state - pairing required for OneControl gateways
+                        val bondState = device.bondState
+                        Log.i(TAG, "Bond state after connection: $bondState (${when(bondState) {
+                            BluetoothDevice.BOND_BONDED -> "BONDED"
+                            BluetoothDevice.BOND_BONDING -> "BONDING"
+                            BluetoothDevice.BOND_NONE -> "NONE"
+                            else -> "UNKNOWN"
+                        }})")
+                        
+                        if (bondState != BluetoothDevice.BOND_BONDED) {
+                            Log.i(TAG, "🔗 Device not bonded - initiating explicit bonding...")
+                            updateNotification("Connected - Pairing...")
+                            pendingBondDevices.add(device.address)
+                            
+                            try {
+                                val bondResult = device.createBond()
+                                if (bondResult) {
+                                    Log.i(TAG, "✅ Bonding initiated - waiting for user to accept pairing dialog...")
+                                    // Don't proceed until bonding completes (handled by bondStateReceiver)
+                                } else {
+                                    Log.e(TAG, "❌ Failed to initiate bonding!")
+                                    pendingBondDevices.remove(device.address)
+                                    updateNotification("Pairing failed - retrying...")
+                                }
+                            } catch (e: SecurityException) {
+                                Log.e(TAG, "Permission denied for bonding", e)
+                                pendingBondDevices.remove(device.address)
+                                updateNotification("Error: Pairing permission denied")
+                            }
+                        } else {
+                            Log.i(TAG, "✅ Device already bonded - proceeding with service discovery")
+                            updateNotification("Connected - Discovering services...")
+                            
+                            // Already bonded - safe to discover services immediately
+                            try {
+                                gatt.discoverServices()
+                            } catch (e: SecurityException) {
+                                Log.e(TAG, "Permission denied for service discovery", e)
+                            }
                         }
                         
-                        // Start polling if needed
-                        if (plugin != null) {
+                        // Start polling if needed (after authentication)
+                        if (plugin != null && bondState == BluetoothDevice.BOND_BONDED) {
                             startPollingIfNeeded(device, plugin)
                         }
                         
@@ -325,6 +434,7 @@ class BaseBleService : Service() {
                     connectedDevices.remove(device.address)
                     pollingJobs[device.address]?.cancel()
                     pollingJobs.remove(device.address)
+                    pendingBondDevices.remove(device.address)  // Clean up pending bonds
                     
                     serviceScope.launch {
                         // Get the plugin for this device

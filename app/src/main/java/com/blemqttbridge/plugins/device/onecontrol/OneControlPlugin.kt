@@ -138,7 +138,19 @@ class OneControlPlugin : BlePluginInterface {
                 Log.i(TAG, "🔑 Step 1: Reading UNLOCK_STATUS for challenge...")
                 val challengeResult = gattOperations.readCharacteristic(Constants.UNLOCK_STATUS_CHAR_UUID)
                 if (challengeResult.isFailure) {
-                    return Result.failure(Exception("Failed to read UNLOCK_STATUS challenge: ${challengeResult.exceptionOrNull()?.message}"))
+                    // Fallback: If Auth characteristics not accessible, skip auth and just enable notifications
+                    // This matches original app behavior when UNLOCK_STATUS char not found
+                    Log.w(TAG, "⚠️ UNLOCK_STATUS read failed, enabling notifications anyway (no auth needed)")
+                    
+                    val notifyResult = gattOperations.enableNotifications(Constants.DATA_READ_CHAR_UUID)
+                    if (notifyResult.isFailure) {
+                        Log.w(TAG, "⚠️ Failed to subscribe to DATA: ${notifyResult.exceptionOrNull()?.message}")
+                    } else {
+                        Log.i(TAG, "✅ Subscribed to DATA notifications")
+                    }
+                    
+                    authenticatedDevices.add(device.address)
+                    return Result.success(Unit)
                 }
                 
                 val challengeData = challengeResult.getOrThrow()
