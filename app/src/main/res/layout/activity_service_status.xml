@@ -68,6 +68,29 @@
             android:textSize="11sp"/>
     </LinearLayout>
     
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingBottom="16dp"
+        android:background="#E8F5E9"
+        android:padding="12dp">
+        
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Auto-start service on app launch:"
+            android:textSize="14sp"
+            android:textStyle="bold"/>
+        
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/autoStartSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+    </LinearLayout>
+    
     <ScrollView
         android:id="@+id/scrollView"
         android:layout_width="match_parent"

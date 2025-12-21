@@ -547,7 +547,7 @@ class DeviceStateTracker {
     /**
      * Process an incoming event and update device states
      */
-    fun processEvent(eventType: MyRvLinkEventType, data: ByteArray) {
+    fun processEvent(eventType: Byte, data: ByteArray) {
         when (eventType) {
             MyRvLinkEventType.GatewayInformation -> {
                 gatewayInfo = GatewayInformationEvent.decode(data)

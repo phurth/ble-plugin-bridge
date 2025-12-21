@@ -12,6 +12,7 @@ import android.widget.Button
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.blemqttbridge.R
@@ -39,6 +40,12 @@ class ServiceStatusActivity : AppCompatActivity() {
     private lateinit var refreshButton: Button
     private lateinit var enableOneControlButton: Button
     private lateinit var disablePluginsButton: Button
+    private lateinit var autoStartSwitch: SwitchCompat
+    
+    companion object {
+        private const val PREFS_NAME = "service_ui_prefs"
+        private const val KEY_AUTO_START = "auto_start_on_app_launch"
+    }
     
     private val permissionsRequestCode = 1001
     private val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -61,6 +68,7 @@ class ServiceStatusActivity : AppCompatActivity() {
         setContentView(R.layout.activity_service_status)
         
         statusText = findViewById(R.id.statusText)
+        autoStartSwitch = findViewById(R.id.autoStartSwitch)
         scrollView = findViewById(R.id.scrollView)
         startServiceButton = findViewById(R.id.startServiceButton)
         stopServiceButton = findViewById(R.id.stopServiceButton)
@@ -97,6 +105,29 @@ class ServiceStatusActivity : AppCompatActivity() {
             scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
             updateStatus()
         }
+        // Setup auto-start toggle
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        autoStartSwitch.isChecked = prefs.getBoolean(KEY_AUTO_START, true) // Default: enabled
+        autoStartSwitch.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean(KEY_AUTO_START, isChecked).apply()
+            statusText.append("\n${if (isChecked) "✅" else "❌"} Auto-start ${if (isChecked) "enabled" else "disabled"}\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
+        
+        // Auto-start service if enabled (regardless of previous running state)
+        // The intent is: if auto-start is ON, always start the service when the app opens
+        val autoStartEnabled = prefs.getBoolean(KEY_AUTO_START, true)
+        if (autoStartEnabled) {
+            statusText.append("🚀 Auto-starting service...\n")
+            scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+            if (checkPermissions()) {
+                startBleService()
+            } else {
+                statusText.append("⚠️ Need permissions - tap Start Service to grant\n")
+                scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
+            }
+        }
+        
         
         updateStatus()
     }

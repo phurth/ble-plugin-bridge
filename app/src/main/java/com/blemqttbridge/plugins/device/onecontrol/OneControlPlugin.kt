@@ -5,6 +5,14 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.plugins.device.onecontrol.protocol.Constants
+import com.blemqttbridge.plugins.device.onecontrol.protocol.DimmableLightStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.GatewayInformationEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.RelayBasicLatchingStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.RelayHBridgeStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.RvStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.DeviceOnlineStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.MyRvLinkCommandEncoder
+import com.blemqttbridge.plugins.device.onecontrol.protocol.MyRvLinkEventType
 import kotlinx.coroutines.*
 
 /**
@@ -16,6 +24,17 @@ import kotlinx.coroutines.*
  * Complete implementation with PIN unlock + TEA authentication for OneControl gateways.
  */
 class OneControlPlugin : BlePluginInterface {
+    // Device state tracker for event/state management
+    private var deviceStateTracker: com.blemqttbridge.plugins.device.onecontrol.protocol.DeviceStateTracker? = null
+    
+    // State listener for MQTT output (set via setStateListener)
+    private var stateListener: OneControlStateListener? = null
+    
+    // Coroutine scope for emitting state updates asynchronously
+    private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    // Track which devices have been discovered (for HA discovery publishing)
+    private val discoveredDevices = mutableSetOf<Int>()
     
     /**
      * Simple COBS decoder state for byte-by-byte processing
@@ -100,6 +119,10 @@ class OneControlPlugin : BlePluginInterface {
     private val connectedDevices = mutableSetOf<String>()  // Device addresses
     private val authenticatedDevices = mutableSetOf<String>()  // Authenticated devices
     private val unlockedDevices = mutableSetOf<String>()  // PIN-unlocked devices        
+    
+    // Gateway type tracking (Data Service vs CAN Service)
+    // Data Service gateways require 2-byte header stripping on decoded frames
+    private val dataServiceGateways = mutableSetOf<String>()        
     
     // Protocol state tracking
     private var nextCommandId: UShort = 1u
@@ -188,12 +211,29 @@ class OneControlPlugin : BlePluginInterface {
         Log.i(TAG, "🔐 Starting authentication for ${device.address}...")
         
         return try {
-            // STEP 1: Check gateway type by looking for UNLOCK_CHAR (CAN Service) vs DATA_READ (Data Service)
-            // Data Service gateways (00000030) don't have UNLOCK_CHAR
-            Log.i(TAG, "Step 1: Checking gateway type...")
-            val unlockStatusResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
+            // STEP 1: Check gateway type by SERVICE EXISTENCE (NOT by reading characteristics!)
+            // CRITICAL: Reading UNLOCK_CHAR triggers BLE encryption which can fail and remove the bond.
+            // Instead, check if CAN Service (0x00000000) or Data Service (0x00000030) exists.
+            // Legacy app does: (canService == null && dataService != null) -> Data Service gateway
+            Log.i(TAG, "Step 1: Checking gateway type by service existence...")
             
-            val isDataServiceGateway = unlockStatusResult.isFailure
+            val hasCanService = gattOperations.hasService(Constants.CAN_SERVICE_UUID)
+            val hasDataService = gattOperations.hasService(Constants.DATA_SERVICE_UUID)
+            
+            Log.i(TAG, "  CAN Service (${Constants.CAN_SERVICE_UUID}): ${if (hasCanService) "✅ FOUND" else "❌ NOT FOUND"}")
+            Log.i(TAG, "  Data Service (${Constants.DATA_SERVICE_UUID}): ${if (hasDataService) "✅ FOUND" else "❌ NOT FOUND"}")
+            
+            // Data Service gateway = has Data Service but NOT CAN Service (matches legacy app logic)
+            val isDataServiceGateway = !hasCanService && hasDataService
+            
+            // Track gateway type for frame processing (Data Service needs header stripping)
+            if (isDataServiceGateway) {
+                dataServiceGateways.add(device.address)
+                Log.i(TAG, "📡 Gateway ${device.address} identified as Data Service gateway")
+            } else {
+                dataServiceGateways.remove(device.address)
+                Log.i(TAG, "📡 Gateway ${device.address} identified as CAN Service gateway")
+            }
             
             if (isDataServiceGateway) {
                 // This is a Data Service gateway - REQUIRES challenge-response authentication!
@@ -328,6 +368,13 @@ class OneControlPlugin : BlePluginInterface {
                 return Result.success(Unit)
             } else {
                 // CAN Service gateway - perform full PIN unlock + TEA authentication
+                // First, read the unlock status from UNLOCK_CHAR
+                Log.i(TAG, "📖 Reading unlock status from CAN Service gateway...")
+                val unlockStatusResult = gattOperations.readCharacteristic(Constants.UNLOCK_CHAR_UUID)
+                if (unlockStatusResult.isFailure) {
+                    return Result.failure(Exception("Failed to read unlock status: ${unlockStatusResult.exceptionOrNull()?.message}"))
+                }
+                
                 val unlockStatus = unlockStatusResult.getOrThrow()
                 if (unlockStatus.isEmpty()) {
                     return Result.failure(Exception("Unlock status returned empty data"))
@@ -587,8 +634,21 @@ class OneControlPlugin : BlePluginInterface {
         return null
     }
     
+    override fun getTargetDeviceAddresses(): List<String> {
+        // Return configured gateway MAC for scan filtering
+        // This allows BLE scanning to continue even when screen is locked
+        return if (gatewayMac.isNotBlank()) {
+            listOf(gatewayMac.uppercase())
+        } else {
+            emptyList()
+        }
+    }
+    
     override suspend fun cleanup() {
         Log.i(TAG, "🧹 Cleaning up OneControl plugin")
+        
+        // Cancel plugin scope
+        pluginScope.cancel()
         
         // Cancel all heartbeats
         heartbeatJobs.values.forEach { it.cancel() }
@@ -598,6 +658,8 @@ class OneControlPlugin : BlePluginInterface {
         authenticatedDevices.clear()
         unlockedDevices.clear()
         streamReadingDevices.clear()
+        discoveredDevices.clear()
+        stateListener = null
     }
     
     // ============================================================================
@@ -653,16 +715,18 @@ class OneControlPlugin : BlePluginInterface {
             val lock = streamReadingLocks[device.address]
             Log.i(TAG, "🔄 Background stream reading thread started for ${device.address}")
             
-            while (!streamReadingFlags[device.address]!! && streamReadingDevices.contains(device.address)) {
+            // Use safe null checks to avoid crash when device disconnects and maps are cleared
+            while (streamReadingFlags[device.address] == false && streamReadingDevices.contains(device.address)) {
                 try {
-                    synchronized(lock!!) {
+                    if (lock == null) break  // Device was cleaned up
+                    synchronized(lock) {
                         if (queue?.isEmpty() == true) {
                             lock.wait(8000)  // 8-second timeout like original
                         }
                     }
                     
                     // Process all queued notification packets
-                    while (queue?.isNotEmpty() == true && !streamReadingFlags[device.address]!!) {
+                    while (queue?.isNotEmpty() == true && streamReadingFlags[device.address] == false) {
                         val notificationData = queue.poll() ?: continue
                         Log.d(TAG, "📥 Processing queued notification: ${notificationData.size} bytes")
                         
@@ -702,20 +766,168 @@ class OneControlPlugin : BlePluginInterface {
     
     /**
      * Process completed COBS-decoded frame (like original app)
+     * Parses event types and emits state updates via listener.
      */
     private fun processDecodedFrame(deviceAddress: String, frame: ByteArray) {
         Log.d(TAG, "📥 Processing decoded frame: ${frame.size} bytes - ${frame.toHexString()}")
+
+        // Data Service gateways may have a 2-byte header that needs stripping
+        // Try decoding without stripping first, then with stripping if that fails
+        var eventData = frame
+        val isDataServiceGateway = dataServiceGateways.contains(deviceAddress)
         
-        if (frame.size >= 5) {
-            // Check if this is a GatewayInformation response (EventType 0x10)
-            val eventType = frame[2]
-            if (eventType == 0x10.toByte()) {
-                handleGatewayInformationEvent(deviceAddress, frame)
-                return
+        if (isDataServiceGateway && frame.size >= 5) {
+            // For Data Service gateways: try decoding without stripping first
+            // If the event type looks invalid, try stripping 2-byte header
+            val maybeEventType = frame.getOrNull(2) ?: 0
+            val knownEventTypes = setOf(
+                MyRvLinkEventType.GatewayInformation,
+                MyRvLinkEventType.RvStatus,
+                MyRvLinkEventType.DimmableLightStatus,
+                MyRvLinkEventType.RelayBasicLatchingStatusType2,
+                MyRvLinkEventType.RelayHBridgeMomentaryStatusType2,
+                MyRvLinkEventType.DeviceOnlineStatus,
+                MyRvLinkEventType.TankSensorStatus
+            )
+            
+            if (!knownEventTypes.contains(maybeEventType)) {
+                // Unknown event type - try stripping 2-byte header
+                val headerHex = String.format("%02X %02X", frame[0].toInt() and 0xFF, frame[1].toInt() and 0xFF)
+                eventData = frame.sliceArray(2 until frame.size)
+                Log.d(TAG, "🔍 Data Service: Trying with 2-byte header stripped (0x$headerHex)")
             }
         }
         
-        // TODO: Handle other MyRvLink events (device status, etc.)
+        // Event decoding: expect [ClientCommandIdLo][ClientCommandIdHi][EventType][...]
+        if (eventData.size < 3) {
+            Log.w(TAG, "Frame too short for event decoding: ${frame.toHexString()}")
+            return
+        }
+
+        val eventType = eventData[2]
+        // Lazy init state tracker (per device if needed)
+        if (deviceStateTracker == null) {
+            deviceStateTracker = com.blemqttbridge.plugins.device.onecontrol.protocol.DeviceStateTracker()
+        }
+        
+        // Use eventData (potentially header-stripped) for the rest of processing
+        val frame = eventData  // Shadow the original frame with stripped version
+
+        // Process based on event type and emit state updates
+        when (eventType) {
+            MyRvLinkEventType.GatewayInformation -> {
+                handleGatewayInformationEvent(deviceAddress, frame)
+                // Emit gateway info update
+                val event = GatewayInformationEvent.decode(frame)
+                event?.let {
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.GatewayInfo(
+                        tableId = OneControlStateUpdate.GatewayInfo.GATEWAY_TABLE_ID,
+                        deviceId = OneControlStateUpdate.GatewayInfo.GATEWAY_DEVICE_ID,
+                        protocolVersion = it.protocolVersion,
+                        deviceCount = it.deviceCount,
+                        deviceTableId = it.deviceTableId
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.RvStatus -> {
+                val event = RvStatusEvent.decode(frame)
+                event?.let {
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.SystemStatus(
+                        tableId = OneControlStateUpdate.SystemStatus.SYSTEM_TABLE_ID,
+                        deviceId = OneControlStateUpdate.SystemStatus.SYSTEM_DEVICE_ID,
+                        batteryVoltage = it.batteryVoltage,
+                        externalTempC = it.externalTemperatureCelsius
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.DimmableLightStatus -> {
+                val event = DimmableLightStatusEvent.decode(frame)
+                event?.let {
+                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.DimmableLight(
+                        tableId = tableId,
+                        deviceId = deviceId,
+                        isOn = it.isOn,
+                        brightnessRaw = (it.brightness * 255) / 100,  // Convert from 0-100 to 0-255
+                        brightnessPct = it.brightness
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.RelayBasicLatchingStatusType2 -> {
+                val event = RelayBasicLatchingStatusEvent.decode(frame)
+                event?.let {
+                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.Switch(
+                        tableId = tableId,
+                        deviceId = deviceId,
+                        isOn = it.isOn
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.RelayHBridgeMomentaryStatusType2 -> {
+                val event = RelayHBridgeStatusEvent.decode(frame)
+                event?.let {
+                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    // Track last direction for open/closed inference
+                    val lastDir = if (it.status == 0xC2 || it.status == 0xC3) it.status else null
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.Cover(
+                        tableId = tableId,
+                        deviceId = deviceId,
+                        status = it.status,
+                        position = if (it.position in 0..100) it.position else null,
+                        lastDirection = lastDir
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.DeviceOnlineStatus -> {
+                val event = DeviceOnlineStatusEvent.decode(frame)
+                event?.let {
+                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.DeviceOnline(
+                        tableId = tableId,
+                        deviceId = deviceId,
+                        isOnline = it.isOnline
+                    ))
+                }
+            }
+            
+            else -> {
+                Log.d(TAG, "❓ Unhandled event type: 0x${eventType.toUByte().toString(16)}")
+            }
+        }
+        
+    }
+    
+    /**
+     * Emit a state update to the listener
+     */
+    private fun emitStateUpdate(gatewayAddress: String, update: OneControlStateUpdate) {
+        val deviceKey = (update.tableId.toInt() shl 8) or (update.deviceId.toInt() and 0xFF)
+        val isNewDevice = discoveredDevices.add(deviceKey)
+        
+        pluginScope.launch {
+            if (isNewDevice) {
+                Log.i(TAG, "📱 New device discovered: table=${update.tableId}, device=${update.deviceId}, type=${update::class.simpleName}")
+                stateListener?.onDeviceDiscovered(gatewayAddress, update)
+            }
+            stateListener?.onStateUpdate(gatewayAddress, update)
+        }
+    }
+    
+    /**
+     * Set the state listener for receiving device updates
+     */
+    fun setStateListener(listener: OneControlStateListener?) {
+        stateListener = listener
     }
     
     /**
@@ -1024,5 +1236,183 @@ class OneControlPlugin : BlePluginInterface {
         } catch (e: Exception) {
             Log.w(TAG, "Error processing notification: ${e.message}")
         }
+    }
+    
+    // ============================================================================
+    // Command Handling (for MQTT -> BLE control)
+    // ============================================================================
+    
+    /**
+     * Handle a typed command for a device.
+     * 
+     * @param gatewayAddress MAC address of the gateway
+     * @param command The typed command to execute
+     * @return Result with Unit on success, Exception on failure
+     */
+    suspend fun handleCommand(gatewayAddress: String, command: OneControlCommand): Result<Unit> {
+        val gattOps = gattOperations
+        if (gattOps == null) {
+            return Result.failure(IllegalStateException("GATT operations not available"))
+        }
+        
+        if (!authenticatedDevices.contains(gatewayAddress)) {
+            return Result.failure(IllegalStateException("Device not authenticated: $gatewayAddress"))
+        }
+        
+        return when (command) {
+            is OneControlCommand.DimmableLight -> handleDimmableLightCommand(gattOps, command)
+            is OneControlCommand.Switch -> handleSwitchCommand(gattOps, command)
+            is OneControlCommand.Cover -> handleCoverCommand(gattOps, command)
+            is OneControlCommand.Hvac -> handleHvacCommand(gattOps, command)
+        }
+    }
+    
+    private suspend fun handleDimmableLightCommand(
+        gattOps: BlePluginInterface.GattOperations,
+        command: OneControlCommand.DimmableLight
+    ): Result<Unit> {
+        val commandId = getNextCommandId()
+        val brightness = command.brightness ?: 255
+        
+        val dimmableCmd = when {
+            !command.turnOn -> MyRvLinkCommandEncoder.DimmableLightCommand.Off
+            else -> MyRvLinkCommandEncoder.DimmableLightCommand.On
+        }
+        
+        val commandBytes = MyRvLinkCommandEncoder.encodeActionDimmable(
+            commandId = commandId,
+            deviceTableId = command.tableId,
+            deviceId = command.deviceId,
+            command = dimmableCmd,
+            brightness = brightness
+        )
+        
+        val encoded = cobsEncode(commandBytes, prependStartFrame = true, useCrc = true)
+        
+        Log.i(TAG, "📤 Sending dimmable light command: table=${command.tableId}, device=${command.deviceId}, " +
+                   "on=${command.turnOn}, brightness=$brightness")
+        
+        return gattOps.writeCharacteristicNoResponse(Constants.DATA_WRITE_CHAR_UUID, encoded)
+    }
+    
+    private suspend fun handleSwitchCommand(
+        gattOps: BlePluginInterface.GattOperations,
+        command: OneControlCommand.Switch
+    ): Result<Unit> {
+        val commandId = getNextCommandId()
+        
+        val commandBytes = MyRvLinkCommandEncoder.encodeActionSwitch(
+            commandId = commandId,
+            deviceTableId = command.tableId,
+            deviceId = command.deviceId,
+            turnOn = command.turnOn
+        )
+        
+        val encoded = cobsEncode(commandBytes, prependStartFrame = true, useCrc = true)
+        
+        Log.i(TAG, "📤 Sending switch command: table=${command.tableId}, device=${command.deviceId}, " +
+                   "on=${command.turnOn}")
+        
+        return gattOps.writeCharacteristicNoResponse(Constants.DATA_WRITE_CHAR_UUID, encoded)
+    }
+    
+    private suspend fun handleCoverCommand(
+        gattOps: BlePluginInterface.GattOperations,
+        command: OneControlCommand.Cover
+    ): Result<Unit> {
+        // Cover commands use H-bridge relay control
+        // OPEN = extend (0x02), CLOSE = retract (0x03), STOP = 0x00
+        val commandId = getNextCommandId()
+        
+        val hbridgeCommand: Byte = when (command.command.uppercase()) {
+            "OPEN" -> 0x02  // Extend
+            "CLOSE" -> 0x03 // Retract
+            "STOP" -> 0x00  // Stop
+            "SET_POSITION" -> {
+                // Position control not yet implemented - would need motor timing
+                Log.w(TAG, "Cover position control not yet implemented")
+                return Result.failure(UnsupportedOperationException("Cover position control not yet implemented"))
+            }
+            else -> {
+                Log.w(TAG, "Unknown cover command: ${command.command}")
+                return Result.failure(IllegalArgumentException("Unknown cover command: ${command.command}"))
+            }
+        }
+        
+        // H-bridge command format: [CmdId_lo][CmdId_hi][CommandType=0x41][DeviceTableId][DeviceId][HBridgeCommand]
+        val commandBytes = byteArrayOf(
+            (commandId.toInt() and 0xFF).toByte(),
+            ((commandId.toInt() shr 8) and 0xFF).toByte(),
+            0x41.toByte(),  // ActionHBridge command type
+            command.tableId,
+            command.deviceId,
+            hbridgeCommand
+        )
+        
+        val encoded = cobsEncode(commandBytes, prependStartFrame = true, useCrc = true)
+        
+        Log.i(TAG, "📤 Sending cover command: table=${command.tableId}, device=${command.deviceId}, " +
+                   "action=${command.command}")
+        
+        return gattOps.writeCharacteristicNoResponse(Constants.DATA_WRITE_CHAR_UUID, encoded)
+    }
+    
+    private suspend fun handleHvacCommand(
+        gattOps: BlePluginInterface.GattOperations,
+        command: OneControlCommand.Hvac
+    ): Result<Unit> {
+        // HVAC command format is more complex - uses ActionHvac (0x45)
+        // For now, just implement mode changes
+        val commandId = getNextCommandId()
+        
+        // Map HA mode strings to MyRvLink heat mode values
+        val heatMode: Byte = when (command.mode?.lowercase()) {
+            "off" -> 0x00
+            "heat" -> 0x01
+            "cool" -> 0x02
+            "heat_cool" -> 0x03  // Both heat and cool available
+            else -> {
+                // If no mode change, we might be changing setpoints or fan
+                // For now, require mode to be specified
+                if (command.mode == null && (command.fanMode != null || command.heatSetpoint != null || command.coolSetpoint != null)) {
+                    Log.w(TAG, "HVAC setpoint/fan changes without mode not yet implemented")
+                    return Result.failure(UnsupportedOperationException("Partial HVAC changes not yet implemented"))
+                }
+                return Result.failure(IllegalArgumentException("Invalid HVAC mode: ${command.mode}"))
+            }
+        }
+        
+        val fanMode: Byte = when (command.fanMode?.lowercase()) {
+            "auto" -> 0x00
+            "high" -> 0x01
+            "low" -> 0x02
+            else -> 0x00  // Default to auto
+        }
+        
+        // ActionHvac format (simplified - full format has more fields):
+        // [CmdId_lo][CmdId_hi][CommandType=0x45][DeviceTableId][DeviceId][HeatMode][HeatSource][FanMode][ZoneMode][HeatSetpoint][CoolSetpoint]
+        val heatSetpoint = (command.heatSetpoint ?: 68).toByte()
+        val coolSetpoint = (command.coolSetpoint ?: 72).toByte()
+        
+        val commandBytes = byteArrayOf(
+            (commandId.toInt() and 0xFF).toByte(),
+            ((commandId.toInt() shr 8) and 0xFF).toByte(),
+            0x45.toByte(),  // ActionHvac command type
+            command.tableId,
+            command.deviceId,
+            heatMode,
+            0x00,  // HeatSource: 0=PreferGas
+            fanMode,
+            0x00,  // ZoneMode: 0=Off (will be set by gateway based on heatMode)
+            heatSetpoint,
+            coolSetpoint
+        )
+        
+        val encoded = cobsEncode(commandBytes, prependStartFrame = true, useCrc = true)
+        
+        Log.i(TAG, "📤 Sending HVAC command: table=${command.tableId}, device=${command.deviceId}, " +
+                   "mode=${command.mode}, fan=${command.fanMode}")
+        
+        return gattOps.writeCharacteristicNoResponse(Constants.DATA_WRITE_CHAR_UUID, encoded)
     }
 }

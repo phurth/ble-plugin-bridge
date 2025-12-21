@@ -147,6 +147,15 @@ interface BlePluginInterface {
     fun getPollingIntervalMs(): Long? = null
     
     /**
+     * Get target device MAC addresses for scan filtering.
+     * Used to create BLE scan filters that allow scanning when screen is off.
+     * Return empty list for unfiltered scanning (may not work with screen locked).
+     * 
+     * @return List of MAC addresses (uppercase, colon-separated, e.g., "24:DC:C3:ED:1E:0A")
+     */
+    fun getTargetDeviceAddresses(): List<String> = emptyList()
+    
+    /**
      * Cleanup plugin resources.
      * Called when plugin is unloaded or app is shutting down.
      */
@@ -191,5 +200,14 @@ interface BlePluginInterface {
          * @return Result indicating success or failure
          */
         suspend fun disableNotifications(uuid: String): Result<Unit>
+        
+        /**
+         * Check if a service exists on the connected device.
+         * This is a non-triggering check (doesn't read/write anything).
+         * Used to detect gateway type without triggering encryption.
+         * @param uuid Service UUID
+         * @return true if service exists, false otherwise
+         */
+        fun hasService(uuid: String): Boolean
     }
 }

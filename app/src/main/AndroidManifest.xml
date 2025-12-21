@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     
+    <!-- Boot permission for auto-start -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    
     <!-- Declare BLE feature requirement -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -62,6 +65,39 @@
                 <action android:name="com.blemqttbridge.ENABLE_PLUGIN" />
                 <action android:name="com.blemqttbridge.DISABLE_PLUGIN" />
                 <action android:name="com.blemqttbridge.LIST_PLUGINS" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Control Command Broadcast Receiver (ADB Remote Control) -->
+        <receiver
+            android:name=".receivers.ControlCommandReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="com.blemqttbridge.CONTROL_COMMAND" />
+            </intent-filter>
+        </receiver>
+
+        <!-- MQTT Configuration Receiver (ADB MQTT Setup) -->
+        <receiver
+            android:name=".receivers.MqttConfigReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.blemqttbridge.CONFIGURE_MQTT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Boot Receiver (Auto-start on boot) -->
+        <receiver
+            android:name=".receivers.BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.blemqttbridge.SET_AUTO_START" />
             </intent-filter>
         </receiver>
 

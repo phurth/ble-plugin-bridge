@@ -24,6 +24,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     private var mqttClient: MqttAndroidClient? = null
     private var topicPrefix: String = "homeassistant"
     private val commandCallbacks = mutableMapOf<String, (String, String) -> Unit>()
+    private var connectOptions: MqttConnectOptions? = null
     
     override fun getOutputId() = "mqtt"
     
@@ -46,6 +47,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
                         Log.w(TAG, "MQTT connection lost", cause)
+                        Log.i(TAG, "Automatic reconnect will be attempted...")
+                        // Re-subscribe to topics after reconnection
+                        resubscribeAll()
                     }
                     
                     override fun messageArrived(topic: String, message: MqttMessage) {
@@ -68,9 +72,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             
             val options = MqttConnectOptions().apply {
                 isAutomaticReconnect = true
-                isCleanSession = false
+                isCleanSession = true  // Use clean sessions to avoid persistence issues
                 connectionTimeout = 30
-                keepAliveInterval = 60
+                keepAliveInterval = 120  // Increased to 2 minutes to prevent keep-alive timeouts
                 maxInflight = 10
                 
                 if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
@@ -82,6 +86,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 val availTopic = "$topicPrefix/$AVAILABILITY_TOPIC"
                 setWill(availTopic, "offline".toByteArray(), QOS, true)
             }
+            
+            // Store options for potential reconnection
+            connectOptions = options
             
             mqttClient?.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
@@ -214,6 +221,40 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
         } catch (e: Exception) {
             Log.e(TAG, "Publish error", e)
             continuation.resumeWithException(e)
+        }
+    }
+    
+    /**
+     * Re-subscribe to all topics after reconnection.
+     * Called automatically when connection is restored.
+     */
+    private fun resubscribeAll() {
+        val client = mqttClient
+        if (client == null || !client.isConnected) {
+            Log.d(TAG, "Cannot resubscribe - client not connected yet")
+            return
+        }
+        
+        if (commandCallbacks.isEmpty()) {
+            Log.d(TAG, "No subscriptions to restore")
+            return
+        }
+        
+        Log.i(TAG, "Resubscribing to ${commandCallbacks.size} topic(s)")
+        commandCallbacks.keys.forEach { topic ->
+            try {
+                client.subscribe(topic, QOS, null, object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        Log.i(TAG, "Resubscribed to: $topic")
+                    }
+                    
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.e(TAG, "Failed to resubscribe to: $topic", exception)
+                    }
+                })
+            } catch (e: Exception) {
+                Log.e(TAG, "Error resubscribing to $topic", e)
+            }
         }
     }
 }

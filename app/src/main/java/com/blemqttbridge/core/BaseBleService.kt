@@ -49,6 +49,7 @@ class BaseBleService : Service() {
     
     private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
+    private var remoteControlManager: RemoteControlManager? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
     private val connectedDevices = mutableMapOf<String, Pair<BluetoothGatt, String>>()
@@ -65,6 +66,23 @@ class BaseBleService : Service() {
     private val pendingBondDevices = mutableSetOf<String>()
     
     private var isScanning = false
+    
+    /**
+     * Clears the internal GATT cache for a device.
+     * This is a hidden Android method that resolves status=133 errors caused by stale cached services.
+     * Should be called before service discovery when reconnecting to a device.
+     */
+    private fun refreshGattCache(gatt: BluetoothGatt): Boolean {
+        try {
+            val refreshMethod = BluetoothGatt::class.java.getMethod("refresh")
+            val result = refreshMethod.invoke(gatt) as Boolean
+            Log.i(TAG, "🔄 GATT cache refresh: $result")
+            return result
+        } catch (e: Exception) {
+            Log.w(TAG, "GATT cache refresh not available: ${e.message}")
+            return false
+        }
+    }
     
     override fun onCreate() {
         super.onCreate()
@@ -110,7 +128,8 @@ class BaseBleService : Service() {
                 
                 serviceScope.launch {
                     initializePlugins(blePluginId, outputPluginId, bleConfig, outputConfig)
-                    startScanning()
+                    // Note: initializePlugins now calls reconnectToBondedDevices() which 
+                    // either connects to bonded devices or falls back to scanning
                 }
             }
             
@@ -155,6 +174,10 @@ class BaseBleService : Service() {
             Log.w(TAG, "Bond state receiver not registered")
         }
         
+        // Cleanup remote control manager
+        remoteControlManager?.cleanup()
+        remoteControlManager = null
+        
         serviceScope.launch {
             pluginRegistry.cleanup()
             serviceScope.cancel()
@@ -178,6 +201,11 @@ class BaseBleService : Service() {
         if (outputPlugin == null) {
             Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
             Log.i(TAG, "Continuing without output plugin for BLE testing")
+        } else {
+            // Initialize remote control manager for MQTT commands
+            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
+            remoteControlManager?.initialize(outputPlugin!!)
+            Log.i(TAG, "Remote control manager initialized")
         }
         
         // Load BLE plugin
@@ -188,12 +216,137 @@ class BaseBleService : Service() {
             return
         }
         
+        // Wire up MQTT formatter for OneControl plugin (if output plugin available)
+        wireOneControlMqttFormatter(blePluginId)
+        
         Log.i(TAG, "Plugins initialized successfully")
         memoryManager.logMemoryUsage()
+        
+        // CRITICAL: Try to reconnect to bonded devices first!
+        // Many BLE devices don't actively advertise when bonded - they wait for reconnection
+        reconnectToBondedDevices()
+    }
+    
+    /**
+     * Wire up MQTT formatter for OneControl plugin.
+     * This bridges the protocol-level state updates to MQTT topics for Home Assistant.
+     */
+    private fun wireOneControlMqttFormatter(blePluginId: String) {
+        if (outputPlugin == null) return
+        if (blePlugin !is com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin) return
+        if (blePluginId != "onecontrol") return
+        
+        Log.i(TAG, "🔌 OneControl MQTT formatter ready - will create per-gateway on connection")
+        
+        // The formatter will be created per-gateway when connected
+        // Clear any existing formatters from previous sessions
+        oneControlMqttFormatters.clear()
+    }
+    
+    // Per-gateway MQTT formatters for OneControl
+    private val oneControlMqttFormatters = mutableMapOf<String, com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter>()
+    
+    /**
+     * Create or get MQTT formatter for a OneControl gateway.
+     */
+    private fun getOrCreateOneControlFormatter(gatewayMac: String): com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter? {
+        val output = outputPlugin ?: return null
+        
+        return oneControlMqttFormatters.getOrPut(gatewayMac) {
+            val formatter = com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter(
+                output = output,
+                gatewayMac = gatewayMac
+            )
+            Log.i(TAG, "📡 Created MQTT formatter for gateway $gatewayMac")
+            
+            // Wire formatter to plugin as state listener
+            (blePlugin as? com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin)?.setStateListener(formatter)
+            
+            // Publish availability "online" and subscribe to commands
+            serviceScope.launch {
+                try {
+                    formatter.publishOnline()
+                    
+                    // Subscribe to commands
+                    outputPlugin?.subscribeToCommands(formatter.getCommandTopicPattern()) { topic, payload ->
+                        handleOneControlCommand(gatewayMac, topic, payload, formatter)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error setting up MQTT for OneControl: ${e.message}", e)
+                }
+            }
+            
+            formatter
+        }
+    }
+    
+    /**
+     * Handle incoming MQTT command for OneControl device.
+     */
+    private fun handleOneControlCommand(
+        gatewayMac: String, 
+        topic: String, 
+        payload: String,
+        formatter: com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter
+    ) {
+        val command = formatter.parseCommand(topic, payload)
+        if (command != null) {
+            Log.i(TAG, "📥 MQTT command received: ${command::class.simpleName} for ${command.tableId}:${command.deviceId}")
+            
+            serviceScope.launch {
+                val plugin = blePlugin as? com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin
+                val result = plugin?.handleCommand(gatewayMac, command)
+                if (result?.isFailure == true) {
+                    Log.e(TAG, "Command failed: ${result.exceptionOrNull()?.message}")
+                }
+            }
+        } else {
+            Log.w(TAG, "Failed to parse MQTT command: $topic = $payload")
+        }
+    }
+    
+    /**
+     * Try to reconnect directly to bonded devices before scanning.
+     * Many BLE devices (including OneControl gateways) stop advertising when bonded,
+     * so scanning won't find them. Direct connection using bondedDevices works.
+     */
+    private fun reconnectToBondedDevices() {
+        try {
+            val bondedDevices = bluetoothAdapter.bondedDevices
+            Log.i(TAG, "Checking ${bondedDevices.size} bonded device(s) for plugin matches...")
+            
+            for (device in bondedDevices) {
+                // Check if any plugin wants this device based on MAC address
+                val pluginId = pluginRegistry.findPluginForDevice(device, null)
+                if (pluginId != null) {
+                    Log.i(TAG, "🔗 Found bonded device matching plugin: ${device.address} -> $pluginId")
+                    
+                    // Load plugin and connect directly (no scan needed)
+                    serviceScope.launch {
+                        val plugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
+                        if (plugin != null) {
+                            Log.i(TAG, "🔗 Connecting directly to bonded device ${device.address}")
+                            connectToDevice(device, pluginId)
+                        }
+                    }
+                    return  // Connect to first matching device
+                }
+            }
+            
+            // No bonded devices matched - fall back to scanning
+            Log.i(TAG, "No bonded devices matched plugins - starting scan...")
+            startScanning()
+            
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied for accessing bonded devices", e)
+            // Fall back to scanning
+            startScanning()
+        }
     }
     
     /**
      * Start BLE scanning for devices.
+     * Uses scan filters to allow scanning when screen is off (Android 8.1+ requirement).
      */
     private fun startScanning() {
         if (isScanning) {
@@ -201,15 +354,40 @@ class BaseBleService : Service() {
             return
         }
         
+        // Build scan filters from loaded plugins
+        // CRITICAL: Android 8.1+ blocks unfiltered scans when screen is off
+        // Using filters allows scanning to continue with screen locked
+        val scanFilters = mutableListOf<ScanFilter>()
+        
+        // Get target MAC addresses from loaded plugins
+        for ((pluginId, plugin) in pluginRegistry.getLoadedBlePlugins()) {
+            val targetMacs = plugin.getTargetDeviceAddresses()
+            for (mac in targetMacs) {
+                Log.d(TAG, "Adding scan filter for MAC: $mac (plugin: $pluginId)")
+                scanFilters.add(
+                    ScanFilter.Builder()
+                        .setDeviceAddress(mac)
+                        .build()
+                )
+            }
+        }
+        
+        // If no specific targets, add a permissive filter (allows screen-off scanning)
+        if (scanFilters.isEmpty()) {
+            Log.w(TAG, "No target MACs configured - using unfiltered scan (may not work with screen off)")
+        }
+        
         val scanSettings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         
         try {
-            bluetoothLeScanner.startScan(null, scanSettings, scanCallback)
+            // Use filters if available, otherwise null (unfiltered)
+            val filters = if (scanFilters.isNotEmpty()) scanFilters else null
+            bluetoothLeScanner.startScan(filters, scanSettings, scanCallback)
             isScanning = true
             updateNotification("Scanning for devices...")
-            Log.i(TAG, "BLE scan started")
+            Log.i(TAG, "BLE scan started with ${scanFilters.size} filter(s)")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE scan", e)
             updateNotification("Error: BLE permission denied")
@@ -235,9 +413,19 @@ class BaseBleService : Service() {
      * BLE scan callback.
      */
     private val scanCallback = object : ScanCallback() {
+        private var scanResultCount = 0
+        
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
             val scanRecord = result.scanRecord?.bytes
+            
+            scanResultCount++
+            // Log every 10th device to avoid spam, but always log our target
+            if (device.address.contains("24:DC:C3", ignoreCase = true) || 
+                device.address.contains("1E:0A", ignoreCase = true) ||
+                scanResultCount % 10 == 1) {
+                Log.d(TAG, "📡 Scan result #$scanResultCount: ${device.address} (name: ${device.name ?: "?"})")
+            }
             
             // Check if we already have this device
             if (connectedDevices.containsKey(device.address)) {
@@ -247,7 +435,7 @@ class BaseBleService : Service() {
             // Check if any plugin can handle this device
             val pluginId = pluginRegistry.findPluginForDevice(device, scanRecord)
             if (pluginId != null) {
-                Log.i(TAG, "Found matching device: ${device.address} -> plugin: $pluginId")
+                Log.i(TAG, "✅ Found matching device: ${device.address} -> plugin: $pluginId")
                 
                 // Stop scanning (we found a device)
                 stopScanning()
@@ -280,8 +468,23 @@ class BaseBleService : Service() {
      */
     private suspend fun connectToDevice(device: BluetoothDevice, pluginId: String) {
         Log.i(TAG, "Connecting to ${device.address} (plugin: $pluginId)")
-        updateNotification("Connecting to ${device.address}...")
         
+        // CRITICAL: Close any existing GATT connection first to prevent resource leaks
+        val existingGatt = connectedDevices[device.address]?.first
+        if (existingGatt != null) {
+            Log.w(TAG, "⚠️ Closing existing GATT connection before reconnect")
+            try {
+                existingGatt.disconnect()
+                existingGatt.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing existing GATT", e)
+            }
+            connectedDevices.remove(device.address)
+            delay(500) // Brief delay after closing
+        }
+        
+        updateNotification("Connecting to ${device.address}...")
+
         try {
             val gatt = device.connectGatt(
                 applicationContext,
@@ -289,8 +492,20 @@ class BaseBleService : Service() {
                 gattCallback,
                 BluetoothDevice.TRANSPORT_LE
             )
-            
             connectedDevices[device.address] = Pair(gatt, pluginId)
+
+            // Actively initiate bonding if not already bonded (matches legacy app)
+            if (device.bondState != BluetoothDevice.BOND_BONDED && device.bondState != BluetoothDevice.BOND_BONDING) {
+                Log.i(TAG, "Device not bonded, initiating bonding via createBond()...")
+                val bondInitiated = device.createBond()
+                if (bondInitiated) {
+                    pendingBondDevices.add(device.address)
+                    updateNotification("Pairing in progress...")
+                } else {
+                    Log.e(TAG, "Failed to initiate bonding for ${device.address}")
+                    updateNotification("Pairing failed to start")
+                }
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")
@@ -374,6 +589,10 @@ class BaseBleService : Service() {
                     Log.i(TAG, "Connected to ${device.address} (plugin: $pluginId)")
                     updateNotification("Connected to ${device.address}")
                     
+                    // EXPERIMENTAL: Skip GATT cache refresh - it may trigger issues
+                    // when combined with cached services being loaded immediately
+                    // refreshGattCache(gatt)
+                    
                     serviceScope.launch {
                         // Get the plugin for this device
                         val plugin = if (pluginId != null) {
@@ -393,30 +612,27 @@ class BaseBleService : Service() {
                         }})")
                         
                         // BONDING IS REQUIRED for OneControl gateways
-                        // From technical_spec.md: "require LE Secure Connections bonding"
-                        // Gateway returns status 137 (GATT_INSUFFICIENT_AUTHENTICATION) without it
-                        // NOTE: Do NOT call createBond() - it destabilizes connections.
-                        // Device must be pre-paired via Android Bluetooth Settings.
+                        // If not bonded, bonding will be initiated in connectToDevice and service discovery will be triggered by bondStateReceiver
                         if (bondState == BluetoothDevice.BOND_BONDED) {
                             Log.i(TAG, "✅ Device already bonded - proceeding with service discovery")
                             updateNotification("Connected - Discovering services...")
-                            delay(500)  // Brief settle delay (matches working app)
+                            
+                            // Skip GATT cache refresh here - it can interfere with discovery
+                            // Let Android use cached services (they're correct)
+                            delay(100)
+                            
                             try {
                                 gatt.discoverServices()
                             } catch (e: SecurityException) {
                                 Log.e(TAG, "Permission denied for service discovery", e)
                             }
+                        } else if (bondState == BluetoothDevice.BOND_BONDING) {
+                            Log.i(TAG, "Bonding in progress, waiting for bond to complete before service discovery...")
+                            updateNotification("Pairing in progress...")
+                            // Service discovery will be triggered by bondStateReceiver
                         } else {
-                            // Device not bonded - proceed anyway, but warn
-                            // DO NOT call createBond() - it causes bond cycling issues
-                            Log.w(TAG, "⚠️ Device NOT bonded! May fail authentication. Please pair device in Bluetooth Settings first.")
-                            updateNotification("Warning: Device not paired")
-                            delay(500)
-                            try {
-                                gatt.discoverServices()
-                            } catch (e: SecurityException) {
-                                Log.e(TAG, "Permission denied for service discovery", e)
-                            }
+                            Log.w(TAG, "Device not bonded and not bonding. Bonding should have been initiated in connectToDevice.")
+                            updateNotification("Waiting for pairing...")
                         }
                         
                         // Publish availability
@@ -458,17 +674,30 @@ class BaseBleService : Service() {
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "Services discovered for ${gatt.device.address}")
+                Log.i(TAG, "✅ Services discovered for ${gatt.device.address}")
                 
                 // Log all discovered services and characteristics
                 for (service in gatt.services) {
-                    Log.d(TAG, "Service: ${service.uuid}")
+                    Log.i(TAG, "Service: ${service.uuid}")
                     for (char in service.characteristics) {
-                        Log.d(TAG, "  Char: ${char.uuid} properties=0x${char.properties.toString(16)}")
+                        Log.i(TAG, "  Char: ${char.uuid} properties=0x${char.properties.toString(16)}")
                     }
                 }
                 
-                serviceScope.launch {
+                // NOTE: Skip MTU request - it was blocking subsequent GATT operations!
+                // The MTU request with this gateway returns status=133 and leaves a pending
+                // command in the BLE stack, causing "already has a pending command" errors.
+                // Default MTU of 23 is sufficient for our protocol.
+                
+                // Allow LONGER time for the BLE stack to fully stabilize after service discovery
+                // This includes time for:
+                // - Encryption to complete (if link was re-established)
+                // - Internal GATT database to be fully populated
+                // - Any background operations to complete
+                serviceScope.launch(Dispatchers.Main) {
+                    delay(1500)  // 1.5 second stabilization delay
+                    Log.d(TAG, "Starting plugin after 1500ms delay...")
+                    
                     // Get the plugin for this device
                     val deviceInfo = connectedDevices[gatt.device.address]
                     val pluginId = deviceInfo?.second
@@ -484,6 +713,11 @@ class BaseBleService : Service() {
                         val setupResult = plugin.onServicesDiscovered(gatt.device, gattOps)
                         if (setupResult.isFailure) {
                             Log.e(TAG, "Plugin setup failed: ${setupResult.exceptionOrNull()?.message}")
+                        } else {
+                            // Wire MQTT formatter for OneControl devices after successful setup
+                            if (pluginId == "onecontrol") {
+                                getOrCreateOneControlFormatter(gatt.device.address)
+                            }
                         }
                     }
                     
@@ -550,9 +784,10 @@ class BaseBleService : Service() {
             handleReadCallback(uuid, value, status)
         }
         
+        private val onMtuChangedListeners = mutableMapOf<String, (Int, Boolean) -> Unit>()
+
         private fun handleReadCallback(uuid: String, value: ByteArray, status: Int) {
             val deferred = pendingReads.remove(uuid)
-            
             if (deferred != null) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "✅ Read success for $uuid: ${value.size} bytes")
@@ -564,6 +799,13 @@ class BaseBleService : Service() {
             } else {
                 Log.w(TAG, "⚠️ onCharacteristicRead: No pending deferred for $uuid")
             }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            val device = gatt.device
+            val success = status == BluetoothGatt.GATT_SUCCESS
+            Log.i(TAG, "onMtuChanged for ${device.address}: mtu=$mtu, status=$status, success=$success")
+            onMtuChangedListeners[device.address]?.invoke(mtu, success)
         }
         
         override fun onCharacteristicWrite(
@@ -776,7 +1018,11 @@ class BaseBleService : Service() {
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
             }
             
-            Log.d(TAG, "📖 readCharacteristic: uuid=$uuid, props=0x${characteristic.properties.toString(16)}")
+            Log.i(TAG, "📖 readCharacteristic: uuid=$uuid, props=0x${characteristic.properties.toString(16)}")
+            
+            // Clear any cached value (matches legacy app behavior)
+            @Suppress("DEPRECATION")
+            characteristic.value = null
             
             val normalizedUuid = uuid.lowercase()
             val deferred = CompletableDeferred<Result<ByteArray>>()
@@ -785,14 +1031,14 @@ class BaseBleService : Service() {
             try {
                 @Suppress("DEPRECATION")
                 val success = gatt.readCharacteristic(characteristic)
-                Log.d(TAG, "📖 readCharacteristic initiated: success=$success for $uuid")
+                Log.i(TAG, "📖 readCharacteristic initiated: success=$success for $uuid")
                 if (!success) {
                     pendingReads.remove(normalizedUuid)
                     return@withContext Result.failure(Exception("Failed to initiate read for $uuid"))
                 }
                 
-                // Wait for callback with timeout
-                withTimeout(5000) {
+                // Wait for callback with timeout (increased to 10s for slow gateways)
+                withTimeout(10000) {
                     deferred.await()
                 }
             } catch (e: TimeoutCancellationException) {
@@ -986,6 +1232,16 @@ class BaseBleService : Service() {
                 }
             }
             return null
+        }
+        
+        /**
+         * Check if a service exists on the connected device.
+         * This is a non-triggering check that doesn't perform any GATT reads/writes.
+         * IMPORTANT: Used to detect gateway type without triggering encryption!
+         */
+        override fun hasService(uuid: String): Boolean {
+            val targetUuid = UUID.fromString(uuid)
+            return gatt.services.any { it.uuid == targetUuid }
         }
     }
 }
