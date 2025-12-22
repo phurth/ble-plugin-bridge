@@ -71,4 +71,24 @@ interface OutputPluginInterface {
      * Get connection status details for debugging.
      */
     fun getConnectionStatus(): String
+    
+    /**
+     * Get the configured topic prefix.
+     * Used by plugins to construct discovery payloads with correct full topic paths.
+     * @return The topic prefix (e.g., "homeassistant")
+     */
+    fun getTopicPrefix(): String
+    
+    /**
+     * Connection status listener interface.
+     */
+    interface ConnectionStatusListener {
+        fun onConnectionStatusChanged(connected: Boolean)
+    }
+    
+    /**
+     * Set a listener for connection status changes.
+     * @param listener The listener to notify on connection state changes
+     */
+    fun setConnectionStatusListener(listener: ConnectionStatusListener?)
 }

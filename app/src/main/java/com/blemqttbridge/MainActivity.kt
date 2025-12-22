@@ -1,136 +1,111 @@
 package com.blemqttbridge
 
-import android.app.Activity
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.util.Log
-import android.widget.TextView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import com.blemqttbridge.plugins.output.MqttOutputPlugin
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.core.content.ContextCompat
+import com.blemqttbridge.ui.SettingsScreen
 
 /**
- * Simple test activity for validating MQTT plugin.
- * Configure broker settings below, then deploy to device/emulator.
+ * Main activity for BLE-MQTT Bridge
  */
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     
-    companion object {
-        private const val TAG = "MqttTest"
-        
-        // ⚙️ MQTT Broker Configuration ⚙️
-        private const val BROKER_URL = "tcp://10.115.19.131:1883"
-        private const val USERNAME = "mqtt"
-        private const val PASSWORD = "mqtt"
-        private const val TOPIC_PREFIX = "test/ble_bridge"
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        permissions.entries.forEach {
+            android.util.Log.d("MainActivity", "Permission ${it.key} granted: ${it.value}")
+        }
     }
-    
-    private lateinit var statusText: TextView
-    private lateinit var mqttPlugin: MqttOutputPlugin
-    private val scope = CoroutineScope(Dispatchers.Main)
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Create simple UI
-        statusText = TextView(this).apply {
-            text = "Initializing MQTT test...\n"
-            setPadding(32, 32, 32, 32)
-            textSize = 14f
-        }
-        setContentView(statusText)
-        
-        mqttPlugin = MqttOutputPlugin(applicationContext)
-        
-        // Start test
-        scope.launch {
-            runMqttTest()
-        }
-    }
-    
-    private suspend fun runMqttTest() = withContext(Dispatchers.IO) {
-        try {
-            appendStatus("📡 Testing MQTT Plugin")
-            appendStatus("Broker: $BROKER_URL")
-            appendStatus("")
-            
-            // Initialize plugin
-            val config = mapOf(
-                "broker_url" to BROKER_URL,
-                "username" to USERNAME,
-                "password" to PASSWORD,
-                "topic_prefix" to TOPIC_PREFIX
-            )
-            
-            appendStatus("Connecting to broker...")
-            mqttPlugin.initialize(config).getOrThrow()
-            appendStatus("✅ Connected!")
-            appendStatus("")
-            
-            // Publish availability
-            appendStatus("Publishing availability...")
-            mqttPlugin.publishAvailability(online = true)
-            appendStatus("✅ Availability published")
-            appendStatus("")
-            
-            // Subscribe to test commands
-            appendStatus("Subscribing to commands...")
-            mqttPlugin.subscribeToCommands("command/#") { topic, payload ->
-                scope.launch {
-                    appendStatus("📨 Received: $topic = $payload")
-                }
+        setContent {
+            BleTheme {
+                SettingsScreen(
+                    onRequestPermissions = { requestAllPermissions() }
+                )
             }
-            appendStatus("✅ Subscribed to $TOPIC_PREFIX/command/#")
-            appendStatus("")
-            
-            // Publish test state
-            appendStatus("Publishing test state...")
-            val testPayload = """{"state":"ON","brightness":100}"""
-            mqttPlugin.publishState("device/test_device/state", testPayload, retained = true)
-            appendStatus("✅ State published")
-            appendStatus("")
-            
-            // Publish Home Assistant discovery
-            appendStatus("Publishing HA discovery...")
-            val discoveryPayload = """{
-                "name": "BLE Bridge Test Device",
-                "state_topic": "$TOPIC_PREFIX/device/test_device/state",
-                "command_topic": "$TOPIC_PREFIX/command/test_device",
-                "unique_id": "ble_bridge_test_001"
-            }"""
-            mqttPlugin.publishDiscovery(
-                "homeassistant/switch/ble_bridge/test_device/config",
-                discoveryPayload
-            )
-            appendStatus("✅ Discovery published")
-            appendStatus("")
-            
-            appendStatus("🎉 ALL TESTS PASSED!")
-            appendStatus("")
-            appendStatus("Connection Status: ${mqttPlugin.getConnectionStatus()}")
-            appendStatus("")
-            appendStatus("Manual test:")
-            appendStatus("Use an MQTT client to publish to:")
-            appendStatus("  $TOPIC_PREFIX/command/test_device")
-            appendStatus("")
-            appendStatus("You should see the message appear above.")
-            
-        } catch (e: Exception) {
-            appendStatus("❌ ERROR: ${e.message}")
-            Log.e(TAG, "MQTT test failed", e)
         }
     }
     
-    private suspend fun appendStatus(message: String) = withContext(Dispatchers.Main) {
-        Log.i(TAG, message)
-        statusText.append("$message\n")
+    private fun requestAllPermissions() {
+        val permissionsToRequest = mutableListOf<String>()
+        
+        // Location permissions (required for BLE scanning)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        } else {
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
+        
+        // Bluetooth permissions (Android 12+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+        
+        // Notification permission (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        
+        // Request permissions if needed
+        if (permissionsToRequest.isNotEmpty()) {
+            permissionLauncher.launch(permissionsToRequest.toTypedArray())
+        }
+        
+        // Request battery optimization exemption
+        requestBatteryOptimizationExemption()
     }
     
-    override fun onDestroy() {
-        super.onDestroy()
-        if (::mqttPlugin.isInitialized) {
-            mqttPlugin.disconnect()
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
         }
     }
+}
+
+@Composable
+fun BleTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit
+) {
+    val colorScheme = if (darkTheme) {
+        darkColorScheme()
+    } else {
+        lightColorScheme()
+    }
+    
+    MaterialTheme(
+        colorScheme = colorScheme,
+        content = content
+    )
 }

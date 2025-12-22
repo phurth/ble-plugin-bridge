@@ -22,9 +22,18 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     private var mqttClient: MqttAndroidClient? = null
-    private var topicPrefix: String = "homeassistant"
+    private var _topicPrefix: String = "homeassistant"
     private val commandCallbacks = mutableMapOf<String, (String, String) -> Unit>()
+    private var connectionStatusListener: OutputPluginInterface.ConnectionStatusListener? = null
+    
+    override fun getTopicPrefix(): String = _topicPrefix
     private var connectOptions: MqttConnectOptions? = null
+    
+    override fun setConnectionStatusListener(listener: OutputPluginInterface.ConnectionStatusListener?) {
+        connectionStatusListener = listener
+        // Immediately notify current state
+        listener?.onConnectionStatusChanged(isConnected())
+    }
     
     override fun getOutputId() = "mqtt"
     
@@ -39,7 +48,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             val username = config["username"]
             val password = config["password"]
             val clientId = config["client_id"] ?: "ble_mqtt_bridge_${System.currentTimeMillis()}"
-            topicPrefix = config["topic_prefix"] ?: "homeassistant"
+            _topicPrefix = config["topic_prefix"] ?: "homeassistant"
             
             Log.i(TAG, "Initializing MQTT client: $brokerUrl (client: $clientId)")
             
@@ -47,6 +56,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 setCallback(object : MqttCallback {
                     override fun connectionLost(cause: Throwable?) {
                         Log.w(TAG, "MQTT connection lost", cause)
+                        connectionStatusListener?.onConnectionStatusChanged(false)
                         Log.i(TAG, "Automatic reconnect will be attempted...")
                         // Re-subscribe to topics after reconnection
                         resubscribeAll()
@@ -83,7 +93,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 }
                 
                 // LWT: Mark offline on unexpected disconnect
-                val availTopic = "$topicPrefix/$AVAILABILITY_TOPIC"
+                val availTopic = "$_topicPrefix/$AVAILABILITY_TOPIC"
                 setWill(availTopic, "offline".toByteArray(), QOS, true)
             }
             
@@ -93,11 +103,15 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             mqttClient?.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     Log.i(TAG, "MQTT connected successfully")
+                    connectionStatusListener?.onConnectionStatusChanged(true)
+                    // Publish "online" to availability topic to clear any "offline" LWT message
+                    onMqttConnected()
                     continuation.resume(Result.success(Unit))
                 }
                 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                     Log.e(TAG, "MQTT connection failed", exception)
+                    connectionStatusListener?.onConnectionStatusChanged(false)
                     continuation.resumeWithException(
                         exception ?: Exception("MQTT connection failed")
                     )
@@ -115,7 +129,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     override suspend fun publishState(topic: String, payload: String, retained: Boolean) {
-        val fullTopic = "$topicPrefix/$topic"
+        val fullTopic = "$_topicPrefix/$topic"
         publish(fullTopic, payload, retained)
     }
     
@@ -128,7 +142,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
         callback: (topic: String, payload: String) -> Unit
     ) = suspendCancellableCoroutine<Unit> { continuation ->
         try {
-            val fullPattern = "$topicPrefix/$topicPattern"
+            val fullPattern = "$_topicPrefix/$topicPattern"
             commandCallbacks[fullPattern] = callback
             
             mqttClient?.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
@@ -156,9 +170,72 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     override suspend fun publishAvailability(online: Boolean) {
-        val topic = "$topicPrefix/$AVAILABILITY_TOPIC"
+        val topic = "$_topicPrefix/$AVAILABILITY_TOPIC"
         val payload = if (online) "online" else "offline"
         publish(topic, payload, retained = true)
+    }
+    
+    /**
+     * Called when MQTT connection is established.
+     * Publishes "online" to availability topic and discovery payload.
+     */
+    private fun onMqttConnected() {
+        try {
+            val client = mqttClient ?: return
+            
+            // Publish "online" to availability topic (clears LWT "offline")
+            val availTopic = "$_topicPrefix/$AVAILABILITY_TOPIC"
+            val onlineMessage = MqttMessage("online".toByteArray()).apply {
+                qos = QOS
+                isRetained = true
+            }
+            client.publish(availTopic, onlineMessage)
+            Log.i(TAG, "📡 Published availability: online")
+            
+            // Publish HA discovery for availability binary sensor
+            publishAvailabilityDiscovery()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onMqttConnected", e)
+        }
+    }
+    
+    /**
+     * Publishes Home Assistant discovery for the bridge availability sensor.
+     */
+    private fun publishAvailabilityDiscovery() {
+        try {
+            val client = mqttClient ?: return
+            val nodeId = "ble_mqtt_bridge"
+            val uniqueId = "ble_mqtt_bridge_availability"
+            
+            val discoveryPayload = org.json.JSONObject().apply {
+                put("name", "BLE Bridge Availability")
+                put("unique_id", uniqueId)
+                put("state_topic", "$_topicPrefix/$AVAILABILITY_TOPIC")
+                put("payload_on", "online")
+                put("payload_off", "offline")
+                put("device_class", "connectivity")
+                put("entity_category", "diagnostic")
+                put("device", org.json.JSONObject().apply {
+                    put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge"))
+                    put("name", "BLE MQTT Bridge")
+                    put("model", "Android BLE Bridge")
+                    put("manufacturer", "Custom")
+                })
+            }.toString()
+            
+            val discoveryTopic = "$_topicPrefix/binary_sensor/$nodeId/availability/config"
+            val discoveryMessage = MqttMessage(discoveryPayload.toByteArray()).apply {
+                qos = QOS
+                isRetained = true
+            }
+            client.publish(discoveryTopic, discoveryMessage)
+            Log.i(TAG, "📡 Published availability discovery to $discoveryTopic")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error publishing availability discovery", e)
+        }
     }
     
     override fun disconnect() {

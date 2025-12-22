@@ -77,9 +77,9 @@ class OneControlDevicePlugin : BleDevicePlugin {
         // Load configuration
         gatewayMac = config.getString("gateway_mac", gatewayMac)
         gatewayPin = config.getString("gateway_pin", gatewayPin)
-        config.getString("gateway_cypher").toLongOrNull()?.let { gatewayCypher = it }
+        // gatewayCypher is hardcoded constant - same for all OneControl gateways
         
-        Log.i(TAG, "Configured for gateway: $gatewayMac")
+        Log.i(TAG, "Configured for gateway: $gatewayMac (PIN: ${gatewayPin.take(2)}****)")
     }
     
     override fun matchesDevice(
@@ -219,6 +219,11 @@ class OneControlGattCallback(
     private var seedValue: ByteArray? = null
     private var currentGatt: BluetoothGatt? = null
     
+    // Diagnostic status tracking (for HA sensors)
+    private var lastDataTimestampMs: Long = 0L
+    private val DATA_HEALTH_TIMEOUT_MS = 15_000L  // consider healthy if data seen within 15s
+    private var diagnosticsDiscoveryPublished = false
+    
     // Characteristic references
     private var dataReadChar: BluetoothGattCharacteristic? = null
     private var dataWriteChar: BluetoothGattCharacteristic? = null
@@ -270,6 +275,7 @@ class OneControlGattCallback(
                         Log.i(TAG, "Bond state: ${device.bondState}")
                         isConnected = true
                         currentGatt = gatt
+                        mqttPublisher.updateBleStatus(connected = true, paired = false)
                         
                         // Discover services
                         gatt.discoverServices()
@@ -674,6 +680,7 @@ class OneControlGattCallback(
         
         // Mark as authenticated for Data Service gateway (no TEA auth needed)
         isAuthenticated = true
+        mqttPublisher.updateBleStatus(connected = true, paired = true)
         
         // Start stream reading thread
         startActiveStreamReading()
@@ -689,6 +696,10 @@ class OneControlGattCallback(
         
         // Publish ready state to MQTT
         mqttPublisher.publishState("onecontrol/${device.address}/status", "ready", true)
+        
+        // Publish diagnostic sensors
+        publishDiagnosticsDiscovery()
+        publishDiagnosticsState()
     }
     
     // Android 13+ (API 33+) uses this signature
@@ -733,6 +744,8 @@ class OneControlGattCallback(
             DATA_READ_CHARACTERISTIC_UUID -> {
                 // Queue for stream reading (like official app)
                 notificationQueue.offer(data)
+                // Update last data timestamp for health tracking
+                lastDataTimestampMs = System.currentTimeMillis()
                 synchronized(streamReadLock) {
                     streamReadLock.notify()
                 }
@@ -1047,17 +1060,18 @@ class OneControlGattCallback(
             Log.i(TAG, "📢 Publishing HA discovery for switch $tableId:$deviceId")
             try {
                 val deviceAddr = (tableId shl 8) or deviceId
-                // Discovery payload uses full topic paths (with homeassistant prefix)
+                // Discovery payload needs full topic paths (publishState adds prefix)
+                val prefix = mqttPublisher.topicPrefix
                 val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
                     gatewayMac = device.address,
                     deviceAddr = deviceAddr,
                     deviceName = "Switch $keyHex",
-                    stateTopic = "homeassistant/$stateTopic",
-                    commandTopic = "homeassistant/$commandTopic",
+                    stateTopic = "$prefix/$stateTopic",
+                    commandTopic = "$prefix/$commandTopic",
                     appVersion = "PluginBridge v2"
                 )
                 // publishDiscovery uses full path (no prefix added)
-                val discoveryTopic = "homeassistant/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
+                val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
                 Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
                 Log.d(TAG, "📢 Discovery published successfully")
@@ -1132,18 +1146,19 @@ class OneControlGattCallback(
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for dimmable light $tableId:$deviceId")
             val deviceAddr = (tableId shl 8) or deviceId
-            // Discovery payload uses full topic paths (with homeassistant prefix)
+            // Discovery payload needs full topic paths
+            val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
                 deviceName = "Light $keyHex",
-                stateTopic = "homeassistant/$stateTopic",
-                commandTopic = "homeassistant/$commandTopic",
-                brightnessTopic = "homeassistant/$brightnessTopic",
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                brightnessTopic = "$prefix/$brightnessTopic",
                 appVersion = "PluginBridge v2"
             )
             // publishDiscovery uses full path (no prefix added)
-            val discoveryTopic = "homeassistant/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
+            val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
         
@@ -1192,17 +1207,18 @@ class OneControlGattCallback(
         val discoveryKey = "tank_$keyHex"
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId")
-            // Discovery payload uses full topic path
+            // Discovery payload needs full topic path
+            val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                 gatewayMac = device.address,
                 sensorName = "Tank $keyHex",
-                stateTopic = "homeassistant/$stateTopic",
+                stateTopic = "$prefix/$stateTopic",
                 unit = "%",
                 deviceClass = null,
                 icon = "mdi:gauge",
                 appVersion = "PluginBridge v2"
             )
-            val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
         
@@ -1237,16 +1253,17 @@ class OneControlGattCallback(
             val voltageDiscoveryKey = "system_voltage"
             if (haDiscoveryPublished.add(voltageDiscoveryKey)) {
                 Log.i(TAG, "📢 Publishing HA discovery for system voltage sensor")
+                val prefix = mqttPublisher.topicPrefix
                 val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                     gatewayMac = device.address,
                     sensorName = "System Voltage",
-                    stateTopic = "homeassistant/$voltageTopic",
+                    stateTopic = "$prefix/$voltageTopic",
                     unit = "V",
                     deviceClass = "voltage",
                     icon = "mdi:car-battery",
                     appVersion = "PluginBridge v2"
                 )
-                val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_voltage/config"
+                val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_voltage/config"
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
             }
             mqttPublisher.publishState(voltageTopic, String.format("%.3f", it), true)
@@ -1260,16 +1277,17 @@ class OneControlGattCallback(
             val tempDiscoveryKey = "system_temperature"
             if (haDiscoveryPublished.add(tempDiscoveryKey)) {
                 Log.i(TAG, "📢 Publishing HA discovery for system temperature sensor")
+                val prefix = mqttPublisher.topicPrefix
                 val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                     gatewayMac = device.address,
                     sensorName = "System Temperature",
-                    stateTopic = "homeassistant/$tempTopic",
+                    stateTopic = "$prefix/$tempTopic",
                     unit = "°F",
                     deviceClass = "temperature",
                     icon = "mdi:thermometer",
                     appVersion = "PluginBridge v2"
                 )
-                val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_temperature/config"
+                val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_temperature/config"
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
             }
             mqttPublisher.publishState(tempTopic, String.format("%.1f", it), true)
@@ -1308,16 +1326,17 @@ class OneControlGattCallback(
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for cover $tableId:$deviceId")
             val deviceAddr = (tableId shl 8) or deviceId
+            val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getCoverDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
                 deviceName = "Cover $keyHex",
-                stateTopic = "homeassistant/$stateTopic",
-                commandTopic = "homeassistant/$commandTopic",
-                positionTopic = "homeassistant/$baseTopic/device/$tableId/$deviceId/position",
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                positionTopic = "$prefix/$baseTopic/device/$tableId/$deviceId/position",
                 appVersion = "PluginBridge v2"
             )
-            val discoveryTopic = "homeassistant/cover/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_$keyHex/config"
+            val discoveryTopic = "$prefix/cover/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
         
@@ -1408,17 +1427,18 @@ class OneControlGattCallback(
         val discoveryKey = "tank_$keyHex"
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for tank sensor V2 $tableId:$deviceId")
-            // Discovery payload uses full topic path
+            // Discovery payload needs full topic path
+            val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                 gatewayMac = device.address,
                 sensorName = "Tank $keyHex",
-                stateTopic = "homeassistant/$stateTopic",
+                stateTopic = "$prefix/$stateTopic",
                 unit = "%",
                 deviceClass = null,
                 icon = "mdi:gauge",
                 appVersion = "PluginBridge v2"
             )
-            val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
         
@@ -1804,6 +1824,8 @@ class OneControlGattCallback(
                 if (isConnected && isAuthenticated && currentGatt != null) {
                     Log.i(TAG, "💓 Heartbeat: sending GetDevices")
                     sendGetDevicesCommand()
+                    // Update diagnostic state (data_healthy depends on recent data)
+                    publishDiagnosticsState()
                     handler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
                 } else {
                     Log.w(TAG, "💓 Heartbeat skipped - not ready")
@@ -1835,9 +1857,101 @@ class OneControlGattCallback(
         
         isConnected = false
         isAuthenticated = false
+        mqttPublisher.updateBleStatus(connected = false, paired = false)
         notificationsEnableStarted = false
         seedValue = null
         currentGatt = null
         gatewayInfoReceived = false
     }
+    
+    // ==================== DIAGNOSTIC SENSORS ====================
+    
+    /**
+     * Compute if data stream is healthy (recent frames seen within timeout).
+     */
+    private fun computeDataHealthy(): Boolean {
+        val now = System.currentTimeMillis()
+        val hasRecentData = lastDataTimestampMs > 0 && (now - lastDataTimestampMs) <= DATA_HEALTH_TIMEOUT_MS
+        return isConnected && hasRecentData
+    }
+    
+    /**
+     * Get current diagnostic status for UI display.
+     */
+    fun getDiagnosticStatus(): DiagnosticStatus {
+        return DiagnosticStatus(
+            devicePaired = true,  // If we have a callback, device is paired
+            bleConnected = isConnected,
+            dataHealthy = computeDataHealthy()
+        )
+    }
+    
+    /**
+     * Publish Home Assistant discovery payloads for diagnostic binary sensors.
+     */
+    private fun publishDiagnosticsDiscovery() {
+        if (diagnosticsDiscoveryPublished) return
+        
+        val macId = device.address.replace(":", "").lowercase()
+        val nodeId = "onecontrol_$macId"
+        val prefix = mqttPublisher.topicPrefix
+        
+        // Device info for HA discovery - MUST match HomeAssistantMqttDiscovery.getDeviceInfo()
+        // to ensure all entities group under one device
+        val deviceInfo = HomeAssistantMqttDiscovery.getDeviceInfo(device.address)
+        
+        // Diagnostic sensors to publish
+        val diagnostics = listOf(
+            Triple("device_paired", "Device Paired", "diag/device_paired"),
+            Triple("ble_connected", "BLE Connected", "diag/ble_connected"),
+            Triple("data_healthy", "Data Healthy", "diag/data_healthy")
+        )
+        
+        diagnostics.forEach { (objectId, name, stateTopic) ->
+            val uniqueId = "onecontrol_${macId}_diag_$objectId"
+            val discoveryTopic = "$prefix/binary_sensor/$nodeId/$objectId/config"
+            
+            val payload = JSONObject().apply {
+                put("name", name)
+                put("unique_id", uniqueId)
+                put("state_topic", "$prefix/$stateTopic")
+                put("payload_on", "ON")
+                put("payload_off", "OFF")
+                put("entity_category", "diagnostic")
+                put("device", deviceInfo)
+            }.toString()
+            
+            mqttPublisher.publishDiscovery(discoveryTopic, payload)
+            Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
+        }
+        
+        diagnosticsDiscoveryPublished = true
+    }
+    
+    /**
+     * Publish current diagnostic state to MQTT.
+     */
+    private fun publishDiagnosticsState() {
+        val isPaired = device.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED
+        val dataHealthy = computeDataHealthy()
+        
+        // Publish to MQTT
+        mqttPublisher.publishState("diag/device_paired", if (isPaired) "ON" else "OFF", true)
+        mqttPublisher.publishState("diag/ble_connected", if (isConnected) "ON" else "OFF", true)
+        mqttPublisher.publishState("diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
+        
+        // Update UI status
+        mqttPublisher.updateDiagnosticStatus(dataHealthy)
+        
+        Log.d(TAG, "📡 Published diagnostic state: paired=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy")
+    }
+    
+    /**
+     * Diagnostic status data class for UI.
+     */
+    data class DiagnosticStatus(
+        val devicePaired: Boolean,
+        val bleConnected: Boolean,
+        val dataHealthy: Boolean
+    )
 }

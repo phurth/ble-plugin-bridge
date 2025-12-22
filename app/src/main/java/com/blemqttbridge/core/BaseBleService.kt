@@ -41,6 +41,22 @@ class BaseBleService : Service() {
         const val EXTRA_OUTPUT_PLUGIN_ID = "output_plugin_id"
         const val EXTRA_BLE_CONFIG = "ble_config"
         const val EXTRA_OUTPUT_CONFIG = "output_config"
+        
+        // Service status StateFlows for UI observation
+        private val _serviceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val serviceRunning: kotlinx.coroutines.flow.StateFlow<Boolean> = _serviceRunning
+        
+        private val _bleConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val bleConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _bleConnected
+        
+        private val _dataHealthy = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val dataHealthy: kotlinx.coroutines.flow.StateFlow<Boolean> = _dataHealthy
+        
+        private val _devicePaired = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val devicePaired: kotlinx.coroutines.flow.StateFlow<Boolean> = _devicePaired
+        
+        private val _mqttConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val mqttConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _mqttConnected
     }
     
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -75,6 +91,9 @@ class BaseBleService : Service() {
      * Wraps the output plugin to provide a clean interface for BLE plugins.
      */
     private val mqttPublisher = object : MqttPublisher {
+        override val topicPrefix: String
+            get() = outputPlugin?.getTopicPrefix() ?: "homeassistant"
+        
         override fun publishState(topic: String, payload: String, retained: Boolean) {
             serviceScope.launch {
                 outputPlugin?.publishState(topic, payload, retained)
@@ -95,6 +114,19 @@ class BaseBleService : Service() {
         
         override fun isConnected(): Boolean {
             return outputPlugin?.isConnected() ?: false
+        }
+        
+        override fun updateDiagnosticStatus(dataHealthy: Boolean) {
+            _dataHealthy.value = dataHealthy
+        }
+        
+        override fun updateBleStatus(connected: Boolean, paired: Boolean) {
+            _bleConnected.value = connected
+            _devicePaired.value = paired
+        }
+        
+        override fun updateMqttStatus(connected: Boolean) {
+            _mqttConnected.value = connected
         }
     }
     
@@ -148,6 +180,7 @@ class BaseBleService : Service() {
             ACTION_START_SCAN -> {
                 // Mark service as running
                 ServiceStateManager.setServiceRunning(applicationContext, true)
+                _serviceRunning.value = true
                 Log.i(TAG, "Service marked as running")
                 
                 val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol_v2"
@@ -192,6 +225,11 @@ class BaseBleService : Service() {
         
         // Mark service as stopped
         ServiceStateManager.setServiceRunning(applicationContext, false)
+        _serviceRunning.value = false
+        _bleConnected.value = false
+        _dataHealthy.value = false
+        _devicePaired.value = false
+        _mqttConnected.value = false
         Log.i(TAG, "Service marked as stopped")
         
         stopScanning()
@@ -232,7 +270,16 @@ class BaseBleService : Service() {
         if (outputPlugin == null) {
             Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
             Log.i(TAG, "Continuing without output plugin for BLE testing")
+            _mqttConnected.value = false
         } else {
+            // Set up connection status listener for real-time UI updates
+            outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
+                override fun onConnectionStatusChanged(connected: Boolean) {
+                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    _mqttConnected.value = connected
+                }
+            })
+            
             // Initialize remote control manager for MQTT commands
             remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
             remoteControlManager?.initialize(outputPlugin!!)
@@ -476,6 +523,10 @@ class BaseBleService : Service() {
             
             connectedDevices[device.address] = Pair(gatt, pluginId)
             
+            // Update status flows
+            _bleConnected.value = true
+            _devicePaired.value = device.bondState == BluetoothDevice.BOND_BONDED
+            
             // Notify plugin of GATT connection
             devicePlugin?.onGattConnected(device, gatt)
             
@@ -552,6 +603,10 @@ class BaseBleService : Service() {
         
         connectedDevices.remove(device.address)
         
+        // Update status flows
+        _bleConnected.value = connectedDevices.isNotEmpty()
+        _dataHealthy.value = false
+        
         // Notify plugin
         val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
         devicePlugin?.onDeviceDisconnected(device)
@@ -590,6 +645,7 @@ class BaseBleService : Service() {
                             BluetoothDevice.BOND_BONDED -> {
                                 Log.i(TAG, "✅✅✅ Device ${it.address} bonded successfully!")
                                 pendingBondDevices.remove(it.address)
+                                _devicePaired.value = true
                                 updateNotification("Bonded - Discovering services...")
                                 
                                 // Proceed with service discovery if connected

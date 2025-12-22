@@ -50,4 +50,35 @@ interface MqttPublisher {
      * @return true if connected, false otherwise
      */
     fun isConnected(): Boolean
+    
+    /**
+     * Get the configured topic prefix.
+     * Used to construct discovery payloads with correct full topic paths.
+     * The prefix is prepended to topics in publishState(), so discovery payloads
+     * must include it to match the actual published topic paths.
+     * 
+     * @return The topic prefix (e.g., "homeassistant")
+     */
+    val topicPrefix: String
+    
+    /**
+     * Update diagnostic status for UI display.
+     * Called by plugins to update status indicators in the app UI.
+     * 
+     * @param dataHealthy Whether data is being received (recent frames seen)
+     */
+    fun updateDiagnosticStatus(dataHealthy: Boolean)
+    
+    /**
+     * Update BLE connection status for UI display.
+     * @param connected Whether BLE is connected
+     * @param paired Whether device is paired/authenticated
+     */
+    fun updateBleStatus(connected: Boolean, paired: Boolean)
+    
+    /**
+     * Update MQTT connection status for UI display.
+     * @param connected Whether MQTT broker is connected
+     */
+    fun updateMqttStatus(connected: Boolean)
 }
