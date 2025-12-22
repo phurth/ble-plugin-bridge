@@ -255,93 +255,12 @@ class BaseBleService : Service() {
             Log.i(TAG, "Loaded legacy plugin: $blePluginId (BlePluginInterface - forwarding callback)")
         }
         
-        // Wire up MQTT formatter for OneControl plugin (if output plugin available)
-        wireOneControlMqttFormatter(blePluginId)
-        
         Log.i(TAG, "Plugins initialized successfully")
         memoryManager.logMemoryUsage()
         
         // CRITICAL: Try to reconnect to bonded devices first!
         // Many BLE devices don't actively advertise when bonded - they wait for reconnection
         reconnectToBondedDevices()
-    }
-    
-    /**
-     * Wire up MQTT formatter for OneControl plugin.
-     * This bridges the protocol-level state updates to MQTT topics for Home Assistant.
-     */
-    private fun wireOneControlMqttFormatter(blePluginId: String) {
-        if (outputPlugin == null) return
-        if (blePlugin !is com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin) return
-        if (blePluginId != "onecontrol") return
-        
-        Log.i(TAG, "🔌 OneControl MQTT formatter ready - will create per-gateway on connection")
-        
-        // The formatter will be created per-gateway when connected
-        // Clear any existing formatters from previous sessions
-        oneControlMqttFormatters.clear()
-    }
-    
-    // Per-gateway MQTT formatters for OneControl
-    private val oneControlMqttFormatters = mutableMapOf<String, com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter>()
-    
-    /**
-     * Create or get MQTT formatter for a OneControl gateway.
-     */
-    private fun getOrCreateOneControlFormatter(gatewayMac: String): com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter? {
-        val output = outputPlugin ?: return null
-        
-        return oneControlMqttFormatters.getOrPut(gatewayMac) {
-            val formatter = com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter(
-                output = output,
-                gatewayMac = gatewayMac
-            )
-            Log.i(TAG, "📡 Created MQTT formatter for gateway $gatewayMac")
-            
-            // Wire formatter to plugin as state listener
-            (blePlugin as? com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin)?.setStateListener(formatter)
-            
-            // Publish availability "online" and subscribe to commands
-            serviceScope.launch {
-                try {
-                    formatter.publishOnline()
-                    
-                    // Subscribe to commands
-                    outputPlugin?.subscribeToCommands(formatter.getCommandTopicPattern()) { topic, payload ->
-                        handleOneControlCommand(gatewayMac, topic, payload, formatter)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error setting up MQTT for OneControl: ${e.message}", e)
-                }
-            }
-            
-            formatter
-        }
-    }
-    
-    /**
-     * Handle incoming MQTT command for OneControl device.
-     */
-    private fun handleOneControlCommand(
-        gatewayMac: String, 
-        topic: String, 
-        payload: String,
-        formatter: com.blemqttbridge.plugins.device.onecontrol.OneControlMqttFormatter
-    ) {
-        val command = formatter.parseCommand(topic, payload)
-        if (command != null) {
-            Log.i(TAG, "📥 MQTT command received: ${command::class.simpleName} for ${command.tableId}:${command.deviceId}")
-            
-            serviceScope.launch {
-                val plugin = blePlugin as? com.blemqttbridge.plugins.device.onecontrol.OneControlPlugin
-                val result = plugin?.handleCommand(gatewayMac, command)
-                if (result?.isFailure == true) {
-                    Log.e(TAG, "Command failed: ${result.exceptionOrNull()?.message}")
-                }
-            }
-        } else {
-            Log.w(TAG, "Failed to parse MQTT command: $topic = $payload")
-        }
     }
     
     /**
@@ -560,6 +479,9 @@ class BaseBleService : Service() {
             // Notify plugin of GATT connection
             devicePlugin?.onGattConnected(device, gatt)
             
+            // Subscribe to command topics for this device
+            subscribeToDeviceCommands(device, pluginId, devicePlugin)
+            
             // NOTE: Do NOT call createBond() explicitly here!
             // The legacy app does not call createBond() - it lets the BLE stack
             // handle bonding automatically when accessing encrypted characteristics.
@@ -573,6 +495,52 @@ class BaseBleService : Service() {
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")
+        }
+    }
+    
+    /**
+     * Subscribe to command topics for a connected device.
+     * Routes MQTT commands to the plugin's handleCommand method.
+     */
+    private fun subscribeToDeviceCommands(device: BluetoothDevice, pluginId: String, plugin: BleDevicePlugin?) {
+        val output = outputPlugin
+        if (output == null || plugin == null) {
+            Log.w(TAG, "Cannot subscribe to commands - output or plugin not available")
+            return
+        }
+        
+        // Get base topic from plugin (e.g., "onecontrol/24:DC:C3:ED:1E:0A")
+        val baseTopic = plugin.getMqttBaseTopic(device)
+        
+        // Subscribe to command topics with wildcard
+        // Note: subscribeToCommands adds the prefix ("homeassistant/") automatically
+        val commandTopicPattern = "$baseTopic/command/#"
+        
+        Log.i(TAG, "📡 Subscribing to command topic: $commandTopicPattern")
+        
+        serviceScope.launch {
+            try {
+                output.subscribeToCommands(commandTopicPattern) { topic, payload ->
+                    Log.i(TAG, "📥 MQTT command received: $topic = $payload")
+                    
+                    // Route command to plugin
+                    serviceScope.launch {
+                        try {
+                            val result = plugin.handleCommand(device, topic, payload)
+                            if (result.isFailure) {
+                                Log.w(TAG, "❌ Plugin command failed: ${result.exceptionOrNull()?.message}")
+                            } else {
+                                Log.i(TAG, "✅ Plugin command succeeded")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Command handling error", e)
+                        }
+                    }
+                }
+                Log.i(TAG, "📡 Successfully subscribed to: $commandTopicPattern")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Failed to subscribe to command topics", e)
+            }
         }
     }
     
@@ -836,12 +804,6 @@ class BaseBleService : Service() {
                     } else null
                     
                     if (plugin != null) {
-                        // CRITICAL: Wire MQTT formatter BEFORE plugin setup so it can receive
-                        // events that arrive immediately after notification subscription
-                        if (pluginId == "onecontrol") {
-                            getOrCreateOneControlFormatter(gatt.device.address)
-                        }
-                        
                         // Create GATT operations interface for plugin
                         val gattOps = GattOperationsImpl(gatt)
                         

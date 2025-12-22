@@ -1,4 +1,4 @@
-package com.blemqttbridge.plugins.device.onecontrol.protocol
+package com.blemqttbridge.plugins.onecontrol.protocol
 
 import android.util.Log
 

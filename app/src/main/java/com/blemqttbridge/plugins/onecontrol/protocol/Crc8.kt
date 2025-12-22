@@ -1,4 +1,4 @@
-package com.blemqttbridge.plugins.device.onecontrol.protocol
+package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * CRC8 stateful calculator matching decompiled C# Crc8 struct

@@ -1,4 +1,4 @@
-package com.blemqttbridge.plugins.device.onecontrol.protocol
+package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * V2MessageType - Message types used by the gateway for CAN-over-BLE communication

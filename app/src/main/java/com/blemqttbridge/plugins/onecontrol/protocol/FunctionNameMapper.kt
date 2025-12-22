@@ -1,4 +1,4 @@
-package com.blemqttbridge.plugins.device.onecontrol.protocol
+package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * Maps FUNCTION_NAME values (from IDS CAN protocol) to friendly device names.

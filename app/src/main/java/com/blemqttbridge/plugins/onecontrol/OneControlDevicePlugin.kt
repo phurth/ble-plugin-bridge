@@ -9,11 +9,14 @@ import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
-import com.blemqttbridge.plugins.device.onecontrol.protocol.TeaEncryption
-import com.blemqttbridge.plugins.device.onecontrol.protocol.Constants
-import com.blemqttbridge.plugins.device.onecontrol.protocol.CobsByteDecoder
-import com.blemqttbridge.plugins.device.onecontrol.protocol.CobsDecoder
+import com.blemqttbridge.plugins.onecontrol.protocol.TeaEncryption
+import com.blemqttbridge.plugins.onecontrol.protocol.Constants
+import com.blemqttbridge.plugins.onecontrol.protocol.CobsByteDecoder
+import com.blemqttbridge.plugins.onecontrol.protocol.CobsDecoder
+import com.blemqttbridge.plugins.onecontrol.protocol.HomeAssistantMqttDiscovery
+import com.blemqttbridge.plugins.onecontrol.protocol.MyRvLinkCommandBuilder
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -62,6 +65,9 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     // Strong reference to callback to prevent GC
     private var gattCallback: BluetoothGattCallback? = null
+    
+    // Current callback instance for command handling
+    private var currentCallback: OneControlGattCallback? = null
     
     override fun initialize(context: Context, config: PluginConfig) {
         Log.i(TAG, "Initializing OneControl Device Plugin v$PLUGIN_VERSION")
@@ -123,6 +129,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
         Log.i(TAG, "Created callback with hashCode=${callback.hashCode()}")
         // Keep strong reference to prevent GC
         gattCallback = callback
+        currentCallback = callback  // Track for command handling
         return callback
     }
     
@@ -146,8 +153,17 @@ class OneControlDevicePlugin : BleDevicePlugin {
     }
     
     override suspend fun handleCommand(device: BluetoothDevice, commandTopic: String, payload: String): Result<Unit> {
-        Log.w(TAG, "Command handling not yet implemented: $commandTopic")
-        return Result.failure(Exception("Not implemented"))
+        Log.i(TAG, "📤 Command received: $commandTopic = $payload")
+        
+        // Get the current callback instance
+        val callback = currentCallback
+        if (callback == null) {
+            Log.w(TAG, "❌ No active callback for command")
+            return Result.failure(Exception("No active connection"))
+        }
+        
+        // Delegate to callback which has GATT access
+        return callback.handleCommand(commandTopic, payload)
     }
     
     override fun destroy() {
@@ -226,6 +242,19 @@ class OneControlGattCallback(
     private var nextCommandId: UShort = 1u
     private var deviceTableId: Byte = 0x00
     private var gatewayInfoReceived = false
+    
+    // Home Assistant discovery tracking - prevents duplicate discovery publishes
+    private val haDiscoveryPublished = mutableSetOf<String>()
+    
+    // Dimmable light control tracking (from legacy app)
+    // Key: "tableId:deviceId", Value: last known brightness (1-255)
+    private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()
+    // Pending dimmable: tracks in-flight brightness commands to suppress conflicting gateway status
+    private val pendingDimmable = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, timestamp)
+    private val DIMMER_PENDING_WINDOW_MS = 12000L
+    // Pending send: debounce rapid slider changes
+    private val pendingDimmableSend = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, timestamp)
+    private val DIMMER_DEBOUNCE_MS = 200L
     
     // Heartbeat
     private var heartbeatRunnable: Runnable? = null
@@ -856,15 +885,30 @@ class OneControlGattCallback(
                 Log.i(TAG, "📦 GatewayInformation event received!")
                 handleGatewayInformationEvent(decodedFrame)
             }
+            0x02 -> {
+                // DeviceCommand response - acknowledgment of commands sent
+                Log.d(TAG, "📦 DeviceCommand response (ack)")
+                // This is the gateway acknowledging our commands - typically nothing to do
+            }
             0x03 -> {
                 // DeviceOnlineStatus
                 Log.i(TAG, "📦 DeviceOnlineStatus event")
                 handleDeviceOnlineStatus(decodedFrame)
             }
+            0x04 -> {
+                // DeviceLockStatus
+                Log.i(TAG, "📦 DeviceLockStatus event")
+                handleDeviceLockStatus(decodedFrame)
+            }
             0x05, 0x06 -> {
                 // RelayBasicLatchingStatus (Type1 or Type2)
                 Log.i(TAG, "📦 RelayBasicLatchingStatus event")
                 handleRelayStatus(decodedFrame)
+            }
+            0x07 -> {
+                // RvStatus - contains system voltage and temperature
+                Log.i(TAG, "📦 RvStatus event (voltage/temp)")
+                handleRvStatus(decodedFrame)
             }
             0x08 -> {
                 // DimmableLightStatus
@@ -881,17 +925,43 @@ class OneControlGattCallback(
                 Log.i(TAG, "📦 TankSensorStatus event")
                 handleTankStatus(decodedFrame)
             }
+            0x0D, 0x0E -> {
+                // RelayHBridgeMomentaryStatus (Type1 or Type2) - covers/slides/awnings
+                Log.i(TAG, "📦 RelayHBridgeStatus event (cover)")
+                handleHBridgeStatus(decodedFrame)
+            }
+            0x0F -> {
+                // HourMeterStatus
+                Log.i(TAG, "📦 HourMeterStatus event")
+                handleGenericEvent(decodedFrame, "hour_meter")
+            }
+            0x10 -> {
+                // Leveler4DeviceStatus
+                Log.i(TAG, "📦 Leveler4DeviceStatus event")
+                handleGenericEvent(decodedFrame, "leveler")
+            }
+            0x1A -> {
+                // DeviceSessionStatus - session heartbeat
+                Log.d(TAG, "📦 DeviceSessionStatus (session heartbeat)")
+            }
             0x1B -> {
                 // TankSensorStatusV2
                 Log.i(TAG, "📦 TankSensorStatusV2 event")
                 handleTankStatusV2(decodedFrame)
+            }
+            0x20 -> {
+                // RealTimeClock
+                Log.i(TAG, "📦 RealTimeClock event")
+                handleRealTimeClock(decodedFrame)
             }
             else -> {
                 // Check if it's a command response
                 if (isCommandResponse(decodedFrame)) {
                     handleCommandResponse(decodedFrame)
                 } else {
-                    Log.d(TAG, "📦 Unknown event type: 0x${eventType.toString(16)}")
+                    // DESIGN: Publish ALL unknown events so nothing is lost
+                    Log.i(TAG, "📦 Unknown event type: 0x${eventType.toString(16)} - publishing to MQTT")
+                    handleGenericEvent(decodedFrame, "unknown_0x${eventType.toString(16)}")
                 }
             }
         }
@@ -950,21 +1020,59 @@ class OneControlGattCallback(
     
     /**
      * Handle RelayBasicLatchingStatus event (lights, switches)
+     * Per decompiled LogicalDeviceRelayStatusType2: raw output state in LOW NIBBLE
+     * Status byte format: upper nibble = flags, lower nibble = state (0x00=OFF, 0x01=ON)
      */
     private fun handleRelayStatus(data: ByteArray) {
         if (data.size < 5) return
         
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
-        val isOn = (data[3].toInt() and 0xFF) != 0
+        val statusByte = data[3].toInt() and 0xFF
+        val rawOutputState = statusByte and 0x0F  // State is in LOW NIBBLE
+        val isOn = rawOutputState == 0x01  // 0x01 = ON, 0x00 = OFF
         
-        Log.i(TAG, "📦 Relay $tableId:$deviceId state=$isOn")
+        Log.i(TAG, "📦 Relay $tableId:$deviceId statusByte=0x%02X rawOutput=0x%02X state=$isOn".format(statusByte, rawOutputState))
         
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/state", if (isOn) "ON" else "OFF", true)
+        // Topic paths - publishState adds prefix, so use relative paths
+        val baseTopic = "onecontrol/${device.address}"
+        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+        val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
+        
+        // Publish HA discovery if not already done (uses full topic for discovery)
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val discoveryKey = "switch_$keyHex"
+        Log.d(TAG, "🔍 Relay discovery check: key=$discoveryKey, alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for switch $tableId:$deviceId")
+            try {
+                val deviceAddr = (tableId shl 8) or deviceId
+                // Discovery payload uses full topic paths (with homeassistant prefix)
+                val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
+                    gatewayMac = device.address,
+                    deviceAddr = deviceAddr,
+                    deviceName = "Switch $keyHex",
+                    stateTopic = "homeassistant/$stateTopic",
+                    commandTopic = "homeassistant/$commandTopic",
+                    appVersion = "PluginBridge v2"
+                )
+                // publishDiscovery uses full path (no prefix added)
+                val discoveryTopic = "homeassistant/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
+                Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
+                mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+                Log.d(TAG, "📢 Discovery published successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "📢 Discovery publish failed: ${e.message}", e)
+            }
+        }
+        
+        // Publish state (relative path, prefix added by publishState)
+        mqttPublisher.publishState(stateTopic, if (isOn) "ON" else "OFF", true)
     }
     
     /**
      * Handle DimmableLightStatus event
+     * Includes pending guard from legacy app to prevent UI bouncing during command execution
      */
     private fun handleDimmableLightStatus(data: ByteArray) {
         if (data.size < 5) return
@@ -972,12 +1080,66 @@ class OneControlGattCallback(
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
         val brightness = data[3].toInt() and 0xFF
+        val modeByte = data[4].toInt() and 0xFF  // Mode byte for pending check
         val isOn = brightness > 0
         
-        Log.i(TAG, "📦 Dimmable $tableId:$deviceId brightness=$brightness")
+        val key = "$tableId:$deviceId"
         
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/state", if (isOn) "ON" else "OFF", true)
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/brightness", brightness.toString(), true)
+        Log.i(TAG, "📦 Dimmable $tableId:$deviceId brightness=$brightness mode=$modeByte")
+        
+        // Pending guard: suppress mismatching status updates while a command is pending
+        // This prevents the UI from bouncing back to old values during dimmer adjustment
+        val pending = pendingDimmable[key]
+        val now = System.currentTimeMillis()
+        if (pending != null) {
+            val (desired, ts) = pending
+            val age = now - ts
+            if (age <= DIMMER_PENDING_WINDOW_MS) {
+                // If reported brightness doesn't match desired, or mode is off when we want on, ignore
+                if (brightness != desired || (modeByte == 0 && desired > 0)) {
+                    Log.d(TAG, "🚫 Ignoring dimmer mismatch during pending window: reported=$brightness desired=$desired age=${age}ms")
+                    return  // Don't publish this status update
+                }
+            }
+            // Clear pending once we accept matching status or after the window expires
+            pendingDimmable.remove(key)
+        }
+        
+        // Track last known brightness for restore-on-ON feature
+        if (brightness > 0) {
+            lastKnownDimmableBrightness[key] = brightness
+        }
+        
+        // Topic paths - publishState adds prefix, so use relative paths
+        val baseTopic = "onecontrol/${device.address}"
+        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+        val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
+        val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
+        
+        // Publish HA discovery if not already done
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val discoveryKey = "light_$keyHex"
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for dimmable light $tableId:$deviceId")
+            val deviceAddr = (tableId shl 8) or deviceId
+            // Discovery payload uses full topic paths (with homeassistant prefix)
+            val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = "Light $keyHex",
+                stateTopic = "homeassistant/$stateTopic",
+                commandTopic = "homeassistant/$commandTopic",
+                brightnessTopic = "homeassistant/$brightnessTopic",
+                appVersion = "PluginBridge v2"
+            )
+            // publishDiscovery uses full path (no prefix added)
+            val discoveryTopic = "homeassistant/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        // Publish state (relative path, prefix added by publishState)
+        mqttPublisher.publishState(stateTopic, if (isOn) "ON" else "OFF", true)
+        mqttPublisher.publishState(brightnessTopic, brightness.toString(), true)
     }
     
     /**
@@ -1011,7 +1173,208 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📦 Tank $tableId:$deviceId level=$level%")
         
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/level", level.toString(), true)
+        // Topic paths - publishState adds prefix, so use relative paths
+        val baseTopic = "onecontrol/${device.address}"
+        val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+        
+        // Publish HA discovery if not already done
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val discoveryKey = "tank_$keyHex"
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId")
+            // Discovery payload uses full topic path
+            val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                gatewayMac = device.address,
+                sensorName = "Tank $keyHex",
+                stateTopic = "homeassistant/$stateTopic",
+                unit = "%",
+                deviceClass = null,
+                icon = "mdi:gauge",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        // Publish state (relative path, prefix added by publishState)
+        mqttPublisher.publishState(stateTopic, level.toString(), true)
+    }
+    
+    /**
+     * Handle RvStatus event - contains system voltage and temperature
+     * Format: eventType(0x07), voltage(2 bytes 8.8 BE), temp(2 bytes 8.8 BE), flags(1)
+     * Invalid/unavailable markers: 0xFFFF for voltage, 0x7FFF or 0xFFFF for temperature
+     */
+    private fun handleRvStatus(data: ByteArray) {
+        if (data.size < 6) return
+        
+        val voltageRaw = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+        val tempRaw = ((data[3].toInt() and 0xFF) shl 8) or (data[4].toInt() and 0xFF)
+        
+        val voltage = if (voltageRaw == 0xFFFF) null else voltageRaw.toFloat() / 256f
+        // 0x7FFF (32767) appears to be "not available" marker for temperature
+        val temperature = if (tempRaw == 0xFFFF || tempRaw == 0x7FFF) null else tempRaw.toFloat() / 256f
+        
+        Log.i(TAG, "📦 RvStatus: voltageRaw=0x%04X (${voltage}V), tempRaw=0x%04X (${temperature}°F)".format(voltageRaw, tempRaw))
+        
+        val baseTopic = "onecontrol/${device.address}"
+        
+        // Publish voltage sensor with HA discovery
+        voltage?.let {
+            val voltageTopic = "$baseTopic/system/voltage"
+            
+            // Publish HA discovery for voltage sensor if not already done
+            val voltageDiscoveryKey = "system_voltage"
+            if (haDiscoveryPublished.add(voltageDiscoveryKey)) {
+                Log.i(TAG, "📢 Publishing HA discovery for system voltage sensor")
+                val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                    gatewayMac = device.address,
+                    sensorName = "System Voltage",
+                    stateTopic = "homeassistant/$voltageTopic",
+                    unit = "V",
+                    deviceClass = "voltage",
+                    icon = "mdi:car-battery",
+                    appVersion = "PluginBridge v2"
+                )
+                val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_voltage/config"
+                mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+            }
+            mqttPublisher.publishState(voltageTopic, String.format("%.3f", it), true)
+        }
+        
+        // Publish temperature sensor with HA discovery
+        temperature?.let {
+            val tempTopic = "$baseTopic/system/temperature"
+            
+            // Publish HA discovery for temperature sensor if not already done
+            val tempDiscoveryKey = "system_temperature"
+            if (haDiscoveryPublished.add(tempDiscoveryKey)) {
+                Log.i(TAG, "📢 Publishing HA discovery for system temperature sensor")
+                val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                    gatewayMac = device.address,
+                    sensorName = "System Temperature",
+                    stateTopic = "homeassistant/$tempTopic",
+                    unit = "°F",
+                    deviceClass = "temperature",
+                    icon = "mdi:thermometer",
+                    appVersion = "PluginBridge v2"
+                )
+                val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_temperature/config"
+                mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+            }
+            mqttPublisher.publishState(tempTopic, String.format("%.1f", it), true)
+        }
+    }
+    
+    /**
+     * Handle H-Bridge status event (covers/slides/awnings)
+     * Format: eventType(0x0D/0x0E), tableId, deviceId, status
+     * Status: 0xC0=stopped, 0xC2=extending/opening, 0xC3=retracting/closing
+     */
+    private fun handleHBridgeStatus(data: ByteArray) {
+        if (data.size < 4) return
+        
+        val tableId = data[1].toInt() and 0xFF
+        val deviceId = data[2].toInt() and 0xFF
+        val status = data[3].toInt() and 0xFF
+        
+        Log.i(TAG, "📦 HBridge (cover) $tableId:$deviceId status=0x${status.toString(16)}")
+        
+        val baseTopic = "onecontrol/${device.address}"
+        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+        val commandTopic = "$baseTopic/command/cover/$tableId/$deviceId"
+        
+        // Map status to HA cover state
+        val haState = when (status) {
+            0xC2 -> "opening"   // Extending
+            0xC3 -> "closing"   // Retracting  
+            0xC0 -> "stopped"   // Stopped - could track last direction for open/closed
+            else -> "unknown"
+        }
+        
+        // Publish HA discovery if not already done
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val discoveryKey = "cover_$keyHex"
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for cover $tableId:$deviceId")
+            val deviceAddr = (tableId shl 8) or deviceId
+            val discovery = HomeAssistantMqttDiscovery.getCoverDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = "Cover $keyHex",
+                stateTopic = "homeassistant/$stateTopic",
+                commandTopic = "homeassistant/$commandTopic",
+                positionTopic = "homeassistant/$baseTopic/device/$tableId/$deviceId/position",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "homeassistant/cover/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        // Publish state
+        mqttPublisher.publishState(stateTopic, haState, true)
+    }
+    
+    /**
+     * Handle DeviceLockStatus event
+     */
+    private fun handleDeviceLockStatus(data: ByteArray) {
+        if (data.size < 4) return
+        
+        val tableId = data[1].toInt() and 0xFF
+        val deviceId = data[2].toInt() and 0xFF
+        val locked = (data[3].toInt() and 0xFF) != 0
+        
+        Log.i(TAG, "📦 DeviceLock $tableId:$deviceId locked=$locked")
+        
+        val baseTopic = "onecontrol/${device.address}"
+        val json = JSONObject().apply {
+            put("device_table_id", tableId)
+            put("device_id", deviceId)
+            put("locked", locked)
+        }
+        mqttPublisher.publishState("$baseTopic/device/$tableId/$deviceId/lock", json.toString(), true)
+    }
+    
+    /**
+     * Handle RealTimeClock event
+     */
+    private fun handleRealTimeClock(data: ByteArray) {
+        Log.i(TAG, "📦 RealTimeClock: ${data.size} bytes")
+        
+        val baseTopic = "onecontrol/${device.address}"
+        val json = JSONObject().apply {
+            put("event", "rtc")
+            put("raw", data.joinToString(" ") { "%02X".format(it) })
+        }
+        mqttPublisher.publishState("$baseTopic/system/rtc", json.toString(), true)
+    }
+    
+    /**
+     * Handle any generic/unknown event - DESIGN: publish everything so nothing is lost
+     */
+    private fun handleGenericEvent(data: ByteArray, eventName: String) {
+        val tableId = if (data.size > 1) data[1].toInt() and 0xFF else 0
+        val deviceId = if (data.size > 2) data[2].toInt() and 0xFF else 0
+        
+        Log.i(TAG, "📦 Generic event '$eventName': tableId=$tableId, deviceId=$deviceId, ${data.size} bytes")
+        
+        val baseTopic = "onecontrol/${device.address}"
+        val json = JSONObject().apply {
+            put("event", eventName)
+            put("table_id", tableId)
+            put("device_id", deviceId)
+            put("size", data.size)
+            put("raw", data.joinToString(" ") { "%02X".format(it) })
+        }
+        
+        // Publish to device-specific topic if we have table/device IDs, otherwise to events topic
+        val topic = if (tableId != 0 || deviceId != 0) {
+            "$baseTopic/device/$tableId/$deviceId/$eventName"
+        } else {
+            "$baseTopic/events/$eventName"
+        }
+        mqttPublisher.publishState(topic, json.toString(), true)
     }
     
     /**
@@ -1026,7 +1389,31 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📦 TankV2 $tableId:$deviceId level=$level%")
         
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/level", level.toString(), true)
+        // Topic paths - publishState adds prefix, so use relative paths
+        val baseTopic = "onecontrol/${device.address}"
+        val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+        
+        // Publish HA discovery if not already done
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val discoveryKey = "tank_$keyHex"
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for tank sensor V2 $tableId:$deviceId")
+            // Discovery payload uses full topic path
+            val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                gatewayMac = device.address,
+                sensorName = "Tank $keyHex",
+                stateTopic = "homeassistant/$stateTopic",
+                unit = "%",
+                deviceClass = null,
+                icon = "mdi:gauge",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        // Publish state (relative path, prefix added by publishState)
+        mqttPublisher.publishState(stateTopic, level.toString(), true)
     }
     
     /**
@@ -1137,6 +1524,247 @@ class OneControlGattCallback(
             Log.e(TAG, "Failed to send command: ${e.message}", e)
         }
     }
+    
+    // ========== COMMAND HANDLING ==========
+    
+    /**
+     * Handle MQTT command - parses topic and routes to appropriate control method
+     * Command topics: onecontrol/{MAC}/command/{type}/{tableId}/{deviceId}
+     */
+    fun handleCommand(commandTopic: String, payload: String): Result<Unit> {
+        Log.i(TAG, "📤 Handling command: $commandTopic = $payload")
+        
+        if (!isConnected || !isAuthenticated || currentGatt == null) {
+            Log.w(TAG, "❌ Cannot handle command - not ready (connected=$isConnected, auth=$isAuthenticated)")
+            return Result.failure(Exception("Not connected or authenticated"))
+        }
+        
+        // Parse topic: command/{type}/{tableId}/{deviceId} or command/{type}/{tableId}/{deviceId}/brightness
+        val parts = commandTopic.split("/")
+        
+        // Find "command" segment and parse from there
+        val commandIndex = parts.indexOf("command")
+        if (commandIndex == -1 || parts.size < commandIndex + 4) {
+            Log.w(TAG, "❌ Invalid command topic format: $commandTopic")
+            return Result.failure(Exception("Invalid topic format"))
+        }
+        
+        val kind = parts[commandIndex + 1]
+        val tableIdStr = parts[commandIndex + 2]
+        val deviceIdStr = parts[commandIndex + 3]
+        val subTopic = if (parts.size > commandIndex + 4) parts[commandIndex + 4] else null
+        
+        val tableId = tableIdStr.toIntOrNull()
+        val deviceId = deviceIdStr.toIntOrNull()
+        
+        if (tableId == null || deviceId == null) {
+            Log.w(TAG, "❌ Invalid tableId or deviceId in topic: $commandTopic")
+            return Result.failure(Exception("Invalid device address"))
+        }
+        
+        return when (kind) {
+            "switch" -> controlSwitch(tableId.toByte(), deviceId.toByte(), payload)
+            "dimmable" -> {
+                if (subTopic == "brightness") {
+                    // Brightness-only command
+                    val brightness = payload.toIntOrNull()
+                    if (brightness != null) {
+                        controlDimmableLight(tableId.toByte(), deviceId.toByte(), brightness.coerceIn(0, 255))
+                    } else {
+                        Result.failure(Exception("Invalid brightness value"))
+                    }
+                } else {
+                    // On/Off or brightness command
+                    controlDimmableLight(tableId.toByte(), deviceId.toByte(), payload)
+                }
+            }
+            else -> {
+                Log.w(TAG, "⚠️ Unknown command type: $kind")
+                Result.failure(Exception("Unknown command type: $kind"))
+            }
+        }
+    }
+    
+    /**
+     * Control a switch (relay)
+     */
+    private fun controlSwitch(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+        val turnOn = payload.equals("ON", ignoreCase = true) || 
+                     payload == "1" || 
+                     payload.equals("true", ignoreCase = true)
+        
+        Log.i(TAG, "📤 Switch control: table=$tableId, device=$deviceId, turnOn=$turnOn")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        try {
+            val commandId = getNextCommandId()
+            val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+                deviceTableId
+            } else {
+                tableId
+            }
+            
+            val command = MyRvLinkCommandBuilder.buildActionSwitch(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                switchState = turnOn,
+                deviceIds = listOf(deviceId)
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 Switch command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent switch command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, turnOn=$turnOn, result=$result")
+            
+            // Publish optimistic state update
+            val baseTopic = "onecontrol/${device.address}"
+            mqttPublisher.publishState("$baseTopic/device/${effectiveTableId.toInt() and 0xFF}/${deviceId.toInt() and 0xFF}/state", 
+                if (turnOn) "ON" else "OFF", true)
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send switch command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
+    /**
+     * Control a dimmable light - from payload string
+     */
+    private fun controlDimmableLight(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+        // Parse payload: could be "ON", "OFF", or a brightness value, or JSON
+        val brightness = when {
+            payload.equals("ON", ignoreCase = true) || payload.equals("true", ignoreCase = true) -> 100
+            payload.equals("OFF", ignoreCase = true) || payload == "0" || payload.equals("false", ignoreCase = true) -> 0
+            payload.toIntOrNull() != null -> payload.toInt().coerceIn(0, 255)
+            else -> {
+                // Try JSON parse
+                try {
+                    val json = org.json.JSONObject(payload)
+                    val state = json.optString("state", "")
+                    val bri = json.optInt("brightness", -1)
+                    when {
+                        bri >= 0 -> bri.coerceIn(0, 255)
+                        state.equals("ON", ignoreCase = true) -> 100
+                        state.equals("OFF", ignoreCase = true) -> 0
+                        else -> -1
+                    }
+                } catch (e: Exception) {
+                    -1
+                }
+            }
+        }
+        
+        if (brightness < 0) {
+            Log.w(TAG, "❌ Cannot parse dimmable command: $payload")
+            return Result.failure(Exception("Invalid payload"))
+        }
+        
+        return controlDimmableLight(tableId, deviceId, brightness)
+    }
+    
+    /**
+     * Control a dimmable light - from brightness value
+     * Includes debouncing from legacy app to coalesce rapid slider changes
+     */
+    private fun controlDimmableLight(tableId: Byte, deviceId: Byte, brightness: Int): Result<Unit> {
+        Log.i(TAG, "📤 Dimmable control: table=$tableId, device=$deviceId, brightness=$brightness")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+            deviceTableId
+        } else {
+            tableId
+        }
+        
+        val tableIdInt = effectiveTableId.toInt() and 0xFF
+        val deviceIdInt = deviceId.toInt() and 0xFF
+        val key = "$tableIdInt:$deviceIdInt"
+        
+        // Handle OFF immediately (no debounce needed)
+        if (brightness <= 0) {
+            pendingDimmable.remove(key)
+            pendingDimmableSend.remove(key)
+            return sendDimmableCommand(writeChar, effectiveTableId, deviceId, 0)
+        }
+        
+        // Handle brightness: HA sends 255 for bare "ON", we restore last known brightness
+        val lastKnown = lastKnownDimmableBrightness[key]
+        val targetBrightness = when {
+            brightness == 255 && lastKnown != null -> lastKnown  // Restore last known
+            else -> brightness.coerceIn(1, 255)
+        }
+        
+        // Debounce: schedule the command after DIMMER_DEBOUNCE_MS
+        // If another command comes in before then, it will replace this one
+        val nowTs = System.currentTimeMillis()
+        pendingDimmableSend[key] = targetBrightness to nowTs
+        
+        handler.postDelayed({
+            val entry = pendingDimmableSend[key]
+            if (entry != null && entry.second == nowTs) {
+                // This is still the latest request - send it
+                pendingDimmableSend.remove(key)
+                sendDimmableCommand(writeChar, effectiveTableId, deviceId, targetBrightness)
+                lastKnownDimmableBrightness[key] = targetBrightness
+                pendingDimmable[key] = targetBrightness to System.currentTimeMillis()
+                
+                // Publish optimistic state update
+                val baseTopic = "onecontrol/${device.address}"
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "ON", true)
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", targetBrightness.toString(), true)
+            }
+        }, DIMMER_DEBOUNCE_MS)
+        
+        return Result.success(Unit)  // Return success immediately, actual send is debounced
+    }
+    
+    /**
+     * Actually send the dimmable command to BLE (called after debounce)
+     */
+    private fun sendDimmableCommand(writeChar: BluetoothGattCharacteristic, effectiveTableId: Byte, deviceId: Byte, brightness: Int): Result<Unit> {
+        try {
+            val commandId = getNextCommandId()
+            val tableIdInt = effectiveTableId.toInt() and 0xFF
+            val deviceIdInt = deviceId.toInt() and 0xFF
+            
+            val command = MyRvLinkCommandBuilder.buildActionDimmable(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                brightness = brightness
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 Dimmable command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent dimmable command: table=$tableIdInt, device=$deviceIdInt, brightness=$brightness, result=$result")
+            
+            // For OFF command, publish state immediately
+            if (brightness == 0) {
+                val baseTopic = "onecontrol/${device.address}"
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "OFF", true)
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", "0", true)
+            }
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send dimmable command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
+    // ========== END COMMAND HANDLING ==========
     
     /**
      * Encode GetDevices command

@@ -1,4 +1,4 @@
-package com.blemqttbridge.plugins.device.onecontrol.protocol
+package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * Builds MyRvLink commands for device control
@@ -57,44 +57,36 @@ object MyRvLinkCommandBuilder {
     
     /**
      * Build ActionDimmable command
-     * Format: [ClientCommandId (2 bytes)][CommandType (1)][DeviceTableId (1)][DeviceId (1)][Command data...]
-     * Minimum command data: 1 byte (brightness 0-100)
+     * Wire format matching legacy app HCI capture:
+     *   [CmdId_lo][CmdId_hi][CommandType=0x43][DeviceTableId][DeviceId][ModeByte][BrightnessByte][Reserved]
+     * 
+     * ModeByte: 0x00=Off, 0x01=On/Settings, 0x7F=Restore
+     * BrightnessByte: 0-255
      */
     fun buildActionDimmable(
         clientCommandId: UShort,
         deviceTableId: Byte,
         deviceId: Byte,
-        brightness: Int? = null,
-        turnOn: Boolean? = null
+        brightness: Int
     ): ByteArray {
-        // Build command data
-        // For simple brightness control, we use a single byte (0-100)
-        // For more complex commands, we'd need LogicalDeviceLightDimmableCommand structure
-        val commandData = mutableListOf<Byte>()
+        val b = brightness.coerceIn(0, 255)
         
-        if (brightness != null) {
-            // Set brightness (0-100)
-            commandData.add(brightness.coerceIn(0, 100).toByte())
-        } else if (turnOn != null) {
-            // Turn on/off (100 = on, 0 = off)
-            commandData.add(if (turnOn) 100.toByte() else 0.toByte())
-        } else {
-            // Default: turn on at 100%
-            commandData.add(100.toByte())
-        }
+        // Mode: 0x00 for off, 0x01 for on/settings, 0x7F for restore
+        val modeByte = if (b == 0) 0x00.toByte() else 0x01.toByte()
+        val brightnessByte = b.toByte()
+        val reservedByte = 0x00.toByte()
         
-        val command = ByteArray(5 + commandData.size)
-        command[0] = (clientCommandId.toInt() and 0xFF).toByte()
-        command[1] = ((clientCommandId.toInt() shr 8) and 0xFF).toByte()
-        command[2] = 0x43.toByte()  // CommandType: ActionDimmable (67 = 0x43)
-        command[3] = deviceTableId
-        command[4] = deviceId
-        
-        commandData.forEachIndexed { index, byte ->
-            command[5 + index] = byte
-        }
-        
-        return command
+        // 8 bytes total: matching legacy app format
+        return byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),            // CmdId low
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),    // CmdId high
+            0x43.toByte(),                                           // CommandType: ActionDimmable
+            deviceTableId,
+            deviceId,
+            modeByte,
+            brightnessByte,
+            reservedByte
+        )
     }
     
     /**
