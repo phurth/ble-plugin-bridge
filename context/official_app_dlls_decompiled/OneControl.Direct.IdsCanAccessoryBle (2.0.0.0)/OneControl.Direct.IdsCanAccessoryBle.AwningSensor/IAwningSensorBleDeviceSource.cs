@@ -1,0 +1,12 @@
+using System;
+using IDS.Portable.Common;
+using IDS.Portable.LogicalDevice;
+using IDS.Portable.LogicalDevice.LogicalDeviceSource;
+using OneControl.Direct.IdsCanAccessoryBle.Connections;
+
+namespace OneControl.Direct.IdsCanAccessoryBle.AwningSensor
+{
+	public interface IAwningSensorBleDeviceSource : IAccessoryBleDeviceSourceLocap<SensorConnectionAwningSensor>, IAccessoryBleDeviceSourceLocap, ILogicalDeviceSourceDirect, ILogicalDeviceSource, IAccessoryBleDeviceSource<SensorConnectionAwningSensor>, IAccessoryBleDeviceSource, ICommonDisposable, IDisposable, ILogicalDeviceSourceDirectIdsAccessory, ILogicalDeviceSourceDirectRename, ILogicalDeviceSourceDirectMetadata, ILogicalDeviceSourceDirectPid, ILogicalDeviceSourceDirectAccessoryHistoryData, IAccessoryBleDeviceSourceDevices<AwningSensorBleDeviceDriver>
+	{
+	}
+}

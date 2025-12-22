@@ -93,8 +93,8 @@ class ServiceStatusActivity : AppCompatActivity() {
         }
         
         enableOneControlButton.setOnClickListener {
-            ServiceStateManager.enableBlePlugin(this, "onecontrol")
-            statusText.append("\n✅ Enabled OneControl plugin\n")
+            ServiceStateManager.enableBlePlugin(this, "onecontrol_v2")
+            statusText.append("\n✅ Enabled OneControl v2 plugin\n")
             scrollView.post { scrollView.fullScroll(ScrollView.FOCUS_DOWN) }
             updateStatus()
         }

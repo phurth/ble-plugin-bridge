@@ -186,3 +186,81 @@ After implementing the retry logic:
 **Connection:** Stable after retry  
 **Notifications:** Continuous data flow confirmed  
 **Duration:** Monitored for 60+ seconds with no disconnects
+
+---
+
+# UPDATE: December 21, 2025 - Notification Delivery Issue
+
+## Problem Persists
+
+Despite the above fixes, **notifications are still NOT being delivered** to the plugin's callback. The symptom is:
+
+1. Authentication succeeds (gateway returns "Unlocked")
+2. CCCD writes succeed (status=0)
+3. GetDevices commands sent successfully
+4. **NO `onCharacteristicChanged` callbacks fire**
+5. Gateway disconnects after ~8 seconds (status 19 - peer terminated)
+
+## HCI Capture Analysis
+
+Analyzed `/Users/petehurth/Downloads/Decom/android_ble_bridge/hci_capture_12_04_2025.json` (107MB, 2019 notifications captured):
+
+### Working Sequence (Legacy App)
+```
+218.878s: Read challenge from 0x002d: cd:59:a5:7b
+219.018s: KEY write to 0x002f: 30:76:f2:f7
+219.625s: Read "Unlocked" from 0x002d
+222.972s: CCCD write to 0x003a (enable notifications)
+223.022s: FIRST NOTIFICATION from 0x0039 (50ms after CCCD!)
+223.075s: Second notification...
+[2019 notifications follow]
+```
+
+### Key Handle Mapping
+- **Handle 0x0039**: Characteristic 00000034 (Data Read) - receives notifications
+- **Handle 0x003a**: CCCD descriptor for 00000034 - write `0x0001` to enable
+- **Handle 0x002d**: Characteristic 00000012 (UNLOCK_STATUS)
+- **Handle 0x002f**: Characteristic 00000013 (KEY)
+
+### Plugin Observations
+From logcat during plugin connection:
+```
+BtGatt.GattService: got characteristic UUID=00000034 id: 57
+onRegisterForNotifications() - address=null, status=0, registered=1, handle=57
+```
+
+Handle 57 decimal = 0x39 hex = **CORRECT handle!**
+
+## Current Hypothesis
+
+The plugin's notification subscription appears correct at the GATT level:
+- Correct characteristic UUID (00000034)
+- Correct handle (0x39 / 57)
+- `setCharacteristicNotification()` returns true
+- CCCD descriptor write returns status=0
+
+**But `onCharacteristicChanged()` never fires!**
+
+### Possible Causes
+
+1. **Callback Architecture Difference**
+   - Legacy: Anonymous inner object `private val gattCallback = object : BluetoothGattCallback() { ... }`
+   - Plugin: Separate top-level class `class OneControlGattCallback(...) : BluetoothGattCallback()`
+   - Could Android BLE dispatch differently to top-level classes vs anonymous objects?
+
+2. **Context/Reference Issue**
+   - Legacy callback has implicit reference to enclosing Service
+   - Plugin callback is passed context explicitly
+   - Could this affect how Android tracks notification registrations?
+
+3. **GATT Object Identity**
+   - Legacy stores `bluetoothGatt` field immediately after `connectGatt()`
+   - Plugin uses `currentGatt` set in `onConnectionStateChange`
+   - Could there be a subtle timing issue?
+
+## Next Steps to Try
+
+1. Convert plugin callback to anonymous inner object pattern (match legacy exactly)
+2. Add logging to verify `gatt` object identity is consistent across all callbacks
+3. Check if there's a difference in how the CCCD descriptor is obtained/written
+4. Consider if the gateway is rejecting notifications for some protocol reason

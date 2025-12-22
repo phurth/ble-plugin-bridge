@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
+import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,14 +34,16 @@ class PluginRegistry {
     private var outputPlugin: OutputPluginInterface? = null
     
     // Plugin factory map: pluginId -> factory function
-    private val blePluginFactories = mutableMapOf<String, () -> BlePluginInterface>()
+    // NOTE: Factories can return either BlePluginInterface (legacy) or BleDevicePlugin (new)
+    private val blePluginFactories = mutableMapOf<String, () -> Any>()
     private val outputPluginFactories = mutableMapOf<String, () -> OutputPluginInterface>()
     
     /**
      * Register a BLE plugin factory.
      * Factory will be called only when plugin is actually needed.
+     * Can return either BlePluginInterface (legacy) or BleDevicePlugin (new architecture).
      */
-    fun registerBlePlugin(pluginId: String, factory: () -> BlePluginInterface) {
+    fun registerBlePlugin(pluginId: String, factory: () -> Any) {
         blePluginFactories[pluginId] = factory
         Log.d(TAG, "Registered BLE plugin: $pluginId")
     }
@@ -83,6 +86,13 @@ class PluginRegistry {
         try {
             Log.i(TAG, "Loading BLE plugin: $pluginId")
             val plugin = factory()
+            
+            // Check if it's a legacy BlePluginInterface
+            if (plugin !is BlePluginInterface) {
+                Log.w(TAG, "Plugin $pluginId is not a BlePluginInterface (may be BleDevicePlugin - use getDevicePlugin instead)")
+                return@withLock null
+            }
+            
             val result = plugin.initialize(context, config)
             
             if (result.isSuccess) {
@@ -123,9 +133,22 @@ class PluginRegistry {
             
             try {
                 val tempPlugin = factory()
-                if (tempPlugin.canHandleDevice(device, scanRecord)) {
-                    Log.d(TAG, "Device ${device.address} matches plugin: $pluginId (not loaded yet)")
-                    return pluginId
+                
+                // Check if it's a new-style BleDevicePlugin
+                if (tempPlugin is BleDevicePlugin) {
+                    // For now, pass null for scanRecord - matching is done by MAC/name
+                    // TODO: Convert ByteArray to ScanRecord when needed
+                    if (tempPlugin.matchesDevice(device, null)) {
+                        Log.d(TAG, "Device ${device.address} matches device plugin: $pluginId (not loaded yet)")
+                        return pluginId
+                    }
+                }
+                // Check if it's a legacy BlePluginInterface
+                else if (tempPlugin is BlePluginInterface) {
+                    if (tempPlugin.canHandleDevice(device, scanRecord)) {
+                        Log.d(TAG, "Device ${device.address} matches legacy plugin: $pluginId (not loaded yet)")
+                        return pluginId
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error checking plugin $pluginId for device", e)
@@ -179,6 +202,30 @@ class PluginRegistry {
      * Get a specific loaded BLE plugin.
      */
     fun getLoadedBlePlugin(pluginId: String): BlePluginInterface? = loadedBlePlugins[pluginId]
+    
+    /**
+     * Get a BLE device plugin (new architecture) if it implements the interface.
+     * 
+     * @param pluginId The plugin to check
+     * @param context Android context for initialization (will load plugin if needed)
+     * @return The plugin if it implements BleDevicePlugin, null otherwise
+     */
+    fun getDevicePlugin(pluginId: String, context: Context): BleDevicePlugin? {
+        // Check if this plugin is registered and creates a BleDevicePlugin
+        val factory = blePluginFactories[pluginId] ?: return null
+        
+        try {
+            val plugin = factory()
+            return if (plugin is BleDevicePlugin) {
+                plugin
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating device plugin $pluginId", e)
+            return null
+        }
+    }
     
     /**
      * Get all currently loaded BLE plugins.

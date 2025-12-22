@@ -13,7 +13,10 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.blemqttbridge.R
+import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.BlePluginInterface
+import com.blemqttbridge.core.interfaces.MqttPublisher
+import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.*
 import java.util.UUID
@@ -68,6 +71,34 @@ class BaseBleService : Service() {
     private var isScanning = false
     
     /**
+     * MQTT Publisher implementation for plugins.
+     * Wraps the output plugin to provide a clean interface for BLE plugins.
+     */
+    private val mqttPublisher = object : MqttPublisher {
+        override fun publishState(topic: String, payload: String, retained: Boolean) {
+            serviceScope.launch {
+                outputPlugin?.publishState(topic, payload, retained)
+            }
+        }
+        
+        override fun publishDiscovery(topic: String, payload: String) {
+            serviceScope.launch {
+                outputPlugin?.publishDiscovery(topic, payload)
+            }
+        }
+        
+        override fun publishAvailability(topic: String, online: Boolean) {
+            serviceScope.launch {
+                outputPlugin?.publishAvailability(online)
+            }
+        }
+        
+        override fun isConnected(): Boolean {
+            return outputPlugin?.isConnected() ?: false
+        }
+    }
+    
+    /**
      * Clears the internal GATT cache for a device.
      * This is a hidden Android method that resolves status=133 errors caused by stale cached services.
      * Should be called before service discovery when reconnecting to a device.
@@ -119,7 +150,7 @@ class BaseBleService : Service() {
                 ServiceStateManager.setServiceRunning(applicationContext, true)
                 Log.i(TAG, "Service marked as running")
                 
-                val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol"
+                val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol_v2"
                 val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
                 
                 // Load configuration from SharedPreferences
@@ -208,12 +239,20 @@ class BaseBleService : Service() {
             Log.i(TAG, "Remote control manager initialized")
         }
         
-        // Load BLE plugin
+        // Load BLE plugin - support both legacy (BlePluginInterface) and new (BleDevicePlugin) architecture
         blePlugin = pluginRegistry.getBlePlugin(blePluginId, applicationContext, bleConfig)
         if (blePlugin == null) {
-            Log.e(TAG, "Failed to load BLE plugin: $blePluginId")
-            updateNotification("Error: BLE plugin failed to load")
-            return
+            // Plugin might be a BleDevicePlugin (new architecture) - check if it exists
+            val devicePlugin = pluginRegistry.getDevicePlugin(blePluginId, applicationContext)
+            if (devicePlugin == null) {
+                Log.e(TAG, "Failed to load BLE plugin: $blePluginId (not found in registry)")
+                updateNotification("Error: BLE plugin failed to load")
+                return
+            } else {
+                Log.i(TAG, "Loaded device plugin: $blePluginId (new architecture - plugin-owned GATT callback)")
+            }
+        } else {
+            Log.i(TAG, "Loaded legacy plugin: $blePluginId (BlePluginInterface - forwarding callback)")
         }
         
         // Wire up MQTT formatter for OneControl plugin (if output plugin available)
@@ -321,13 +360,10 @@ class BaseBleService : Service() {
                 if (pluginId != null) {
                     Log.i(TAG, "🔗 Found bonded device matching plugin: ${device.address} -> $pluginId")
                     
-                    // Load plugin and connect directly (no scan needed)
+                    // Connect directly (no scan needed) - plugin loading happens in connectToDevice
                     serviceScope.launch {
-                        val plugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
-                        if (plugin != null) {
-                            Log.i(TAG, "🔗 Connecting directly to bonded device ${device.address}")
-                            connectToDevice(device, pluginId)
-                        }
+                        Log.i(TAG, "🔗 Connecting directly to bonded device ${device.address}")
+                        connectToDevice(device, pluginId)
                     }
                     return  // Connect to first matching device
                 }
@@ -464,7 +500,10 @@ class BaseBleService : Service() {
     }
     
     /**
-     * Connect to a BLE device.
+     * Connect to a BLE device using plugin-owned GATT callback.
+     * 
+     * NEW ARCHITECTURE: Plugin provides the BluetoothGattCallback.
+     * This allows device-specific protocols to be fully isolated without forwarding layers.
      */
     private suspend fun connectToDevice(device: BluetoothDevice, pluginId: String) {
         Log.i(TAG, "Connecting to ${device.address} (plugin: $pluginId)")
@@ -486,13 +525,40 @@ class BaseBleService : Service() {
         updateNotification("Connecting to ${device.address}...")
 
         try {
+            // Check if this is a new-style BleDevicePlugin
+            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+            
+            val callback = if (devicePlugin != null) {
+                // NEW: Plugin provides its own callback
+                Log.i(TAG, "Using plugin-owned GATT callback for ${device.address}")
+                
+                // Initialize plugin if needed
+                val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
+                devicePlugin.initialize(applicationContext, config)
+                
+                val onDisconnect: (BluetoothDevice, Int) -> Unit = { dev, status ->
+                    handleDeviceDisconnect(dev, status, pluginId)
+                }
+                
+                devicePlugin.createGattCallback(device, applicationContext, mqttPublisher, onDisconnect)
+            } else {
+                // LEGACY: Use old forwarding callback
+                Log.i(TAG, "Using legacy forwarding GATT callback for ${device.address}")
+                gattCallback
+            }
+            
+            // Use 'this' (Service context) like the legacy app, not applicationContext
             val gatt = device.connectGatt(
-                applicationContext,
+                this,
                 false, // autoConnect = false for faster connection
-                gattCallback,
+                callback,
                 BluetoothDevice.TRANSPORT_LE
             )
+            
             connectedDevices[device.address] = Pair(gatt, pluginId)
+            
+            // Notify plugin of GATT connection
+            devicePlugin?.onGattConnected(device, gatt)
             
             // NOTE: Do NOT call createBond() explicitly here!
             // The legacy app does not call createBond() - it lets the BLE stack
@@ -507,6 +573,30 @@ class BaseBleService : Service() {
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")
+        }
+    }
+    
+    /**
+     * Handle device disconnect (called by plugin-owned callbacks).
+     */
+    private fun handleDeviceDisconnect(device: BluetoothDevice, status: Int, pluginId: String) {
+        Log.i(TAG, "🔌 Device disconnected: ${device.address}, status=$status")
+        
+        connectedDevices.remove(device.address)
+        
+        // Notify plugin
+        val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+        devicePlugin?.onDeviceDisconnected(device)
+        
+        // Publish availability offline
+        mqttPublisher.publishAvailability("${pluginId}/${device.address}/availability", false)
+        
+        // Resume scanning if no devices connected
+        if (connectedDevices.isEmpty()) {
+            serviceScope.launch {
+                delay(1000)
+                startScanning()
+            }
         }
     }
     

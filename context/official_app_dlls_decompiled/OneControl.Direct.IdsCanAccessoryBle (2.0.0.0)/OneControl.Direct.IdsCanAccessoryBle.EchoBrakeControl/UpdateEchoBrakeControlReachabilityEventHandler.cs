@@ -1,0 +1,4 @@
+namespace OneControl.Direct.IdsCanAccessoryBle.EchoBrakeControl
+{
+	public delegate void UpdateEchoBrakeControlReachabilityEventHandler(EchoBrakeControlBleDeviceDriver echoBrakeControlBle);
+}

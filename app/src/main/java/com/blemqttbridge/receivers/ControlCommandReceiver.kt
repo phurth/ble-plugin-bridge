@@ -109,7 +109,7 @@ class ControlCommandReceiver : BroadcastReceiver() {
      * Start the BLE service with specified plugins.
      */
     private fun handleStartService(context: Context, intent: Intent) {
-        val blePlugin = intent.getStringExtra(EXTRA_BLE_PLUGIN) ?: "onecontrol"
+        val blePlugin = intent.getStringExtra(EXTRA_BLE_PLUGIN) ?: "onecontrol_v2"
         val outputPlugin = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN) ?: "mqtt"
         
         logResponse("🚀 Starting service with BLE plugin: $blePlugin, output: $outputPlugin")

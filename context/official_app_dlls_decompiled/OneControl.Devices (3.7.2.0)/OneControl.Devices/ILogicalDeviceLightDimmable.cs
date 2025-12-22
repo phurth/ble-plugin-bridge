@@ -1,0 +1,12 @@
+using System;
+using System.ComponentModel;
+using IDS.Portable.Common;
+using IDS.Portable.LogicalDevice;
+using OneControl.Devices.Interfaces;
+
+namespace OneControl.Devices
+{
+	public interface ILogicalDeviceLightDimmable : ILightDimmable, IAutoOff, ILogicalDeviceSwitchableLight, ILogicalDeviceSwitchable, ILogicalDevice, IComparable, IEquatable<ILogicalDevice>, IComparable<ILogicalDevice>, ICommonDisposable, IDisposable, IDevicesCommon, INotifyPropertyChanged, ISwitchableDevice, ILogicalDeviceSwitchableReadonly, ILogicalDeviceLight, ILogicalDeviceWithStatus, ILogicalDeviceWithStatus<LogicalDeviceLightDimmableStatus>, ILogicalDeviceWithStatusUpdate<LogicalDeviceLightDimmableStatus>, ILogicalDeviceWithStatusExtended<LogicalDeviceLightDimmableStatusExtended>, ILogicalDeviceWithStatusExtended, ILogicalDeviceLightSpeedInterval, ILogicalDeviceDimmableBrightness, IDimmableBrightness, ILogicalDeviceAutoOffSwitchable, ILogicalDeviceAutoOff, ILogicalDeviceCommandable<DimmableLightMode>, ILogicalDeviceCommandable, ICommandable<DimmableLightMode>, ILogicalDeviceCommandable<LogicalDeviceLightSpeedInterval>, ICommandable<LogicalDeviceLightSpeedInterval>
+	{
+	}
+}

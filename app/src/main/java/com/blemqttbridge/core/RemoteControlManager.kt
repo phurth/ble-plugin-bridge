@@ -93,7 +93,7 @@ class RemoteControlManager(
      * Start the BLE service with specified plugin.
      */
     private fun handleStartService(json: JSONObject) {
-        val blePluginId = json.optString("ble_plugin", "onecontrol")
+        val blePluginId = json.optString("ble_plugin", "onecontrol_v2")
         val outputPluginId = json.optString("output_plugin", "mqtt")
         
         Log.i(TAG, "Starting service with BLE plugin: $blePluginId")

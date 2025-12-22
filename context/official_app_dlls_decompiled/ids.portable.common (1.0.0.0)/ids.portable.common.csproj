@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ids.portable.common</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <TargetFramework>netcoreapp8.0</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>8.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemGroup />
+  <ItemGroup>
+    <Reference Include="System.ObjectModel">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.ObjectModel.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Collections">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Collections.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Collections.Concurrent">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Collections.Concurrent.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Security.Cryptography">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Security.Cryptography.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Net.Primitives">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Net.Primitives.dll</HintPath>
+    </Reference>
+    <Reference Include="Serilog">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/Serilog.dll</HintPath>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Threading">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Threading.dll</HintPath>
+    </Reference>
+    <Reference Include="System.ComponentModel.Primitives">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.ComponentModel.Primitives.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Linq">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Linq.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Threading.Thread">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Threading.Thread.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Net.NameResolution">
+      <HintPath>../../../APK_EXPORT/com.lci1.werv.apk/assemblies/out/System.Net.NameResolution.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

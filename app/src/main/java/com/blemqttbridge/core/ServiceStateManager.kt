@@ -97,8 +97,8 @@ object ServiceStateManager {
         val prefs = getPrefs(context)
         // Check if plugins have ever been explicitly set
         if (!prefs.contains(KEY_ENABLED_BLE_PLUGINS)) {
-            // First run - default to onecontrol enabled
-            return setOf("onecontrol")
+            // First run - default to onecontrol_v2 enabled
+            return setOf("onecontrol_v2")
         }
         val csv = prefs.getString(KEY_ENABLED_BLE_PLUGINS, "") ?: ""
         return if (csv.isEmpty()) {

@@ -1,0 +1,13 @@
+using System;
+using IDS.Portable.Common;
+using IDS.Portable.Devices.TPMS;
+using IDS.Portable.LogicalDevice;
+using OneControl.Direct.IdsCanAccessoryBle.Connections;
+
+namespace OneControl.Direct.IdsCanAccessoryBle.TirePressureMonitor
+{
+	public interface ITirePressureMonitorBleDeviceSource : ILogicalDeviceSourceDirectConnection, ILogicalDeviceSourceDirect, ILogicalDeviceSource, ILogicalDeviceSourceConnection, ILogicalDeviceSourceTirePressureMonitor, ILogicalDeviceSourceDirectIdsAccessory, IAccessoryBleDeviceSource<SensorConnectionTirePressureMonitor>, IAccessoryBleDeviceSource, ICommonDisposable, IDisposable, ILogicalDeviceSourceDirectRename, ILogicalDeviceSourceDirectMetadata, IAccessoryBleDeviceSourceDevices<TirePressureMonitorBleDeviceDriver>
+	{
+		ILogicalDeviceTirePressureMonitor? GetTirePressureMonitorLogicalDevice(SensorConnectionTirePressureMonitor connection);
+	}
+}

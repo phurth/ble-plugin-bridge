@@ -1,0 +1,4 @@
+namespace OneControl.Direct.IdsCanAccessoryBle.TirePressureMonitor
+{
+	public delegate void UpdateTirePressureMonitorReachabilityEventHandler(TirePressureMonitorBleDeviceDriver tirePressureMonitorBle);
+}

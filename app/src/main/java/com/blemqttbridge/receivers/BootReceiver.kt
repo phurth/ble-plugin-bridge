@@ -80,7 +80,7 @@ class BootReceiver : BroadcastReceiver() {
             
             val serviceIntent = Intent(context, BaseBleService::class.java).apply {
                 action = BaseBleService.ACTION_START_SCAN
-                putExtra(BaseBleService.EXTRA_BLE_PLUGIN_ID, "onecontrol")
+                putExtra(BaseBleService.EXTRA_BLE_PLUGIN_ID, "onecontrol_v2")
                 putExtra(BaseBleService.EXTRA_OUTPUT_PLUGIN_ID, "mqtt")
             }
             
