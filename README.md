@@ -1,114 +1,129 @@
 # BLE-MQTT Bridge (Android)
 
-Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration for OneControl RV automation systems and other BLE devices.
+Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-## 🚀 Quick Setup Guide
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- **Android Device Requirements:**
-  - Android 8.0 (API 26) or higher
-  - Bluetooth Low Energy (BLE) support
-  - Internet connectivity (WiFi or cellular)
-
-- **Home Assistant:**
-  - MQTT broker configured and accessible from the Android device
-  - MQTT integration enabled in HA
+- **Android Device:** Android 8.0+ with BLE support
+- **MQTT Broker:** Accessible from the Android device (e.g., Mosquitto on Home Assistant)
+- **Home Assistant:** MQTT integration enabled
 
 ### Installation
 
-1. **Download the APK:**
-   - Visit the [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) page
-   - Download the latest APK file
+1. Download the latest APK from [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases)
+2. Enable "Install unknown apps" for your browser/file manager
+3. Install the APK and grant all requested permissions
 
-2. **Install on Android Device:**
-   - Enable "Install unknown apps" for your browser/file manager:
-     - Go to Settings → Apps → [Browser/File Manager] → Install unknown apps → Allow
-   - Open the downloaded APK file and install
-   - Grant all requested permissions when prompted
+### Initial Configuration
 
-3. **Initial Configuration:**
-   - Open the app - all toggles will be OFF by default
-   - Configure MQTT broker settings (expand "Broker Settings")
-   - Configure OneControl gateway MAC address and PIN (expand "Gateway Settings")
-   - Enable MQTT, then OneControl, then BLE Service toggles
+1. Open the app - all toggles will be OFF by default
+2. Configure **MQTT broker settings** (expand "Broker Settings"):
+   - Host, Port, Username, Password
+   - Topic Prefix: `homeassistant` (recommended for auto-discovery)
+3. Configure your **device plugin settings** (see plugin sections below)
+4. Enable toggles in order: **MQTT → Plugin → BLE Service**
 
-### Configuration
+> **Note:** Settings are locked while their toggle is ON. Turn OFF to edit.
 
-**MQTT Settings:**
-- **Host:** Your MQTT broker IP address (e.g., `192.168.1.100`)
-- **Port:** MQTT broker port (default: `1883`)
-- **Username/Password:** Your MQTT broker credentials
-- **Topic Prefix:** `homeassistant` (recommended for auto-discovery)
+### Home Assistant Integration
 
-**OneControl Settings:**
-- **Gateway MAC Address:** Your OneControl gateway's Bluetooth MAC address
-- **Gateway PIN:** Your OneControl PIN (found in the OneControl app)
+Once connected, devices are automatically discovered via MQTT auto-discovery:
 
-> **Note:** Settings are locked while their respective toggle is ON. Turn the toggle OFF to edit settings.
-
-### Pairing the Gateway
-
-1. **Put Gateway in Pairing Mode:**
-   - If the gateway is paired with another device, you may need to unpair it first
-   - Follow your RV's OneControl documentation to enter pairing mode if needed
-
-2. **Accept Pairing Request:**
-   - The app will detect the gateway and show a pairing dialog
-   - Accept the pairing request and enter the PIN if prompted
-
-3. **Verify Connection:**
-   - Status indicators will turn green: BLE → Data → Paired
-   - Check your MQTT broker for topics under `homeassistant/`
-
-### Home Assistant Setup
-
-Once connected, devices are automatically discovered by Home Assistant via MQTT auto-discovery. You'll see:
-
-- **Switches** - Binary relays and latching switches
-- **Lights** - Dimmable lights with brightness control
-- **Covers** - Awnings and slides
+- **Switches** - Binary relays
+- **Lights** - Dimmable with brightness control
+- **Covers** - Slides and awnings
 - **Sensors** - Temperature, voltage, tank levels
-- **Binary Sensors** - Diagnostic status indicators
+- **Binary Sensors** - Diagnostic indicators
 
-#### Optional: App Availability Monitoring
+---
 
-Add to `configuration.yaml`:
-```yaml
-mqtt:
-  binary_sensor:
-    - name: "BLE Bridge Availability"
-      state_topic: "homeassistant/ble_bridge/availability"
-      payload_on: "online"
-      payload_off: "offline"
-      device_class: connectivity
-```
-
-## 📦 Supported Devices
+## 📦 Plugins
 
 ### OneControl Gateway (LCI/Lippert)
-- **Switches** - Binary relays and latching switches
-- **Dimmable Lights** - Full 0-255 brightness control
-- **Covers** - Awnings, slides (bidirectional control)
-- **Sensors** - Temperature, voltage, tank levels
-- **HVAC** - Status monitoring
+
+The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in RVs.
+
+#### ⚠️ IMPORTANT: Pair Before Running
+
+**The OneControl gateway must be paired to your Android device via Bluetooth Settings BEFORE enabling the plugin.** The app will not initiate pairing automatically.
+
+**Pairing Steps:**
+
+1. **Unpair from other devices:** If the gateway is currently paired with a phone or tablet running the official OneControl app, unpair it first (Settings → Bluetooth → Forget Device on that device)
+
+2. **Pair via Android Bluetooth Settings:**
+   - Go to Android **Settings → Bluetooth**
+   - Ensure Bluetooth is ON
+   - The gateway should appear as "OneControl" or similar
+   - Tap to pair - enter your gateway PIN if prompted
+   - Wait for "Paired" status to appear
+
+3. **Configure the plugin:**
+   - In the BLE-MQTT Bridge app, expand "Gateway Settings"
+   - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing)
+   - Enter your **Gateway PIN** (same PIN used in the official OneControl app)
+
+4. **Enable the plugin:**
+   - Turn ON the **OneControl** toggle
+   - Turn ON the **BLE Service** toggle
+   - Status indicators should turn green: BLE → Data → Paired
+
+#### Supported Devices
+
+| Device Type | HA Entity | Features |
+|-------------|-----------|----------|
+| Switches | `switch` | ON/OFF control |
+| Dimmable Lights | `light` | Brightness 0-255 |
+| Covers/Slides/Awnings | `cover` | Open/Close/Stop |
+| Tank Sensors | `sensor` | Fill level % |
+| System Voltage | `sensor` | Battery voltage |
+| System Temperature | `sensor` | Internal temp |
+| HVAC | `sensor` | Status monitoring |
+
+#### Troubleshooting
+
+- **Connection fails:** Ensure the gateway is paired in Android Bluetooth settings first
+- **No devices appear:** The app sends a GetDevices command on connect - check MQTT logs
+- **Status 133 errors:** Try unpairing and re-pairing the gateway
+
+---
 
 ### BLE Scanner Plugin
-- Scan for nearby BLE devices
-- Results published to Home Assistant as sensor attributes
-- Useful for discovering device MAC addresses
+
+A utility plugin that scans for nearby BLE devices and publishes results to MQTT.
+
+#### Use Cases
+
+- Discovering MAC addresses of BLE devices
+- Monitoring BLE device presence
+- Debugging BLE connectivity issues
+
+#### Configuration
+
+Enable via the **BLE Scanner** toggle. Results are published as sensor attributes in Home Assistant.
+
+---
 
 ## 🏗️ Architecture
-
-The app uses a plugin-based architecture where each BLE device type is handled by a dedicated plugin:
 
 ```
 BaseBleService (foreground service)
   ├─> MqttOutputPlugin (MQTT connection & publishing)
-  ├─> OneControlDevicePlugin (OneControl gateway)
-  │    └─> BLE connection, authentication, command handling
-  └─> BleScannerPlugin (BLE device discovery)
+  ├─> OneControlDevicePlugin (RV automation)
+  │    └─> Plugin-owned GATT callback for protocol handling
+  └─> BleScannerPlugin (device discovery)
 ```
+
+Each BLE device plugin:
+- Owns its `BluetoothGattCallback` completely
+- Handles authentication, framing, and protocol specifics
+- Publishes state via the `MqttPublisher` interface
+
+See [docs/INTERNALS.md](docs/INTERNALS.md) for detailed architecture documentation.
+
+---
 
 ## 🔧 Development
 
@@ -129,18 +144,20 @@ adb logcat -s BaseBleService:I OneControlDevice:I MqttOutputPlugin:I
 mosquitto_sub -h <broker> -u mqtt -P mqtt -t "homeassistant/#" -v
 ```
 
-## System Requirements
+### System Requirements
 
 - **Android:** API 26+ (Android 8.0+)
 - **Permissions:** Bluetooth, Location (for BLE scanning), Notifications
-- **MQTT Broker:** Any MQTT 3.1.1 compatible broker (Mosquitto recommended)
+- **MQTT Broker:** Any MQTT 3.1.1 compatible broker
+
+---
 
 ## To Do
 
-- Additional BLE device plugins
-- Cover position control improvements
-- HVAC control commands
-- Effects support for dimmable lights
+- [ ] Additional BLE device plugins
+- [ ] Cover position tracking
+- [ ] HVAC control commands
+- [ ] Light effects support
 
 ## License
 
