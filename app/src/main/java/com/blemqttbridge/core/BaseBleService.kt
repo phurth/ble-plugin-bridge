@@ -18,6 +18,7 @@ import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
+import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
 import kotlinx.coroutines.*
 import java.util.UUID
 
@@ -69,6 +70,7 @@ class BaseBleService : Service() {
     private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
     private var remoteControlManager: RemoteControlManager? = null
+    private var bleScannerPlugin: BleScannerPlugin? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
     private val connectedDevices = mutableMapOf<String, Pair<BluetoothGatt, String>>()
@@ -117,16 +119,29 @@ class BaseBleService : Service() {
         }
         
         override fun updateDiagnosticStatus(dataHealthy: Boolean) {
+            Log.i(TAG, "📊 updateDiagnosticStatus: dataHealthy=$dataHealthy (was ${_dataHealthy.value})")
             _dataHealthy.value = dataHealthy
         }
         
         override fun updateBleStatus(connected: Boolean, paired: Boolean) {
+            Log.i(TAG, "📊 updateBleStatus: connected=$connected, paired=$paired (was ble=${_bleConnected.value}, paired=${_devicePaired.value})")
             _bleConnected.value = connected
             _devicePaired.value = paired
         }
         
         override fun updateMqttStatus(connected: Boolean) {
+            Log.i(TAG, "📊 updateMqttStatus: connected=$connected (was ${_mqttConnected.value})")
             _mqttConnected.value = connected
+        }
+        
+        override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
+            serviceScope.launch {
+                try {
+                    outputPlugin?.subscribeToCommands(topicPattern, callback)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to subscribe to commands: $topicPattern", e)
+                }
+            }
         }
     }
     
@@ -247,6 +262,10 @@ class BaseBleService : Service() {
         remoteControlManager?.cleanup()
         remoteControlManager = null
         
+        // Cleanup BLE Scanner plugin
+        bleScannerPlugin?.cleanup()
+        bleScannerPlugin = null
+        
         serviceScope.launch {
             pluginRegistry.cleanup()
             serviceScope.cancel()
@@ -284,6 +303,15 @@ class BaseBleService : Service() {
             remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
             remoteControlManager?.initialize(outputPlugin!!)
             Log.i(TAG, "Remote control manager initialized")
+            
+            // Initialize BLE Scanner plugin (PoC)
+            bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+            if (bleScannerPlugin?.initialize() == true) {
+                Log.i(TAG, "BLE Scanner plugin initialized")
+            } else {
+                Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                bleScannerPlugin = null
+            }
         }
         
         // Load BLE plugin - support both legacy (BlePluginInterface) and new (BleDevicePlugin) architecture

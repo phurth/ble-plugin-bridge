@@ -81,4 +81,13 @@ interface MqttPublisher {
      * @param connected Whether MQTT broker is connected
      */
     fun updateMqttStatus(connected: Boolean)
+    
+    /**
+     * Subscribe to command topics.
+     * Used by plugins to receive commands from Home Assistant.
+     * 
+     * @param topicPattern Topic pattern (relative to topic prefix)
+     * @param callback Called when a message arrives on the topic
+     */
+    fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit)
 }

@@ -31,6 +31,9 @@ class AppSettings(private val context: Context) {
         val ONECONTROL_GATEWAY_MAC = stringPreferencesKey("onecontrol_gateway_mac")
         val ONECONTROL_GATEWAY_PIN = stringPreferencesKey("onecontrol_gateway_pin")
         
+        // BLE Scanner Plugin Settings
+        val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
+        
         // Default values
         const val DEFAULT_MQTT_HOST = "10.115.19.131"
         const val DEFAULT_MQTT_PORT = 1883
@@ -42,7 +45,7 @@ class AppSettings(private val context: Context) {
     }
     
     // MQTT Settings Flows
-    val mqttEnabled: Flow<Boolean> = context.dataStore.data.map { it[MQTT_ENABLED] ?: true }
+    val mqttEnabled: Flow<Boolean> = context.dataStore.data.map { it[MQTT_ENABLED] ?: false }
     val mqttBrokerHost: Flow<String> = context.dataStore.data.map { it[MQTT_BROKER_HOST] ?: DEFAULT_MQTT_HOST }
     val mqttBrokerPort: Flow<Int> = context.dataStore.data.map { it[MQTT_BROKER_PORT] ?: DEFAULT_MQTT_PORT }
     val mqttUsername: Flow<String> = context.dataStore.data.map { it[MQTT_USERNAME] ?: DEFAULT_MQTT_USERNAME }
@@ -50,12 +53,15 @@ class AppSettings(private val context: Context) {
     val mqttTopicPrefix: Flow<String> = context.dataStore.data.map { it[MQTT_TOPIC_PREFIX] ?: DEFAULT_TOPIC_PREFIX }
     
     // Service Settings Flows
-    val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { it[SERVICE_ENABLED] ?: true }
+    val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { it[SERVICE_ENABLED] ?: false }
     
     // OneControl Plugin Flows
-    val oneControlEnabled: Flow<Boolean> = context.dataStore.data.map { it[ONECONTROL_ENABLED] ?: true }
+    val oneControlEnabled: Flow<Boolean> = context.dataStore.data.map { it[ONECONTROL_ENABLED] ?: false }
     val oneControlGatewayMac: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_MAC] ?: DEFAULT_GATEWAY_MAC }
     val oneControlGatewayPin: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_PIN] ?: DEFAULT_GATEWAY_PIN }
+    
+    // BLE Scanner Plugin Flows
+    val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
     
     // Update functions
     suspend fun setMqttEnabled(enabled: Boolean) {
@@ -96,5 +102,9 @@ class AppSettings(private val context: Context) {
     
     suspend fun setOneControlGatewayPin(pin: String) {
         context.dataStore.edit { it[ONECONTROL_GATEWAY_PIN] = pin }
+    }
+    
+    suspend fun setBleScannerEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[BLE_SCANNER_ENABLED] = enabled }
     }
 }

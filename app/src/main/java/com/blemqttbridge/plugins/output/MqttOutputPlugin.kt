@@ -53,13 +53,21 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             Log.i(TAG, "Initializing MQTT client: $brokerUrl (client: $clientId)")
             
             mqttClient = MqttAndroidClient(context, brokerUrl, clientId).apply {
-                setCallback(object : MqttCallback {
+                setCallback(object : MqttCallbackExtended {
                     override fun connectionLost(cause: Throwable?) {
                         Log.w(TAG, "MQTT connection lost", cause)
                         connectionStatusListener?.onConnectionStatusChanged(false)
                         Log.i(TAG, "Automatic reconnect will be attempted...")
-                        // Re-subscribe to topics after reconnection
-                        resubscribeAll()
+                    }
+                    
+                    override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+                        if (reconnect) {
+                            Log.i(TAG, "MQTT reconnected to $serverURI")
+                            // Re-publish online status and re-subscribe after reconnect
+                            onMqttConnected()
+                            resubscribeAll()
+                            connectionStatusListener?.onConnectionStatusChanged(true)
+                        }
                     }
                     
                     override fun messageArrived(topic: String, message: MqttMessage) {
@@ -180,23 +188,33 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
      * Publishes "online" to availability topic and discovery payload.
      */
     private fun onMqttConnected() {
+        Log.i(TAG, "🔌 onMqttConnected() called - publishing online status")
         try {
-            val client = mqttClient ?: return
+            val client = mqttClient
+            if (client == null) {
+                Log.e(TAG, "❌ onMqttConnected: mqttClient is null!")
+                return
+            }
+            if (!client.isConnected) {
+                Log.e(TAG, "❌ onMqttConnected: client not connected!")
+                return
+            }
             
             // Publish "online" to availability topic (clears LWT "offline")
             val availTopic = "$_topicPrefix/$AVAILABILITY_TOPIC"
+            Log.i(TAG, "📡 Publishing 'online' to topic: $availTopic")
             val onlineMessage = MqttMessage("online".toByteArray()).apply {
                 qos = QOS
                 isRetained = true
             }
             client.publish(availTopic, onlineMessage)
-            Log.i(TAG, "📡 Published availability: online")
+            Log.i(TAG, "✅ Published availability: online to $availTopic")
             
             // Publish HA discovery for availability binary sensor
             publishAvailabilityDiscovery()
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error in onMqttConnected", e)
+            Log.e(TAG, "❌ Error in onMqttConnected", e)
         }
     }
     
@@ -253,26 +271,46 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     override fun isConnected(): Boolean {
-        return mqttClient?.isConnected == true
+        return try {
+            mqttClient?.isConnected == true
+        } catch (e: Exception) {
+            Log.w(TAG, "Error checking isConnected: ${e.message}")
+            false
+        }
     }
     
     override fun getConnectionStatus(): String {
-        return when {
-            mqttClient == null -> "Not initialized"
-            mqttClient?.isConnected == true -> "Connected"
-            else -> "Disconnected"
+        return try {
+            when {
+                mqttClient == null -> "Not initialized"
+                mqttClient?.isConnected == true -> "Connected"
+                else -> "Disconnected"
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting connection status: ${e.message}")
+            "Error"
         }
     }
     
     /**
      * Internal publish helper with suspending coroutine.
+     * Fails gracefully without throwing exceptions to prevent crashes.
      */
     private suspend fun publish(topic: String, payload: String, retained: Boolean) = suspendCancellableCoroutine<Unit> { continuation ->
         try {
             val client = mqttClient
-            if (client == null || !client.isConnected) {
-                Log.w(TAG, "Cannot publish - MQTT not connected")
-                continuation.resumeWithException(Exception("MQTT not connected"))
+            
+            // Check if client is connected - wrap in try-catch as isConnected can throw
+            val connected = try {
+                client != null && client.isConnected
+            } catch (e: Exception) {
+                Log.w(TAG, "Error checking MQTT connection state: ${e.message}")
+                false
+            }
+            
+            if (!connected) {
+                Log.w(TAG, "Cannot publish - MQTT not connected, skipping: $topic")
+                continuation.resume(Unit) // Don't throw, just skip
                 return@suspendCancellableCoroutine
             }
             
@@ -281,23 +319,21 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 isRetained = retained
             }
             
-            client.publish(topic, message, null, object : IMqttActionListener {
+            client!!.publish(topic, message, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     Log.d(TAG, "Published: $topic (${payload.length} bytes, retained=$retained)")
                     continuation.resume(Unit)
                 }
                 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "Publish failed: $topic", exception)
-                    continuation.resumeWithException(
-                        exception ?: Exception("Publish failed")
-                    )
+                    Log.w(TAG, "Publish failed: $topic - ${exception?.message}")
+                    continuation.resume(Unit) // Don't throw, just log
                 }
             })
             
         } catch (e: Exception) {
-            Log.e(TAG, "Publish error", e)
-            continuation.resumeWithException(e)
+            Log.e(TAG, "Publish error: ${e.message}")
+            continuation.resume(Unit) // Don't throw, just log
         }
     }
     

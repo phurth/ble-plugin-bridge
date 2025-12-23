@@ -10,11 +10,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
@@ -50,14 +54,22 @@ fun SettingsScreen(
     val oneControlGatewayMac by viewModel.oneControlGatewayMac.collectAsState()
     val oneControlGatewayPin by viewModel.oneControlGatewayPin.collectAsState()
     
+    val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
+    
     val mqttExpanded by viewModel.mqttExpanded.collectAsState()
     val oneControlExpanded by viewModel.oneControlExpanded.collectAsState()
+    val bleScannerExpanded by viewModel.bleScannerExpanded.collectAsState()
+    val showPluginPicker by viewModel.showPluginPicker.collectAsState()
     
     // Status flows
     val bleConnected by viewModel.bleConnectedStatus.collectAsState()
     val dataHealthy by viewModel.dataHealthyStatus.collectAsState()
     val devicePaired by viewModel.devicePairedStatus.collectAsState()
     val mqttConnected by viewModel.mqttConnectedStatus.collectAsState()
+    
+    // Confirmation dialog state
+    var showRemoveConfirmation by remember { mutableStateOf(false) }
+    var pluginToRemove by remember { mutableStateOf<String?>(null) }
     
     Scaffold(
         topBar = {
@@ -95,7 +107,7 @@ fun SettingsScreen(
                 ) {
                     Column {
                         Text(
-                            text = "Service",
+                            text = "BLE Service",
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Text(
@@ -218,11 +230,11 @@ fun SettingsScreen(
                         )
                     }
                     
-                    // MQTT Settings (expandable, inside the card)
+                    // MQTT Settings (always visible, locked when enabled)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    
+                    // MQTT Status Indicator (only show when enabled)
                     if (mqttEnabled) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // MQTT Status Indicator
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -236,57 +248,62 @@ fun SettingsScreen(
                         }
                         
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                    
+                    ExpandableSection(
+                        title = "Broker Settings",
+                        expanded = mqttExpanded,
+                        onToggle = { viewModel.toggleMqttExpanded() },
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = mqttBrokerHost,
+                            onValueChange = { viewModel.setMqttBrokerHost(it) },
+                            label = { Text("Host", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !mqttEnabled
+                        )
                         
-                        ExpandableSection(
-                            title = "Broker Settings",
-                            expanded = mqttExpanded,
-                            onToggle = { viewModel.toggleMqttExpanded() },
-                            modifier = Modifier.padding(top = 2.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = mqttBrokerHost,
-                                onValueChange = { viewModel.setMqttBrokerHost(it) },
-                                label = { Text("Host", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            
-                            OutlinedTextField(
-                                value = mqttBrokerPort.toString(),
-                                onValueChange = { 
-                                    it.toIntOrNull()?.let { port -> viewModel.setMqttBrokerPort(port) }
-                                },
-                                label = { Text("Port", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            
-                            OutlinedTextField(
-                                value = mqttUsername,
-                                onValueChange = { viewModel.setMqttUsername(it) },
-                                label = { Text("Username", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            
-                            OutlinedTextField(
-                                value = mqttPassword,
-                                onValueChange = { viewModel.setMqttPassword(it) },
-                                label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            
-                            OutlinedTextField(
-                                value = mqttTopicPrefix,
-                                onValueChange = { viewModel.setMqttTopicPrefix(it) },
-                                label = { Text("Topic Prefix", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
+                        OutlinedTextField(
+                            value = mqttBrokerPort.toString(),
+                            onValueChange = { 
+                                it.toIntOrNull()?.let { port -> viewModel.setMqttBrokerPort(port) }
+                            },
+                            label = { Text("Port", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !mqttEnabled
+                        )
+                        
+                        OutlinedTextField(
+                            value = mqttUsername,
+                            onValueChange = { viewModel.setMqttUsername(it) },
+                            label = { Text("Username", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !mqttEnabled
+                        )
+                        
+                        OutlinedTextField(
+                            value = mqttPassword,
+                            onValueChange = { viewModel.setMqttPassword(it) },
+                            label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !mqttEnabled
+                        )
+                        
+                        OutlinedTextField(
+                            value = mqttTopicPrefix,
+                            onValueChange = { viewModel.setMqttTopicPrefix(it) },
+                            label = { Text("Topic Prefix", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !mqttEnabled
+                        )
                     }
                 }
             }
@@ -296,10 +313,10 @@ fun SettingsScreen(
             // Plugins Section
             SectionHeader("Plugins")
             
-            // Add Plugin Button (disabled)
+            // Add Plugin Button
             OutlinedButton(
-                onClick = { },
-                enabled = false,
+                onClick = { viewModel.showPluginPicker() },
+                enabled = true,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(32.dp)
@@ -313,6 +330,51 @@ fun SettingsScreen(
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("Add Plugin", style = MaterialTheme.typography.bodySmall)
+            }
+            
+            // Plugin Picker Dialog
+            if (showPluginPicker) {
+                PluginPickerDialog(
+                    onDismiss = { viewModel.hidePluginPicker() },
+                    onPluginSelected = { viewModel.addPlugin(it) },
+                    enabledPlugins = listOf(
+                        if (oneControlEnabled) "onecontrol" else null,
+                        if (bleScannerEnabled) "ble_scanner" else null
+                    ).filterNotNull()
+                )
+            }
+            
+            // Remove Plugin Confirmation Dialog
+            if (showRemoveConfirmation && pluginToRemove != null) {
+                AlertDialog(
+                    onDismissRequest = { 
+                        showRemoveConfirmation = false
+                        pluginToRemove = null
+                    },
+                    title = { Text("Remove Plugin") },
+                    text = { Text("Are you sure you want to remove this plugin?") },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                pluginToRemove?.let { viewModel.removePlugin(it) }
+                                showRemoveConfirmation = false
+                                pluginToRemove = null
+                            }
+                        ) {
+                            Text("Remove", color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                showRemoveConfirmation = false
+                                pluginToRemove = null
+                            }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
             }
             
             // OneControl Plugin
@@ -346,10 +408,11 @@ fun SettingsScreen(
                         )
                     }
                     
+                    // Settings always visible, status indicators only when enabled
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    
+                    // Status Indicators (only visible when enabled)
                     if (oneControlEnabled) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // Status Indicators (visible when enabled, outside expandable section)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -371,28 +434,94 @@ fun SettingsScreen(
                         }
                         
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                    
+                    ExpandableSection(
+                        title = "Gateway Settings",
+                        expanded = oneControlExpanded,
+                        onToggle = { viewModel.toggleOneControlExpanded() },
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = oneControlGatewayMac,
+                            onValueChange = { viewModel.setOneControlGatewayMac(it) },
+                            label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !oneControlEnabled
+                        )
                         
+                        OutlinedTextField(
+                            value = oneControlGatewayPin,
+                            onValueChange = { viewModel.setOneControlGatewayPin(it) },
+                            label = { Text("PIN", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !oneControlEnabled
+                        )
+                    }
+                }
+            }
+            
+            // BLE Scanner Plugin (only show if enabled)
+            if (bleScannerEnabled) {
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "BLE Scanner",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "Scan for nearby BLE devices",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { 
+                                        pluginToRemove = "ble_scanner"
+                                        showRemoveConfirmation = true
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove plugin",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        
+                        // Info section
                         ExpandableSection(
-                            title = "Gateway Settings",
-                            expanded = oneControlExpanded,
-                            onToggle = { viewModel.toggleOneControlExpanded() },
+                            title = "Info",
+                            expanded = bleScannerExpanded,
+                            onToggle = { viewModel.toggleBleScannerExpanded() },
                             modifier = Modifier.padding(top = 2.dp)
                         ) {
-                            OutlinedTextField(
-                                value = oneControlGatewayMac,
-                                onValueChange = { viewModel.setOneControlGatewayMac(it) },
-                                label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            
-                            OutlinedTextField(
-                                value = oneControlGatewayPin,
-                                onValueChange = { viewModel.setOneControlGatewayPin(it) },
-                                label = { Text("PIN", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.fillMaxWidth()
+                            Text(
+                                text = "Press the 'Start Scan' button in Home Assistant to scan for 60 seconds. Results will appear in the 'Devices Found' sensor attributes.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 4.dp)
                             )
                         }
                     }
@@ -401,6 +530,67 @@ fun SettingsScreen(
         }
     }
 }
+
+@Composable
+private fun PluginPickerDialog(
+    onDismiss: () -> Unit,
+    onPluginSelected: (String) -> Unit,
+    enabledPlugins: List<String>
+) {
+    // Available plugins (could be moved to a registry later)
+    val availablePlugins = listOf(
+        PluginInfo("onecontrol", "OneControl", "LCI/Lippert RV control system"),
+        PluginInfo("ble_scanner", "BLE Scanner", "Scan for nearby BLE devices")
+    )
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Plugin") },
+        text = {
+            Column {
+                availablePlugins.forEach { plugin ->
+                    val isEnabled = enabledPlugins.contains(plugin.id)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !isEnabled) { 
+                                if (!isEnabled) onPluginSelected(plugin.id) 
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = plugin.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = if (isEnabled) "Already added" else plugin.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (plugin != availablePlugins.last()) {
+                        HorizontalDivider()
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+private data class PluginInfo(
+    val id: String,
+    val name: String,
+    val description: String
+)
 
 @Composable
 private fun SectionHeader(text: String) {

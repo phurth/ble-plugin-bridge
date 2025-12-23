@@ -108,3 +108,23 @@ hci_capture*.json
 # Test results
 test-results/
 androidTest-results/
+
+# Decompiled/proprietary code (DO NOT COMMIT)
+**/decompiled*/
+**/official_app*/
+context/
+archive/
+
+# Documentation (keeping README only for public repo)
+docs/
+ADB_CONTROL_GUIDE.md
+AUTHENTICATION_ALGORITHM.md
+CHANGELOG.md
+CURRENT_STATUS.md
+MQTT_SETUP_GUIDE.md
+REMOTE_CONTROL_API.md
+REMOTE_CONTROL_QUICKSTART.md
+REMOTE_CONTROL_TESTING.md
+TESTING.md
+UI_IMPLEMENTATION.md
+*.sh
