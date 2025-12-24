@@ -1240,18 +1240,24 @@ class OneControlGattCallback(
         val rawOutputState = statusByte and 0x0F  // State is in LOW NIBBLE
         val isOn = rawOutputState == 0x01  // 0x01 = ON, 0x00 = OFF
         
-        Log.i(TAG, "📦 Relay $tableId:$deviceId statusByte=0x%02X rawOutput=0x%02X state=$isOn".format(statusByte, rawOutputState))
-        
-        val keyHex = "%02x%02x".format(tableId, deviceId)
-        publishEntityState(
-            entityType = EntityType.SWITCH,
+        // Create entity instance
+        val entity = OneControlEntity.Switch(
             tableId = tableId,
             deviceId = deviceId,
-            discoveryKey = "switch_$keyHex",
-            state = mapOf("state" to if (isOn) "ON" else "OFF")
+            isOn = isOn
+        )
+        
+        Log.i(TAG, "📦 Relay ${entity.address} statusByte=0x%02X rawOutput=0x%02X state=${entity.state}".format(statusByte, rawOutputState))
+        
+        publishEntityState(
+            entityType = EntityType.SWITCH,
+            tableId = entity.tableId,
+            deviceId = entity.deviceId,
+            discoveryKey = "switch_${entity.key}",
+            state = mapOf("state" to entity.state)
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
-            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-            val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
+            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+            val commandTopic = "$baseTopic/command/switch/${entity.tableId}/${entity.deviceId}"
             discoveryBuilder.buildSwitch(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
@@ -1272,60 +1278,64 @@ class OneControlGattCallback(
         val deviceId = data[2].toInt() and 0xFF
         val modeByte = data[3].toInt() and 0xFF  // Mode byte: 0=Off, 1=On, 2=Blink, 3=Swell
         val brightness = data[4].toInt() and 0xFF  // Brightness: 0-255
-        val isOn = modeByte > 0  // Light is ON if mode > 0
         
-        val key = "$tableId:$deviceId"
+        // Create entity instance
+        val entity = OneControlEntity.DimmableLight(
+            tableId = tableId,
+            deviceId = deviceId,
+            brightness = brightness,
+            mode = modeByte
+        )
         
-        Log.i(TAG, "📦 Dimmable $tableId:$deviceId brightness=$brightness mode=$modeByte")
+        Log.i(TAG, "📦 Dimmable ${entity.address} brightness=${entity.brightness} mode=${entity.mode}")
         
         // Pending guard: suppress mismatching status updates while a command is pending
         // This prevents the UI from bouncing back to old values during dimmer adjustment
-        val pending = pendingDimmable[key]
+        val pending = pendingDimmable[entity.address]
         val now = System.currentTimeMillis()
         if (pending != null) {
             val (desired, ts) = pending
             val age = now - ts
             if (age <= DIMMER_PENDING_WINDOW_MS) {
                 // If reported brightness doesn't match desired, or mode is off when we want on, ignore
-                if (brightness != desired || (modeByte == 0 && desired > 0)) {
-                    Log.d(TAG, "🚫 Ignoring dimmer mismatch during pending window: reported=$brightness desired=$desired age=${age}ms")
+                if (entity.brightness != desired || (entity.mode == 0 && desired > 0)) {
+                    Log.d(TAG, "🚫 Ignoring dimmer mismatch during pending window: reported=${entity.brightness} desired=$desired age=${age}ms")
                     return  // Don't publish this status update
                 }
             }
             // Clear pending once we accept matching status or after the window expires
-            pendingDimmable.remove(key)
+            pendingDimmable.remove(entity.address)
         }
         
         // Spurious status guard: Gateway sometimes sends brightness=0 status updates even when light is on
         // Ignore these if we have a last known brightness > 0 (light should be on)
-        val lastKnown = lastKnownDimmableBrightness[key]
-        Log.d(TAG, "Spurious check: brightness=$brightness mode=$modeByte lastKnown=$lastKnown")
-        if (brightness == 0 && modeByte == 0 && lastKnown != null && lastKnown > 0) {
+        val lastKnown = lastKnownDimmableBrightness[entity.address]
+        Log.d(TAG, "Spurious check: brightness=${entity.brightness} mode=${entity.mode} lastKnown=$lastKnown")
+        if (entity.brightness == 0 && entity.mode == 0 && lastKnown != null && lastKnown > 0) {
             Log.i(TAG, "🚫 Ignoring spurious off-state status (last known=$lastKnown)")
             return  // Don't publish this spurious update
         }
         
         // Track last known brightness for restore-on-ON feature
         // Only update when we receive non-zero brightness (never clear from status updates)
-        if (brightness > 0) {
-            lastKnownDimmableBrightness[key] = brightness
+        if (entity.brightness > 0) {
+            lastKnownDimmableBrightness[entity.address] = entity.brightness
         }
         
         // Use centralized publishing for discovery and state
-        val keyHex = "%02x%02x".format(tableId, deviceId)
         publishEntityState(
             entityType = EntityType.LIGHT,
-            tableId = tableId,
-            deviceId = deviceId,
-            discoveryKey = "light_$keyHex",
+            tableId = entity.tableId,
+            deviceId = entity.deviceId,
+            discoveryKey = "light_${entity.key}",
             state = mapOf(
-                "state" to if (isOn) "ON" else "OFF",
-                "brightness" to brightness.toString()
+                "state" to entity.state,
+                "brightness" to entity.brightness.toString()
             )
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
-            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-            val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
-            val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
+            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+            val brightnessTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/brightness"
+            val commandTopic = "$baseTopic/command/dimmable/${entity.tableId}/${entity.deviceId}"
             discoveryBuilder.buildDimmableLight(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
@@ -1365,17 +1375,23 @@ class OneControlGattCallback(
         val deviceId = data[2].toInt() and 0xFF
         val level = data[3].toInt() and 0xFF
         
-        Log.i(TAG, "📦 Tank $tableId:$deviceId level=$level%")
-        
-        val keyHex = "%02x%02x".format(tableId, deviceId)
-        publishEntityState(
-            entityType = EntityType.TANK_SENSOR,
+        // Create entity instance
+        val entity = OneControlEntity.Tank(
             tableId = tableId,
             deviceId = deviceId,
-            discoveryKey = "tank_$keyHex",
-            state = mapOf("level" to level.toString())
+            level = level
+        )
+        
+        Log.i(TAG, "📦 Tank ${entity.address} level=${entity.level}%")
+        
+        publishEntityState(
+            entityType = EntityType.TANK_SENSOR,
+            tableId = entity.tableId,
+            deviceId = entity.deviceId,
+            discoveryKey = "tank_${entity.key}",
+            state = mapOf("level" to entity.level.toString())
         ) { friendlyName, _, prefix, baseTopic ->
-            val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
             discoveryBuilder.buildSensor(
                 sensorName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
@@ -1467,27 +1483,26 @@ class OneControlGattCallback(
         val status = data[3].toInt() and 0xFF
         val position = if (data.size > 4) data[4].toInt() and 0xFF else 0xFF
         
-        Log.i(TAG, "📦 HBridge (cover) $tableId:$deviceId status=0x${status.toString(16)} position=$position (${data.size} bytes, raw=${data.joinToString(" ") { "%02X".format(it) }})")
-        
-        // Map status to HA cover state
-        // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
-        // Motors rely on operator judgment - remote control is unsafe. Exposing as state sensor only.
-        val haState = when (status) {
-            0xC2 -> "opening"   // Extending
-            0xC3 -> "closing"   // Retracting  
-            0xC0 -> "stopped"   // Stopped - could track last direction for open/closed
-            else -> "unknown"
-        }
-        
-        val keyHex = "%02x%02x".format(tableId, deviceId)
-        publishEntityState(
-            entityType = EntityType.COVER_SENSOR,
+        // Create entity instance
+        val entity = OneControlEntity.Cover(
             tableId = tableId,
             deviceId = deviceId,
-            discoveryKey = "cover_state_$keyHex",
-            state = mapOf("state" to haState)
+            status = status,
+            position = position
+        )
+        
+        Log.i(TAG, "📦 HBridge (cover) ${entity.address} status=0x${status.toString(16)} position=$position haState=${entity.haState} (${data.size} bytes, raw=${data.joinToString(" ") { "%02X".format(it) }})")
+        
+        // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
+        // Motors rely on operator judgment - remote control is unsafe. Exposing as state sensor only.
+        publishEntityState(
+            entityType = EntityType.COVER_SENSOR,
+            tableId = entity.tableId,
+            deviceId = entity.deviceId,
+            discoveryKey = "cover_state_${entity.key}",
+            state = mapOf("state" to entity.haState)
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
-            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
             discoveryBuilder.buildCoverStateSensor(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
@@ -1936,6 +1951,36 @@ class OneControlGattCallback(
     }
     
     // ========== COMMAND HANDLING ==========
+    
+    /**
+     * Type-safe command handler for OneControl entities.
+     * Maps entity types to their respective control methods.
+     */
+    private fun handleEntityCommand(entity: OneControlEntity, payload: String): Result<Unit> {
+        return when (entity) {
+            is OneControlEntity.Switch -> 
+                controlSwitch(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
+            
+            is OneControlEntity.DimmableLight -> 
+                controlDimmableLight(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
+            
+            is OneControlEntity.Cover -> {
+                Log.w(TAG, "⚠️ Cover control is disabled for safety - use physical controls")
+                Result.failure(Exception("Cover control disabled for safety"))
+            }
+            
+            is OneControlEntity.Tank -> {
+                Log.w(TAG, "⚠️ Tank sensors are read-only")
+                Result.failure(Exception("Tank sensors are read-only"))
+            }
+            
+            is OneControlEntity.SystemVoltageSensor,
+            is OneControlEntity.SystemTemperatureSensor -> {
+                Log.w(TAG, "⚠️ System sensors are read-only")
+                Result.failure(Exception("System sensors are read-only"))
+            }
+        }
+    }
     
     /**
      * Handle MQTT command - parses topic and routes to appropriate control method
