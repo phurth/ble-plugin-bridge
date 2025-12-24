@@ -94,6 +94,10 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 
 The EasyTouch plugin connects to Micro-Air EasyTouch BLE thermostats commonly found in RVs.
 
+#### Acknowledgments
+
+Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and their [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) HACS integration. Their project inspired the plugin architecture and their work decoding the thermostat's BLE protocol was essential to this implementation.
+
 #### Configuration
 
 1. Expand "EasyTouch Settings" in the app
