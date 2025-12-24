@@ -209,6 +209,10 @@ class OneControlGattCallback(
         
         // MTU size from legacy app (Constants.BLE_MTU_SIZE)
         private const val BLE_MTU_SIZE = 185
+        
+        // GATT 133 retry configuration
+        private const val MAX_GATT_133_RETRIES = 3
+        private const val GATT_133_RETRY_DELAY_MS = 2000L
     }
     
     // Handler for main thread operations
@@ -219,6 +223,9 @@ class OneControlGattCallback(
     private var isAuthenticated = false
     private var seedValue: ByteArray? = null
     private var currentGatt: BluetoothGatt? = null
+    
+    // GATT 133 retry tracking
+    private var gatt133RetryCount = 0
     
     // Diagnostic status tracking (for HA sensors)
     private var lastDataTimestampMs: Long = 0L
@@ -305,6 +312,8 @@ class OneControlGattCallback(
                         Log.i(TAG, "Bond state: ${device.bondState}")
                         isConnected = true
                         currentGatt = gatt
+                        // Reset retry counter on successful connection
+                        gatt133RetryCount = 0
                         mqttPublisher.updateBleStatus(connected = true, paired = false)
                         
                         // Discover services
@@ -318,9 +327,39 @@ class OneControlGattCallback(
                 }
             }
             133 -> {
-                Log.e(TAG, "⚠️ GATT_ERROR (133) - Stale bond / link key mismatch")
+                gatt133RetryCount++
+                Log.e(TAG, "⚠️ GATT_ERROR (133) - Connection failed (attempt $gatt133RetryCount/$MAX_GATT_133_RETRIES)")
                 cleanup(gatt)
-                onDisconnect(device, status)
+                
+                if (gatt133RetryCount < MAX_GATT_133_RETRIES) {
+                    Log.i(TAG, "🔄 Retrying connection in ${GATT_133_RETRY_DELAY_MS}ms...")
+                    handler.postDelayed({
+                        try {
+                            Log.i(TAG, "🔄 Attempting reconnection (retry $gatt133RetryCount)...")
+                            // Reconnect using same callback
+                            val newGatt = device.connectGatt(
+                                context,
+                                false,
+                                this,
+                                BluetoothDevice.TRANSPORT_LE
+                            )
+                            if (newGatt != null) {
+                                currentGatt = newGatt
+                                Log.i(TAG, "🔄 Reconnection initiated")
+                            } else {
+                                Log.e(TAG, "❌ Failed to initiate reconnection")
+                                onDisconnect(device, status)
+                            }
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "❌ Permission denied for reconnection", e)
+                            onDisconnect(device, status)
+                        }
+                    }, GATT_133_RETRY_DELAY_MS)
+                } else {
+                    Log.e(TAG, "❌ Max retries ($MAX_GATT_133_RETRIES) reached - stopping reconnection attempts")
+                    Log.e(TAG, "   Service will stop to prevent hammering the device")
+                    onDisconnect(device, status)
+                }
             }
             8 -> {
                 Log.e(TAG, "⏱️ Connection timeout (status 8)")
@@ -1271,6 +1310,8 @@ class OneControlGattCallback(
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "tank_$keyHex"
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Tank")
+        
+        // Publish discovery - will be republished with friendly name when metadata arrives
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId ($friendlyName)")
             // Discovery payload needs full topic path
@@ -1394,7 +1435,10 @@ class OneControlGattCallback(
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "cover_state_$keyHex"
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Cover")
-        Log.d(TAG, "🏷️ Cover discovery: tableId=$tableId, deviceId=$deviceId, key=$keyHex, name='$friendlyName'")
+        
+        Log.d(TAG, "🏷️ Cover discovery: tableId=$tableId, deviceId=$deviceId, key=$keyHex, name='$friendlyName', alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
+        
+        // Publish discovery - will be republished with friendly name when metadata arrives
         if (haDiscoveryPublished.add(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for cover STATE SENSOR $tableId:$deviceId ($friendlyName)")
             val deviceAddr = (tableId shl 8) or deviceId
@@ -1712,6 +1756,8 @@ class OneControlGattCallback(
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
+        // Note: If tank discovery was deferred (no haDiscoveryPublished entry), 
+        // it will be published on next tank status event now that metadata is loaded
         
         if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
             Log.i(TAG, "📢 Re-pub cover state sensor: $friendlyName")
@@ -1726,6 +1772,8 @@ class OneControlGattCallback(
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
+        // Note: If cover discovery was deferred (no haDiscoveryPublished entry),
+        // it will be published on next cover status event now that metadata is loaded
     }
     
     /**
