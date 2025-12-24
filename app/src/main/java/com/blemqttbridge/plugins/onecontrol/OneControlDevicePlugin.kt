@@ -796,11 +796,14 @@ class OneControlGattCallback(
         // Publish ready state to MQTT
         mqttPublisher.publishState("onecontrol/${device.address}/status", "ready", true)
         
+        // NOTE: Command subscriptions are handled by BaseBleService.subscribeToDeviceCommands()
+        // which routes MQTT commands to this plugin's handleCommand() method
+        
         // Publish diagnostic sensors
         publishDiagnosticsDiscovery()
         publishDiagnosticsState()
     }
-    
+
     // Android 13+ (API 33+) uses this signature
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onCharacteristicChanged(
