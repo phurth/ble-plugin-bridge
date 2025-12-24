@@ -591,6 +591,7 @@ class EasyTouchGattCallback(
         // Publish discovery for each zone (once)
         if (!discoveryPublished && state.availableZones.isNotEmpty()) {
             publishDiscovery(state.availableZones)
+            subscribeToCommands()
             discoveryPublished = true
         }
         
@@ -687,6 +688,29 @@ class EasyTouchGattCallback(
         val payload = if (online) "online" else "offline"
         mqttPublisher.publishState("$baseTopic/availability", payload, true)
         Log.d(TAG, "Published availability: $payload to $baseTopic/availability")
+    }
+    
+    // ===== MQTT COMMAND SUBSCRIPTION =====
+    
+    /**
+     * Subscribe to MQTT command topics for all zones.
+     * Topic pattern: easytouch/{MAC}/+/command/# matches all zone commands
+     * The + wildcard matches zone_0, zone_1, etc.
+     */
+    private fun subscribeToCommands() {
+        // Subscribe to all command topics for this device
+        // Pattern: easytouch/{MAC}/+/command/# (+ matches zone_N)
+        val commandPattern = "$baseTopic/+/command/#"
+        
+        mqttPublisher.subscribeToCommands(commandPattern) { topic, payload ->
+            Log.d(TAG, "📥 Received command: $topic = $payload")
+            val result = handleCommand(topic, payload)
+            if (result.isFailure) {
+                Log.e(TAG, "Command failed: ${result.exceptionOrNull()?.message}")
+            }
+        }
+        
+        Log.i(TAG, "✅ Subscribed to command topic: $commandPattern")
     }
     
     // ===== DISCOVERY PUBLISHING =====
