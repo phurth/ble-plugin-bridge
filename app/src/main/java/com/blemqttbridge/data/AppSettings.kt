@@ -31,6 +31,11 @@ class AppSettings(private val context: Context) {
         val ONECONTROL_GATEWAY_MAC = stringPreferencesKey("onecontrol_gateway_mac")
         val ONECONTROL_GATEWAY_PIN = stringPreferencesKey("onecontrol_gateway_pin")
         
+        // EasyTouch Plugin Settings
+        val EASYTOUCH_ENABLED = booleanPreferencesKey("easytouch_enabled")
+        val EASYTOUCH_THERMOSTAT_MAC = stringPreferencesKey("easytouch_thermostat_mac")
+        val EASYTOUCH_THERMOSTAT_PASSWORD = stringPreferencesKey("easytouch_thermostat_password")
+        
         // BLE Scanner Plugin Settings
         val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
         
@@ -59,6 +64,11 @@ class AppSettings(private val context: Context) {
     val oneControlEnabled: Flow<Boolean> = context.dataStore.data.map { it[ONECONTROL_ENABLED] ?: false }
     val oneControlGatewayMac: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_MAC] ?: DEFAULT_GATEWAY_MAC }
     val oneControlGatewayPin: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_PIN] ?: DEFAULT_GATEWAY_PIN }
+    
+    // EasyTouch Plugin Flows
+    val easyTouchEnabled: Flow<Boolean> = context.dataStore.data.map { it[EASYTOUCH_ENABLED] ?: false }
+    val easyTouchThermostatMac: Flow<String> = context.dataStore.data.map { it[EASYTOUCH_THERMOSTAT_MAC] ?: "" }
+    val easyTouchThermostatPassword: Flow<String> = context.dataStore.data.map { it[EASYTOUCH_THERMOSTAT_PASSWORD] ?: "" }
     
     // BLE Scanner Plugin Flows
     val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
@@ -102,6 +112,18 @@ class AppSettings(private val context: Context) {
     
     suspend fun setOneControlGatewayPin(pin: String) {
         context.dataStore.edit { it[ONECONTROL_GATEWAY_PIN] = pin }
+    }
+    
+    suspend fun setEasyTouchEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[EASYTOUCH_ENABLED] = enabled }
+    }
+    
+    suspend fun setEasyTouchThermostatMac(mac: String) {
+        context.dataStore.edit { it[EASYTOUCH_THERMOSTAT_MAC] = mac }
+    }
+    
+    suspend fun setEasyTouchThermostatPassword(password: String) {
+        context.dataStore.edit { it[EASYTOUCH_THERMOSTAT_PASSWORD] = password }
     }
     
     suspend fun setBleScannerEnabled(enabled: Boolean) {

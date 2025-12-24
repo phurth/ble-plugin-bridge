@@ -3,8 +3,10 @@ package com.blemqttbridge
 import android.app.Application
 import android.util.Log
 import com.blemqttbridge.core.PluginRegistry
+import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
+import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 
 /**
@@ -35,6 +37,11 @@ class BlePluginBridgeApplication : Application() {
             OneControlDevicePlugin()
         }
         
+        // EasyTouch thermostat plugin
+        registry.registerBlePlugin("easytouch") {
+            EasyTouchDevicePlugin()
+        }
+        
         registry.registerBlePlugin("mock_battery") {
             MockBatteryPlugin()
         }
@@ -44,9 +51,12 @@ class BlePluginBridgeApplication : Application() {
             MqttOutputPlugin(this@BlePluginBridgeApplication)
         }
         
+        // Ensure OneControl is always enabled (it's the required base plugin)
+        ServiceStateManager.enableBlePlugin(this, "onecontrol_v2")
+        
         Log.i(TAG, "Plugin factory registration complete")
         Log.i(TAG, "  Available BLE plugins: ${registry.getRegisteredBlePlugins().joinToString(", ")}")
         Log.i(TAG, "  Available output plugins: ${registry.getRegisteredOutputPlugins().joinToString(", ")}")
-        Log.i(TAG, "  No plugins loaded yet - waiting for user configuration")
+        Log.i(TAG, "  Enabled BLE plugins: ${ServiceStateManager.getEnabledBlePlugins(this).joinToString(", ")}")
     }
 }

@@ -6,6 +6,7 @@ import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
+import com.blemqttbridge.core.interfaces.PluginConfig
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -115,9 +116,10 @@ class PluginRegistry {
      * 
      * @param device The discovered Bluetooth device
      * @param scanRecord Raw scan record data
+     * @param context Context for loading plugin config (optional but recommended)
      * @return Plugin ID if a match is found, null otherwise
      */
-    fun findPluginForDevice(device: BluetoothDevice, scanRecord: ByteArray?): String? {
+    fun findPluginForDevice(device: BluetoothDevice, scanRecord: ByteArray?, context: Context? = null): String? {
         // Check already loaded plugins first (fast path)
         for ((pluginId, plugin) in loadedBlePlugins) {
             if (plugin.canHandleDevice(device, scanRecord)) {
@@ -127,7 +129,6 @@ class PluginRegistry {
         }
         
         // Check other registered plugins by creating temporary instances
-        // This is lightweight since we don't initialize them
         for ((pluginId, factory) in blePluginFactories) {
             if (loadedBlePlugins.containsKey(pluginId)) continue // already checked
             
@@ -136,6 +137,16 @@ class PluginRegistry {
                 
                 // Check if it's a new-style BleDevicePlugin
                 if (tempPlugin is BleDevicePlugin) {
+                    // Initialize with config if context available (for MAC matching)
+                    if (context != null) {
+                        try {
+                            val config = PluginConfig(AppConfig.getBlePluginConfig(context, pluginId))
+                            tempPlugin.initialize(context, config)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not initialize temp plugin $pluginId with config: ${e.message}")
+                        }
+                    }
+                    
                     // For now, pass null for scanRecord - matching is done by MAC/name
                     // TODO: Convert ByteArray to ScanRecord when needed
                     if (tempPlugin.matchesDevice(device, null)) {

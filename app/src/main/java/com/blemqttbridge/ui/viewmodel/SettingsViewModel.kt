@@ -6,6 +6,7 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -32,6 +33,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val oneControlGatewayMac = settings.oneControlGatewayMac.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_GATEWAY_MAC)
     val oneControlGatewayPin = settings.oneControlGatewayPin.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_GATEWAY_PIN)
     
+    val easyTouchEnabled = settings.easyTouchEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val easyTouchThermostatMac = settings.easyTouchThermostatMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val easyTouchThermostatPassword = settings.easyTouchThermostatPassword.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    
     val bleScannerEnabled = settings.bleScannerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     
     // Expandable section states (collapsed by default)
@@ -40,6 +45,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     private val _oneControlExpanded = MutableStateFlow(false)
     val oneControlExpanded: StateFlow<Boolean> = _oneControlExpanded
+    
+    private val _easyTouchExpanded = MutableStateFlow(false)
+    val easyTouchExpanded: StateFlow<Boolean> = _easyTouchExpanded
     
     private val _bleScannerExpanded = MutableStateFlow(false)
     val bleScannerExpanded: StateFlow<Boolean> = _bleScannerExpanded
@@ -179,6 +187,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setOneControlEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settings.setOneControlEnabled(enabled)
+            // Sync with ServiceStateManager so service knows which plugins to load
+            if (enabled) {
+                ServiceStateManager.enableBlePlugin(context, "onecontrol_v2")
+            } else {
+                ServiceStateManager.disableBlePlugin(context, "onecontrol_v2")
+            }
             restartService()
         }
     }
@@ -191,12 +205,31 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { settings.setOneControlGatewayPin(pin) }
     }
     
+    fun setEasyTouchEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setEasyTouchEnabled(enabled)
+            restartService()
+        }
+    }
+    
+    fun setEasyTouchThermostatMac(mac: String) {
+        viewModelScope.launch { settings.setEasyTouchThermostatMac(mac) }
+    }
+    
+    fun setEasyTouchThermostatPassword(password: String) {
+        viewModelScope.launch { settings.setEasyTouchThermostatPassword(password) }
+    }
+    
     fun toggleMqttExpanded() {
         _mqttExpanded.value = !_mqttExpanded.value
     }
     
     fun toggleOneControlExpanded() {
         _oneControlExpanded.value = !_oneControlExpanded.value
+    }
+    
+    fun toggleEasyTouchExpanded() {
+        _easyTouchExpanded.value = !_easyTouchExpanded.value
     }
     
     fun toggleBleScannerExpanded() {
@@ -223,16 +256,24 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun addPlugin(pluginId: String) {
         when (pluginId) {
             "ble_scanner" -> setBleScannerEnabled(true)
+            "easytouch" -> {
+                setEasyTouchEnabled(true)
+                ServiceStateManager.enableBlePlugin(context, "easytouch")
+            }
         }
         hidePluginPicker()
     }
-    
+
     fun removePlugin(pluginId: String) {
         when (pluginId) {
             "ble_scanner" -> setBleScannerEnabled(false)
+            "easytouch" -> {
+                setEasyTouchEnabled(false)
+                ServiceStateManager.disableBlePlugin(context, "easytouch")
+            }
         }
     }
-    
+
     private fun startService() {
         val intent = Intent(context, BaseBleService::class.java).apply {
             action = BaseBleService.ACTION_START_SCAN

@@ -43,6 +43,12 @@ object AppConfig {
                     "gateway_pin" to settings.oneControlGatewayPin.first()
                 )
             }
+            "easytouch" -> runBlocking {
+                mapOf(
+                    "thermostat_mac" to settings.easyTouchThermostatMac.first(),
+                    "thermostat_password" to settings.easyTouchThermostatPassword.first()
+                )
+            }
             else -> emptyMap()
         }
     }

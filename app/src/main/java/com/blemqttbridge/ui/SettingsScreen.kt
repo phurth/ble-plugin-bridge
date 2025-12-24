@@ -54,10 +54,15 @@ fun SettingsScreen(
     val oneControlGatewayMac by viewModel.oneControlGatewayMac.collectAsState()
     val oneControlGatewayPin by viewModel.oneControlGatewayPin.collectAsState()
     
+    val easyTouchEnabled by viewModel.easyTouchEnabled.collectAsState()
+    val easyTouchThermostatMac by viewModel.easyTouchThermostatMac.collectAsState()
+    val easyTouchThermostatPassword by viewModel.easyTouchThermostatPassword.collectAsState()
+    
     val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
     
     val mqttExpanded by viewModel.mqttExpanded.collectAsState()
     val oneControlExpanded by viewModel.oneControlExpanded.collectAsState()
+    val easyTouchExpanded by viewModel.easyTouchExpanded.collectAsState()
     val bleScannerExpanded by viewModel.bleScannerExpanded.collectAsState()
     val showPluginPicker by viewModel.showPluginPicker.collectAsState()
     
@@ -338,7 +343,8 @@ fun SettingsScreen(
                     onDismiss = { viewModel.hidePluginPicker() },
                     onPluginSelected = { viewModel.addPlugin(it) },
                     enabledPlugins = listOf(
-                        if (oneControlEnabled) "onecontrol" else null,
+                        // OneControl is always enabled, not in picker
+                        if (easyTouchEnabled) "easytouch" else null,
                         if (bleScannerEnabled) "ble_scanner" else null
                     ).filterNotNull()
                 )
@@ -397,44 +403,37 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Text(
-                                text = if (oneControlEnabled) "Enabled" else "Disabled",
+                                text = "LCI/Lippert RV Gateway",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Switch(
-                            checked = oneControlEnabled,
-                            onCheckedChange = { viewModel.setOneControlEnabled(it) }
+                    }
+                    
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    
+                    // Status Indicators (always visible for OneControl)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        StatusIndicator(
+                            label = "BLE",
+                            isActive = bleConnected
+                        )
+                        StatusIndicator(
+                            label = "Data",
+                            isActive = dataHealthy
+                        )
+                        StatusIndicator(
+                            label = "Paired",
+                            isActive = devicePaired
                         )
                     }
                     
-                    // Settings always visible, status indicators only when enabled
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    
-                    // Status Indicators (only visible when enabled)
-                    if (oneControlEnabled) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            StatusIndicator(
-                                label = "BLE",
-                                isActive = bleConnected
-                            )
-                            StatusIndicator(
-                                label = "Data",
-                                isActive = dataHealthy
-                            )
-                            StatusIndicator(
-                                label = "Paired",
-                                isActive = devicePaired
-                            )
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    }
                     
                     ExpandableSection(
                         title = "Gateway Settings",
@@ -448,7 +447,7 @@ fun SettingsScreen(
                             label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = !oneControlEnabled
+                            enabled = true
                         )
                         
                         OutlinedTextField(
@@ -458,8 +457,92 @@ fun SettingsScreen(
                             textStyle = MaterialTheme.typography.bodyMedium,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = !oneControlEnabled
+                            enabled = true
                         )
+                    }
+                }
+            }
+            
+            // EasyTouch Plugin (only show if enabled)
+            if (easyTouchEnabled) {
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "EasyTouch",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "Micro-Air RV thermostat",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { 
+                                        pluginToRemove = "easytouch"
+                                        showRemoveConfirmation = true
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove plugin",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        
+                        // Thermostat Settings
+                        ExpandableSection(
+                            title = "Thermostat Settings",
+                            expanded = easyTouchExpanded,
+                            onToggle = { viewModel.toggleEasyTouchExpanded() },
+                            modifier = Modifier.padding(top = 2.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = easyTouchThermostatMac,
+                                onValueChange = { viewModel.setEasyTouchThermostatMac(it) },
+                                label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
+                                textStyle = MaterialTheme.typography.bodyMedium,
+                                placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = true
+                            )
+                            
+                            OutlinedTextField(
+                                value = easyTouchThermostatPassword,
+                                onValueChange = { viewModel.setEasyTouchThermostatPassword(it) },
+                                label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
+                                textStyle = MaterialTheme.typography.bodyMedium,
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = true
+                            )
+                            
+                            Text(
+                                text = "Enter the thermostat MAC address and password from the EasyTouch app.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -595,9 +678,9 @@ private fun PluginPickerDialog(
     onPluginSelected: (String) -> Unit,
     enabledPlugins: List<String>
 ) {
-    // Available plugins (could be moved to a registry later)
+    // Available optional plugins (OneControl is always present, not shown here)
     val availablePlugins = listOf(
-        PluginInfo("onecontrol", "OneControl", "LCI/Lippert RV control system"),
+        PluginInfo("easytouch", "EasyTouch", "Micro-Air RV thermostat"),
         PluginInfo("ble_scanner", "BLE Scanner", "Scan for nearby BLE devices")
     )
     

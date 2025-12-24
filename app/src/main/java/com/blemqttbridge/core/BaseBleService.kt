@@ -223,16 +223,18 @@ class BaseBleService : Service() {
                 _serviceRunning.value = true
                 Log.i(TAG, "Service marked as running")
                 
-                val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol_v2"
+                // Get ALL enabled BLE plugins from ServiceStateManager
+                val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
                 val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
                 
-                // Load configuration from SharedPreferences
-                val bleConfig = AppConfig.getBlePluginConfig(applicationContext, blePluginId)
+                Log.i(TAG, "Enabled BLE plugins: $enabledBlePlugins")
+                
+                // Load output config
                 val outputConfig = AppConfig.getMqttConfig(applicationContext)
                 
                 serviceScope.launch {
-                    initializePlugins(blePluginId, outputPluginId, bleConfig, outputConfig)
-                    // Note: initializePlugins now calls reconnectToBondedDevices() which 
+                    initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
+                    // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
                     // either connects to bonded devices or falls back to scanning
                 }
             }
@@ -391,38 +393,155 @@ class BaseBleService : Service() {
     }
     
     /**
-     * Try to reconnect directly to bonded devices before scanning.
-     * Many BLE devices (including OneControl gateways) stop advertising when bonded,
-     * so scanning won't find them. Direct connection using bondedDevices works.
+     * Initialize multiple BLE plugins.
+     * Loads all enabled plugins and prepares for multi-device connections.
+     */
+    private suspend fun initializeMultiplePlugins(
+        enabledBlePlugins: Set<String>,
+        outputPluginId: String,
+        outputConfig: Map<String, String>
+    ) {
+        Log.i(TAG, "Initializing ${enabledBlePlugins.size} BLE plugins: $enabledBlePlugins")
+        
+        // Load output plugin first (needed for publishing)
+        outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
+        if (outputPlugin == null) {
+            Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
+            Log.i(TAG, "Continuing without output plugin for BLE testing")
+            _mqttConnected.value = false
+        } else {
+            // Set up connection status listener for real-time UI updates
+            outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
+                override fun onConnectionStatusChanged(connected: Boolean) {
+                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    _mqttConnected.value = connected
+                }
+            })
+            
+            // Initialize remote control manager for MQTT commands
+            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
+            remoteControlManager?.initialize(outputPlugin!!)
+            Log.i(TAG, "Remote control manager initialized")
+            
+            // Initialize BLE Scanner plugin (PoC)
+            bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+            if (bleScannerPlugin?.initialize() == true) {
+                Log.i(TAG, "BLE Scanner plugin initialized")
+            } else {
+                Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                bleScannerPlugin = null
+            }
+        }
+        
+        // Load ALL enabled BLE plugins
+        var loadedCount = 0
+        for (pluginId in enabledBlePlugins) {
+            val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
+            Log.i(TAG, "Loading plugin: $pluginId with config: $bleConfig")
+            
+            // Try legacy interface first
+            val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, bleConfig)
+            if (legacyPlugin != null) {
+                // For legacy plugins, we keep the last one in blePlugin (for backward compat)
+                blePlugin = legacyPlugin
+                Log.i(TAG, "✓ Loaded legacy plugin: $pluginId")
+                loadedCount++
+                continue
+            }
+            
+            // Try new BleDevicePlugin architecture
+            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+            if (devicePlugin != null) {
+                // Initialize with config using PluginConfig data class
+                val config = PluginConfig(parameters = bleConfig)
+                devicePlugin.initialize(applicationContext, config)
+                Log.i(TAG, "✓ Loaded device plugin: $pluginId (target MACs: ${devicePlugin.getConfiguredDevices()})")
+                loadedCount++
+            } else {
+                Log.w(TAG, "✗ Failed to load plugin: $pluginId (not found in registry)")
+            }
+        }
+        
+        if (loadedCount == 0) {
+            Log.e(TAG, "No plugins were loaded!")
+            updateNotification("Error: No plugins loaded")
+            return
+        }
+        
+        Log.i(TAG, "✓ Loaded $loadedCount/${enabledBlePlugins.size} plugins successfully")
+        memoryManager.logMemoryUsage()
+        
+        // Try to reconnect to bonded devices or scan for new ones
+        reconnectToBondedDevices()
+    }
+
+    /**
+     * Connect to known devices - both bonded and configured.
+     * 
+     * This replaces continuous scanning with direct connections:
+     * 1. Bonded devices: Connect directly (they may not advertise when bonded)
+     * 2. Configured devices: Connect directly using the user-provided MAC address
+     * 
+     * Scanning is only needed for device discovery, not for connecting to known devices.
      */
     private fun reconnectToBondedDevices() {
+        val devicesToConnect = mutableMapOf<String, String>() // MAC -> pluginId
+        
+        // 1. Check bonded devices
         try {
             val bondedDevices = bluetoothAdapter.bondedDevices
             Log.i(TAG, "Checking ${bondedDevices.size} bonded device(s) for plugin matches...")
             
             for (device in bondedDevices) {
-                // Check if any plugin wants this device based on MAC address
-                val pluginId = pluginRegistry.findPluginForDevice(device, null)
+                val pluginId = pluginRegistry.findPluginForDevice(device, null, applicationContext)
                 if (pluginId != null) {
                     Log.i(TAG, "🔗 Found bonded device matching plugin: ${device.address} -> $pluginId")
-                    
-                    // Connect directly (no scan needed) - plugin loading happens in connectToDevice
-                    serviceScope.launch {
-                        Log.i(TAG, "🔗 Connecting directly to bonded device ${device.address}")
-                        connectToDevice(device, pluginId)
-                    }
-                    return  // Connect to first matching device
+                    devicesToConnect[device.address] = pluginId
                 }
             }
-            
-            // No bonded devices matched - fall back to scanning
-            Log.i(TAG, "No bonded devices matched plugins - starting scan...")
-            startScanning()
-            
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for accessing bonded devices", e)
-            // Fall back to scanning
-            startScanning()
+        }
+        
+        // 2. Check configured device MACs from device plugins
+        for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
+            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+            if (devicePlugin != null) {
+                try {
+                    val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
+                    devicePlugin.initialize(applicationContext, config)
+                    val configuredMacs = devicePlugin.getConfiguredDevices()
+                    for (mac in configuredMacs) {
+                        if (!devicesToConnect.containsKey(mac.uppercase())) {
+                            Log.i(TAG, "🔗 Found configured device: $mac -> $pluginId")
+                            devicesToConnect[mac.uppercase()] = pluginId
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not get configured devices for plugin $pluginId: ${e.message}")
+                }
+            }
+        }
+        
+        // 3. Connect to all known devices
+        if (devicesToConnect.isEmpty()) {
+            Log.w(TAG, "No known devices to connect to")
+            updateNotification("No devices configured")
+            return
+        }
+        
+        Log.i(TAG, "✓ Found ${devicesToConnect.size} device(s) to connect")
+        
+        for ((mac, pluginId) in devicesToConnect) {
+            serviceScope.launch {
+                try {
+                    val device = bluetoothAdapter.getRemoteDevice(mac)
+                    Log.i(TAG, "🔗 Connecting directly to $mac (plugin: $pluginId)")
+                    connectToDevice(device, pluginId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to get remote device $mac: ${e.message}")
+                }
+            }
         }
     }
     
@@ -436,21 +555,50 @@ class BaseBleService : Service() {
             return
         }
         
-        // Build scan filters from loaded plugins
+        // Build scan filters from ALL plugin types
         // CRITICAL: Android 8.1+ blocks unfiltered scans when screen is off
         // Using filters allows scanning to continue with screen locked
         val scanFilters = mutableListOf<ScanFilter>()
+        val addedMacs = mutableSetOf<String>() // Track MACs to avoid duplicates
         
-        // Get target MAC addresses from loaded plugins
+        // Get target MAC addresses from loaded BlePluginInterface plugins (legacy)
         for ((pluginId, plugin) in pluginRegistry.getLoadedBlePlugins()) {
             val targetMacs = plugin.getTargetDeviceAddresses()
             for (mac in targetMacs) {
-                Log.d(TAG, "Adding scan filter for MAC: $mac (plugin: $pluginId)")
-                scanFilters.add(
-                    ScanFilter.Builder()
-                        .setDeviceAddress(mac)
-                        .build()
-                )
+                if (addedMacs.add(mac.uppercase())) {
+                    Log.d(TAG, "Adding scan filter for MAC: $mac (plugin: $pluginId)")
+                    scanFilters.add(
+                        ScanFilter.Builder()
+                            .setDeviceAddress(mac)
+                            .build()
+                    )
+                }
+            }
+        }
+        
+        // Get target MAC addresses from BleDevicePlugin plugins (new architecture)
+        // This includes plugins like EasyTouch that use the new callback architecture
+        for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
+            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+            if (devicePlugin != null) {
+                // Initialize with config so it knows the configured MAC
+                try {
+                    val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
+                    devicePlugin.initialize(applicationContext, config)
+                    val configuredMacs = devicePlugin.getConfiguredDevices()
+                    for (mac in configuredMacs) {
+                        if (addedMacs.add(mac.uppercase())) {
+                            Log.d(TAG, "Adding scan filter for MAC: $mac (device plugin: $pluginId)")
+                            scanFilters.add(
+                                ScanFilter.Builder()
+                                    .setDeviceAddress(mac.uppercase())
+                                    .build()
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not get configured devices for plugin $pluginId: ${e.message}")
+                }
             }
         }
         
@@ -515,7 +663,7 @@ class BaseBleService : Service() {
             }
             
             // Check if any plugin can handle this device
-            val pluginId = pluginRegistry.findPluginForDevice(device, scanRecord)
+            val pluginId = pluginRegistry.findPluginForDevice(device, scanRecord, applicationContext)
             if (pluginId != null) {
                 Log.i(TAG, "✅ Found matching device: ${device.address} -> plugin: $pluginId")
                 
@@ -524,9 +672,11 @@ class BaseBleService : Service() {
                 
                 // Load plugin and connect to device
                 serviceScope.launch {
-                    // Load the plugin if not already loaded
-                    val plugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
-                    if (plugin != null) {
+                    // Check if plugin can be loaded (either legacy BlePluginInterface or new BleDevicePlugin)
+                    val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
+                    val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+                    
+                    if (legacyPlugin != null || devicePlugin != null) {
                         connectToDevice(device, pluginId)
                     } else {
                         Log.e(TAG, "Failed to load plugin $pluginId for device ${device.address}")
