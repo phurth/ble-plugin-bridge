@@ -206,10 +206,12 @@ data class RelayHBridgeStatusEvent(
 data class RelayBasicLatchingStatusEvent(
     val deviceAddress: Int,
     val isOn: Boolean,
-    val status: Int
+    val status: Int,
+    val dtc: Int? = null  // Diagnostic Trouble Code (ushort) from extended data
 ) {
     companion object {
         private const val MIN_LENGTH = 5
+        private const val EXTENDED_LENGTH = 9  // EventType + TableId + DeviceId + Status + Padding + DTC(2) + Reserved(2)
         
         fun decode(data: ByteArray): RelayBasicLatchingStatusEvent? {
             if (data.size < MIN_LENGTH) return null
@@ -225,12 +227,22 @@ data class RelayBasicLatchingStatusEvent(
             val rawOutputState = status and 0x0F
             val isOn = rawOutputState == 1
             
-            return RelayBasicLatchingStatusEvent(deviceAddress, isOn, status)
+            // Extended data: [Padding(1)][DTC_MSB][DTC_LSB][Reserved(2)]
+            // Total 9 bytes: EventType(1) + TableId(1) + DeviceId(1) + Status(1) + Padding(1) + DTC(2) + Reserved(2)
+            val dtc = if (data.size >= EXTENDED_LENGTH) {
+                // DTC is at bytes 5-6 (big-endian ushort)
+                ((data[5].toInt() and 0xFF) shl 8) or (data[6].toInt() and 0xFF)
+            } else {
+                null
+            }
+            
+            return RelayBasicLatchingStatusEvent(deviceAddress, isOn, status, dtc)
         }
     }
     
     override fun toString(): String {
-        return "LatchingRelay(addr=0x${deviceAddress.toString(16).padStart(4, '0')}, ${if (isOn) "ON" else "OFF"})"
+        val dtcStr = dtc?.let { " DTC=$it" } ?: ""
+        return "LatchingRelay(addr=0x${deviceAddress.toString(16).padStart(4, '0')}, ${if (isOn) "ON" else "OFF"}$dtcStr)"
     }
 }
 

@@ -192,6 +192,17 @@ class EasyTouchGattCallback(
     private var isAuthenticated = false
     private var discoveryPublished = false
     
+    // Device Information Service data (read from BLE 0x180A service or parsed from status)
+    private var bleManufacturerName: String? = null
+    private var bleModelNumber: String? = null    // Device type (TT field, e.g., "EasyTouch")
+    private var bleSerialNumber: String? = null   // Serial number (SN field)
+    private var bleHardwareRevision: String? = null  // Config index (CI field)
+    private var bleFirmwareRevision: String? = null  // Firmware version (REV field)
+    private var bleSoftwareRevision: String? = null
+    private var deviceModel: String? = null       // Derived model number from serial prefix (e.g., "352")
+    private var deviceInfoReadComplete = false
+    private var deviceInfoCharsToRead = mutableListOf<BluetoothGattCharacteristic>()
+    
     // Current state (multi-zone aware)
     private var currentState: ThermostatState? = null
     
@@ -243,6 +254,8 @@ class EasyTouchGattCallback(
                 Log.i(TAG, "✅ Connected to ${device.address}")
                 this.gatt = gatt
                 publishAvailability(true)
+                publishDiagnosticsDiscovery()
+                publishDiagnosticsState(isConnected = true)
                 
                 // Discover services after brief delay
                 mainHandler.postDelayed({
@@ -253,6 +266,7 @@ class EasyTouchGattCallback(
                 Log.w(TAG, "❌ Disconnected from ${device.address}")
                 stopStatusPolling()  // Stop polling on disconnect
                 publishAvailability(false)
+                publishDiagnosticsState(isConnected = false)
                 isAuthenticated = false
                 discoveryPublished = false
                 onDisconnect(device, status)
@@ -267,6 +281,9 @@ class EasyTouchGattCallback(
         }
         
         Log.i(TAG, "✅ Services discovered")
+        
+        // Try to read Device Information Service (0x180A) for model/firmware info
+        readDeviceInformationService(gatt)
         
         // Find EasyTouch service
         val service = gatt.getService(EasyTouchConstants.SERVICE_UUID)
@@ -287,10 +304,75 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "✅ All characteristics found")
         
-        // Start authentication
+        // Start authentication (or device info reading if available)
         mainHandler.postDelayed({
-            authenticate()
+            if (deviceInfoCharsToRead.isNotEmpty()) {
+                readNextDeviceInfoChar(gatt)
+            } else {
+                authenticate()
+            }
         }, EasyTouchConstants.AUTH_STEP_DELAY_MS)
+    }
+    
+    /**
+     * Read standard BLE Device Information Service (0x180A) if available.
+     * Contains manufacturer name, model number, serial number, firmware revision, etc.
+     */
+    private fun readDeviceInformationService(gatt: BluetoothGatt) {
+        val deviceInfoService = gatt.getService(EasyTouchConstants.DEVICE_INFO_SERVICE_UUID)
+        if (deviceInfoService == null) {
+            Log.i(TAG, "ℹ️ Device Information Service (0x180A) not available")
+            deviceInfoReadComplete = true
+            return
+        }
+        
+        Log.i(TAG, "📋 Found Device Information Service, queuing characteristic reads...")
+        
+        // Queue all available characteristics for reading
+        deviceInfoCharsToRead.clear()
+        
+        deviceInfoService.getCharacteristic(EasyTouchConstants.MANUFACTURER_NAME_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        deviceInfoService.getCharacteristic(EasyTouchConstants.MODEL_NUMBER_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        deviceInfoService.getCharacteristic(EasyTouchConstants.SERIAL_NUMBER_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        deviceInfoService.getCharacteristic(EasyTouchConstants.HARDWARE_REVISION_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        deviceInfoService.getCharacteristic(EasyTouchConstants.FIRMWARE_REVISION_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        deviceInfoService.getCharacteristic(EasyTouchConstants.SOFTWARE_REVISION_UUID)?.let {
+            deviceInfoCharsToRead.add(it)
+        }
+        
+        Log.i(TAG, "📋 Found ${deviceInfoCharsToRead.size} device info characteristics to read")
+        
+        if (deviceInfoCharsToRead.isEmpty()) {
+            deviceInfoReadComplete = true
+        }
+    }
+    
+    /**
+     * Read the next device info characteristic in the queue.
+     */
+    private fun readNextDeviceInfoChar(gatt: BluetoothGatt) {
+        if (deviceInfoCharsToRead.isEmpty()) {
+            Log.i(TAG, "✅ Device info reading complete: manufacturer=$bleManufacturerName, model=$bleModelNumber, serial=$bleSerialNumber, hw=$bleHardwareRevision, fw=$bleFirmwareRevision, sw=$bleSoftwareRevision")
+            deviceInfoReadComplete = true
+            authenticate()
+            return
+        }
+        
+        val char = deviceInfoCharsToRead.removeAt(0)
+        if (!gatt.readCharacteristic(char)) {
+            Log.w(TAG, "Failed to read characteristic ${char.uuid}, skipping...")
+            readNextDeviceInfoChar(gatt)
+        }
     }
     
     // ===== STATUS POLLING =====
@@ -307,6 +389,7 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "🔄 Starting status polling loop (${STATUS_POLL_INTERVAL_MS}ms interval)")
         isPollingActive = true
+        publishDiagnosticsState(isConnected = true)
         
         // Request first status immediately, then continue on interval
         mainHandler.postDelayed({
@@ -414,11 +497,58 @@ class EasyTouchGattCallback(
         status: Int
     ) {
         if (status != BluetoothGatt.GATT_SUCCESS) {
-            Log.e(TAG, "Characteristic read failed: ${characteristic.uuid}, status=$status")
+            Log.w(TAG, "Characteristic read failed: ${characteristic.uuid}, status=$status")
+            // If reading device info, continue to next characteristic
+            if (!deviceInfoReadComplete) {
+                readNextDeviceInfoChar(gatt)
+            }
             return
         }
         
-        if (characteristic.uuid == EasyTouchConstants.JSON_RETURN_UUID) {
+        val uuid = characteristic.uuid
+        
+        // Handle Device Information Service characteristics
+        when (uuid) {
+            EasyTouchConstants.MANUFACTURER_NAME_UUID -> {
+                bleManufacturerName = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Manufacturer: $bleManufacturerName")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+            EasyTouchConstants.MODEL_NUMBER_UUID -> {
+                bleModelNumber = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Model: $bleModelNumber")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+            EasyTouchConstants.SERIAL_NUMBER_UUID -> {
+                bleSerialNumber = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Serial: $bleSerialNumber")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+            EasyTouchConstants.HARDWARE_REVISION_UUID -> {
+                bleHardwareRevision = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Hardware Rev: $bleHardwareRevision")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+            EasyTouchConstants.FIRMWARE_REVISION_UUID -> {
+                bleFirmwareRevision = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Firmware Rev: $bleFirmwareRevision")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+            EasyTouchConstants.SOFTWARE_REVISION_UUID -> {
+                bleSoftwareRevision = characteristic.getStringValue(0)
+                Log.i(TAG, "📋 BLE Software Rev: $bleSoftwareRevision")
+                readNextDeviceInfoChar(gatt)
+                return
+            }
+        }
+        
+        // Handle EasyTouch JSON response
+        if (uuid == EasyTouchConstants.JSON_RETURN_UUID) {
             processReceivedData(characteristic.value)
         }
     }
@@ -686,6 +816,49 @@ class EasyTouchGattCallback(
         if (zSts == null) {
             Log.e(TAG, "No Z_sts in status response")
             return ThermostatState(emptyList(), emptyMap())
+        }
+        
+        // Extract device info from status response (SN, REV, TT, CI fields)
+        val serialNumber = json.optString("SN", null)
+        val firmwareRevision = json.optString("REV", null)
+        val deviceType = json.optString("TT", null)
+        val configIndex = json.optInt("CI", -1).takeIf { it >= 0 }
+        
+        // Store device info for diagnostic sensors
+        var deviceInfoUpdated = false
+        if (serialNumber != null && bleSerialNumber == null) {
+            bleSerialNumber = serialNumber
+            Log.i(TAG, "📋 Parsed Serial Number from status: $serialNumber")
+            
+            // Derive model number from first 3 chars of serial number
+            // Based on official EasyTouch app: Serial_number.substring(0, 3) determines model
+            // e.g., "352016935" -> model "352"
+            // 350 = Dometic CCC, 351/352 = EasyTouch RV, 353 = Furrion, 354-357/359 = Other variants
+            if (serialNumber.length >= 3 && deviceModel == null) {
+                deviceModel = serialNumber.take(3)
+                Log.i(TAG, "📋 Derived model from serial prefix: $deviceModel")
+            }
+            deviceInfoUpdated = true
+        }
+        if (firmwareRevision != null && bleFirmwareRevision == null) {
+            bleFirmwareRevision = firmwareRevision
+            Log.i(TAG, "📋 Parsed Firmware Revision from status: $firmwareRevision")
+            deviceInfoUpdated = true
+        }
+        if (deviceType != null && bleModelNumber == null) {
+            bleModelNumber = deviceType
+            Log.i(TAG, "📋 Parsed Device Type from status: $deviceType")
+            deviceInfoUpdated = true
+        }
+        if (configIndex != null && bleHardwareRevision == null) {
+            bleHardwareRevision = configIndex.toString()
+            Log.i(TAG, "📋 Parsed Config Index from status: $configIndex")
+            deviceInfoUpdated = true
+        }
+        
+        // If device info was updated, re-publish diagnostic states
+        if (deviceInfoUpdated) {
+            publishDiagnosticsState(isConnected = true)
         }
         
         // Parse PRM array for system-level flags
@@ -1121,6 +1294,122 @@ class EasyTouchGattCallback(
         writeJsonCommand(command)
         suppressStatusUpdates(2000)
         return Result.success(Unit)
+    }
+    
+    // ===== DIAGNOSTIC HEALTH STATUS =====
+    
+    private var diagnosticsDiscoveryPublished = false
+    
+    /**
+     * Publish diagnostic sensor discovery to Home Assistant.
+     */
+    private fun publishDiagnosticsDiscovery() {
+        if (diagnosticsDiscoveryPublished) return
+        
+        val macId = device.address.replace(":", "").lowercase()
+        val nodeId = "easytouch_$macId"
+        val prefix = mqttPublisher.topicPrefix
+        
+        // Get app version
+        val appVersion = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        
+        // Device info for HA discovery (no hw_version - published as diagnostic sensors instead)
+        val deviceInfo = JSONObject().apply {
+            put("identifiers", JSONArray().put("easytouch_$macId"))
+            put("name", "EasyTouch ${device.address}")
+            put("manufacturer", "phurth")
+            put("model", "Micro-Air EasyTouch RV thermostat plugin for the Android BLE to MQTT Bridge")
+            put("sw_version", appVersion)
+            put("connections", JSONArray().put(JSONArray().put("mac").put(device.address)))
+        }
+        
+        // Binary diagnostic sensors
+        val binaryDiagnostics = listOf(
+            Triple("authenticated", "Authenticated", "diag/authenticated"),
+            Triple("connected", "Connected", "diag/connected"),
+            Triple("data_healthy", "Data Healthy", "diag/data_healthy")
+        )
+        
+        binaryDiagnostics.forEach { (objectId, name, stateTopic) ->
+            val uniqueId = "easytouch_${macId}_diag_$objectId"
+            val discoveryTopic = "$prefix/binary_sensor/$nodeId/$objectId/config"
+            
+            val payload = JSONObject().apply {
+                put("name", name)
+                put("unique_id", uniqueId)
+                put("state_topic", "$prefix/$baseTopic/$stateTopic")
+                put("payload_on", "ON")
+                put("payload_off", "OFF")
+                put("entity_category", "diagnostic")
+                put("device", deviceInfo)
+            }.toString()
+            
+            mqttPublisher.publishDiscovery(discoveryTopic, payload)
+            Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
+        }
+        
+        // Text diagnostic sensors for device info (Model, Serial, Firmware, Device Type, Config Index)
+        data class TextSensor(val objectId: String, val name: String, val stateTopic: String, val icon: String)
+        val textDiagnostics = listOf(
+            TextSensor("model_number", "Model Number", "diag/model_number", "mdi:barcode"),
+            TextSensor("serial_number", "Serial Number", "diag/serial_number", "mdi:identifier"),
+            TextSensor("firmware_version", "Firmware Version", "diag/firmware_version", "mdi:chip"),
+            TextSensor("device_type", "Device Type", "diag/device_type", "mdi:thermostat"),
+            TextSensor("config_index", "Config Index", "diag/config_index", "mdi:cog")
+        )
+        
+        textDiagnostics.forEach { sensor ->
+            val uniqueId = "easytouch_${macId}_diag_${sensor.objectId}"
+            val discoveryTopic = "$prefix/sensor/$nodeId/${sensor.objectId}/config"
+            
+            val payload = JSONObject().apply {
+                put("name", sensor.name)
+                put("unique_id", uniqueId)
+                put("state_topic", "$prefix/$baseTopic/${sensor.stateTopic}")
+                put("icon", sensor.icon)
+                put("entity_category", "diagnostic")
+                put("device", deviceInfo)
+            }.toString()
+            
+            mqttPublisher.publishDiscovery(discoveryTopic, payload)
+            Log.i(TAG, "📡 Published diagnostic sensor discovery: ${sensor.objectId}")
+        }
+        
+        diagnosticsDiscoveryPublished = true
+    }
+    
+    /**
+     * Publish current diagnostic state to MQTT and update UI.
+     */
+    private fun publishDiagnosticsState(isConnected: Boolean) {
+        val isPaired = isAuthenticated  // Use protocol-level auth, not OS bonding
+        val dataHealthy = isAuthenticated && isPollingActive
+        
+        // Publish binary diagnostic states
+        mqttPublisher.publishState("easytouch/${device.address}/diag/authenticated", if (isPaired) "ON" else "OFF", true)
+        mqttPublisher.publishState("easytouch/${device.address}/diag/connected", if (isConnected) "ON" else "OFF", true)
+        mqttPublisher.publishState("easytouch/${device.address}/diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
+        
+        // Publish text diagnostic states (device info from BLE/protocol)
+        deviceModel?.let { mqttPublisher.publishState("easytouch/${device.address}/diag/model_number", it, true) }
+        bleSerialNumber?.let { mqttPublisher.publishState("easytouch/${device.address}/diag/serial_number", it, true) }
+        bleFirmwareRevision?.let { mqttPublisher.publishState("easytouch/${device.address}/diag/firmware_version", it, true) }
+        bleModelNumber?.let { mqttPublisher.publishState("easytouch/${device.address}/diag/device_type", it, true) }
+        bleHardwareRevision?.let { mqttPublisher.publishState("easytouch/${device.address}/diag/config_index", it, true) }
+        
+        // Update UI status for this plugin
+        mqttPublisher.updatePluginStatus(
+            pluginId = "easytouch",
+            connected = isConnected,
+            authenticated = isPaired,
+            dataHealthy = dataHealthy
+        )
+        
+        Log.d(TAG, "📡 Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
     }
 }
 

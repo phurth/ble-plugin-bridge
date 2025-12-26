@@ -63,18 +63,31 @@ interface MqttPublisher {
     
     /**
      * Update diagnostic status for UI display.
-     * Called by plugins to update status indicators in the app UI.
-     * 
+     * @deprecated Use updatePluginStatus instead for per-plugin status tracking
      * @param dataHealthy Whether data is being received (recent frames seen)
      */
+    @Deprecated("Use updatePluginStatus instead")
     fun updateDiagnosticStatus(dataHealthy: Boolean)
     
     /**
      * Update BLE connection status for UI display.
+     * @deprecated Use updatePluginStatus instead for per-plugin status tracking
      * @param connected Whether BLE is connected
      * @param paired Whether device is paired/authenticated
      */
+    @Deprecated("Use updatePluginStatus instead")
     fun updateBleStatus(connected: Boolean, paired: Boolean)
+    
+    /**
+     * Update plugin status for UI display (per-plugin tracking).
+     * Called by plugins to update their specific status indicators in the app UI.
+     * 
+     * @param pluginId Unique plugin identifier (e.g., "easytouch", "gopower", "onecontrol")
+     * @param connected Whether BLE is connected to the device
+     * @param authenticated Whether device is authenticated (if applicable, same as connected for non-auth plugins)
+     * @param dataHealthy Whether data is being received and valid
+     */
+    fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean)
     
     /**
      * Update MQTT connection status for UI display.

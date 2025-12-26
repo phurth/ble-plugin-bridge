@@ -25,6 +25,29 @@ object EasyTouchConstants {
     /** Client Characteristic Configuration Descriptor (CCCD) for notifications */
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     
+    // ===== STANDARD BLE DEVICE INFORMATION SERVICE (0x180A) =====
+    
+    /** Device Information Service UUID */
+    val DEVICE_INFO_SERVICE_UUID: UUID = UUID.fromString("0000180A-0000-1000-8000-00805F9B34FB")
+    
+    /** Manufacturer Name String characteristic */
+    val MANUFACTURER_NAME_UUID: UUID = UUID.fromString("00002A29-0000-1000-8000-00805F9B34FB")
+    
+    /** Model Number String characteristic */
+    val MODEL_NUMBER_UUID: UUID = UUID.fromString("00002A24-0000-1000-8000-00805F9B34FB")
+    
+    /** Serial Number String characteristic */
+    val SERIAL_NUMBER_UUID: UUID = UUID.fromString("00002A25-0000-1000-8000-00805F9B34FB")
+    
+    /** Hardware Revision String characteristic */
+    val HARDWARE_REVISION_UUID: UUID = UUID.fromString("00002A27-0000-1000-8000-00805F9B34FB")
+    
+    /** Firmware Revision String characteristic */
+    val FIRMWARE_REVISION_UUID: UUID = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
+    
+    /** Software Revision String characteristic */
+    val SOFTWARE_REVISION_UUID: UUID = UUID.fromString("00002A28-0000-1000-8000-00805F9B34FB")
+    
     // ===== DEVICE IDENTIFICATION =====
     
     /** Device name prefix for scan matching */

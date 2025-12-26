@@ -1,11 +1,20 @@
 package com.blemqttbridge.plugins.output
 
+import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Environment
+import android.os.StatFs
 import android.util.Log
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.suspendCancellableCoroutine
 import info.mqtt.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.*
+import java.io.RandomAccessFile
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -196,6 +205,17 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     /**
+     * Publish availability to a custom topic (for per-plugin availability).
+     * The topic should NOT include the prefix - it will be added automatically.
+     */
+    suspend fun publishAvailability(topic: String, online: Boolean) {
+        val fullTopic = "$_topicPrefix/$topic"
+        val payload = if (online) "online" else "offline"
+        publish(fullTopic, payload, retained = true)
+        Log.d(TAG, "📡 Published availability to $fullTopic: $payload")
+    }
+    
+    /**
      * Called when MQTT connection is established.
      * Publishes "online" to availability topic and discovery payload.
      */
@@ -224,6 +244,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             
             // Publish HA discovery for availability binary sensor
             publishAvailabilityDiscovery()
+            
+            // Publish system diagnostic sensors
+            publishSystemDiagnostics()
             
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error in onMqttConnected", e)
@@ -273,6 +296,392 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             
         } catch (e: Exception) {
             Log.e(TAG, "Error publishing availability discovery", e)
+        }
+    }
+    
+    /**
+     * Publishes Home Assistant discovery and state for system diagnostic sensors.
+     */
+    private fun publishSystemDiagnostics() {
+        try {
+            val client = mqttClient ?: return
+            val nodeId = "ble_mqtt_bridge"
+            
+            // Get device info for the shared device definition
+            val appVersion = try {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+            } catch (e: Exception) {
+                "unknown"
+            }
+            
+            val deviceInfo = org.json.JSONObject().apply {
+                put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge"))
+                put("name", "BLE MQTT Bridge")
+                put("model", "Android BLE to MQTT Bridge")
+                put("manufacturer", "phurth")
+                put("sw_version", appVersion)
+            }
+            
+            // Battery Level
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "battery",
+                name = "Battery Level",
+                deviceClass = "battery",
+                unitOfMeasurement = "%",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getBatteryLevel().toString()
+            )
+            
+            // Battery Status
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "battery_status",
+                name = "Battery Status",
+                icon = "mdi:battery-charging",
+                deviceInfo = deviceInfo,
+                value = getBatteryStatus()
+            )
+            
+            // Battery Temperature
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "battery_temp",
+                name = "Battery Temperature",
+                deviceClass = "temperature",
+                unitOfMeasurement = "°C",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getBatteryTemperature().toString()
+            )
+            
+            // RAM Used Percentage
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "ram_used",
+                name = "RAM Used",
+                icon = "mdi:memory",
+                unitOfMeasurement = "%",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getMemoryUsedPercent().toString()
+            )
+            
+            // RAM Available
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "ram_available",
+                name = "RAM Available",
+                icon = "mdi:memory",
+                unitOfMeasurement = "MB",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getMemoryAvailableMB().toString()
+            )
+            
+            // CPU Usage
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "cpu_usage",
+                name = "CPU Usage",
+                icon = "mdi:cpu-64-bit",
+                unitOfMeasurement = "%",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getCpuUsage().toString()
+            )
+            
+            // Storage Available
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "storage_available",
+                name = "Storage Available",
+                icon = "mdi:harddisk",
+                unitOfMeasurement = "GB",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getStorageAvailableGB().toString()
+            )
+            
+            // Storage Used Percentage
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "storage_used",
+                name = "Storage Used",
+                icon = "mdi:harddisk",
+                unitOfMeasurement = "%",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getStorageUsedPercent().toString()
+            )
+            
+            // WiFi SSID
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "wifi_ssid",
+                name = "WiFi Network",
+                icon = "mdi:wifi",
+                deviceInfo = deviceInfo,
+                value = getWifiSSID()
+            )
+            
+            // WiFi Signal Strength
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "wifi_rssi",
+                name = "WiFi Signal",
+                deviceClass = "signal_strength",
+                unitOfMeasurement = "dBm",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getWifiRSSI().toString()
+            )
+            
+            // Device Name
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "device_name",
+                name = "Device Name",
+                icon = "mdi:cellphone",
+                deviceInfo = deviceInfo,
+                value = Build.MODEL ?: "unknown"
+            )
+            
+            // Device Manufacturer
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "device_manufacturer",
+                name = "Device Manufacturer",
+                icon = "mdi:factory",
+                deviceInfo = deviceInfo,
+                value = Build.MANUFACTURER ?: "unknown"
+            )
+            
+            // Android Version
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "android_version",
+                name = "Android Version",
+                icon = "mdi:android",
+                deviceInfo = deviceInfo,
+                value = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+            )
+            
+            // Device Uptime
+            publishDiagnosticSensor(
+                nodeId = nodeId,
+                objectId = "device_uptime",
+                name = "Device Uptime",
+                icon = "mdi:timer",
+                unitOfMeasurement = "h",
+                stateClass = "measurement",
+                deviceInfo = deviceInfo,
+                value = getDeviceUptimeHours().toString()
+            )
+            
+            Log.i(TAG, "📡 Published system diagnostic sensors")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error publishing system diagnostics", e)
+        }
+    }
+    
+    /**
+     * Helper to publish a single diagnostic sensor discovery and state.
+     */
+    private fun publishDiagnosticSensor(
+        nodeId: String,
+        objectId: String,
+        name: String,
+        deviceClass: String? = null,
+        unitOfMeasurement: String? = null,
+        stateClass: String? = null,
+        icon: String? = null,
+        deviceInfo: org.json.JSONObject,
+        value: String
+    ) {
+        try {
+            val client = mqttClient ?: return
+            val uniqueId = "${nodeId}_${objectId}"
+            
+            // Discovery payload
+            val discoveryPayload = org.json.JSONObject().apply {
+                put("name", name)
+                put("unique_id", uniqueId)
+                put("state_topic", "$_topicPrefix/sensor/$nodeId/$objectId/state")
+                put("availability_topic", "$_topicPrefix/$AVAILABILITY_TOPIC")
+                put("entity_category", "diagnostic")
+                deviceClass?.let { put("device_class", it) }
+                unitOfMeasurement?.let { put("unit_of_measurement", it) }
+                stateClass?.let { put("state_class", it) }
+                icon?.let { put("icon", it) }
+                put("device", deviceInfo)
+            }.toString()
+            
+            // Publish discovery
+            val discoveryTopic = "$_topicPrefix/sensor/$nodeId/$objectId/config"
+            val discoveryMessage = MqttMessage(discoveryPayload.toByteArray()).apply {
+                qos = QOS
+                isRetained = true
+            }
+            client.publish(discoveryTopic, discoveryMessage)
+            
+            // Publish state
+            val stateTopic = "$_topicPrefix/sensor/$nodeId/$objectId/state"
+            val stateMessage = MqttMessage(value.toByteArray()).apply {
+                qos = QOS
+                isRetained = true
+            }
+            client.publish(stateTopic, stateMessage)
+            
+            Log.d(TAG, "📊 Published diagnostic: $name = $value")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error publishing diagnostic sensor $objectId", e)
+        }
+    }
+    
+    // System info getters
+    
+    private fun getBatteryLevel(): Int {
+        return try {
+            val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+            batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting battery level", e)
+            -1
+        }
+    }
+    
+    private fun getBatteryStatus(): String {
+        return try {
+            val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            val batteryStatus = context.registerReceiver(null, intentFilter)
+            val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            when (status) {
+                BatteryManager.BATTERY_STATUS_CHARGING -> "charging"
+                BatteryManager.BATTERY_STATUS_DISCHARGING -> "discharging"
+                BatteryManager.BATTERY_STATUS_FULL -> "full"
+                BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "not_charging"
+                else -> "unknown"
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting battery status", e)
+            "unknown"
+        }
+    }
+    
+    private fun getBatteryTemperature(): Float {
+        return try {
+            val intentFilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            val batteryStatus = context.registerReceiver(null, intentFilter)
+            val temp = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+            if (temp > 0) temp / 10.0f else -1f
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting battery temperature", e)
+            -1f
+        }
+    }
+    
+    private fun getMemoryUsedPercent(): Int {
+        return try {
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            val used = memInfo.totalMem - memInfo.availMem
+            ((used.toDouble() / memInfo.totalMem) * 100).toInt()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting memory usage", e)
+            -1
+        }
+    }
+    
+    private fun getMemoryAvailableMB(): Long {
+        return try {
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+            memInfo.availMem / (1024 * 1024)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting available memory", e)
+            -1
+        }
+    }
+    
+    private fun getCpuUsage(): Int {
+        return try {
+            val reader = RandomAccessFile("/proc/stat", "r")
+            val load = reader.readLine()
+            reader.close()
+            
+            val toks = load.split(" +".toRegex())
+            val idle = toks[4].toLong()
+            val total = toks.drop(1).take(7).sumOf { it.toLongOrNull() ?: 0 }
+            
+            val usage = if (total > 0) ((total - idle) * 100 / total).toInt() else -1
+            usage
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting CPU usage", e)
+            -1
+        }
+    }
+    
+    private fun getStorageAvailableGB(): Float {
+        return try {
+            val path = Environment.getDataDirectory()
+            val stat = StatFs(path.path)
+            val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
+            availableBytes / (1024f * 1024f * 1024f)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting storage", e)
+            -1f
+        }
+    }
+    
+    private fun getStorageUsedPercent(): Int {
+        return try {
+            val path = Environment.getDataDirectory()
+            val stat = StatFs(path.path)
+            val totalBytes = stat.blockCountLong * stat.blockSizeLong
+            val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
+            val used = totalBytes - availableBytes
+            ((used.toDouble() / totalBytes) * 100).toInt()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting storage usage", e)
+            -1
+        }
+    }
+    
+    private fun getWifiSSID(): String {
+        return try {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val wifiInfo = wifiManager.connectionInfo
+            wifiInfo.ssid?.replace("\"", "") ?: "unknown"
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting WiFi SSID", e)
+            "unknown"
+        }
+    }
+    
+    private fun getWifiRSSI(): Int {
+        return try {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val wifiInfo = wifiManager.connectionInfo
+            wifiInfo.rssi
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting WiFi RSSI", e)
+            -100
+        }
+    }
+    
+    private fun getDeviceUptimeHours(): Float {
+        return try {
+            val uptimeMillis = android.os.SystemClock.elapsedRealtime()
+            uptimeMillis / (1000f * 60f * 60f)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error getting device uptime", e)
+            -1f
         }
     }
     

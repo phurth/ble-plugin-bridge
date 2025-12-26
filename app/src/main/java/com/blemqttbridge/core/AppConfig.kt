@@ -49,6 +49,11 @@ object AppConfig {
                     "thermostat_password" to settings.easyTouchThermostatPassword.first()
                 )
             }
+            "gopower" -> runBlocking {
+                mapOf(
+                    "controller_mac" to settings.goPowerControllerMac.first()
+                )
+            }
             else -> emptyMap()
         }
     }

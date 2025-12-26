@@ -7,6 +7,7 @@ import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
+import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 
 /**
@@ -40,6 +41,11 @@ class BlePluginBridgeApplication : Application() {
         // EasyTouch thermostat plugin
         registry.registerBlePlugin("easytouch") {
             EasyTouchDevicePlugin()
+        }
+        
+        // GoPower solar charge controller plugin
+        registry.registerBlePlugin("gopower") {
+            GoPowerDevicePlugin()
         }
         
         registry.registerBlePlugin("mock_battery") {

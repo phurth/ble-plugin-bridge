@@ -58,11 +58,15 @@ fun SettingsScreen(
     val easyTouchThermostatMac by viewModel.easyTouchThermostatMac.collectAsState()
     val easyTouchThermostatPassword by viewModel.easyTouchThermostatPassword.collectAsState()
     
+    val goPowerEnabled by viewModel.goPowerEnabled.collectAsState()
+    val goPowerControllerMac by viewModel.goPowerControllerMac.collectAsState()
+    
     val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
     
     val mqttExpanded by viewModel.mqttExpanded.collectAsState()
     val oneControlExpanded by viewModel.oneControlExpanded.collectAsState()
     val easyTouchExpanded by viewModel.easyTouchExpanded.collectAsState()
+    val goPowerExpanded by viewModel.goPowerExpanded.collectAsState()
     val bleScannerExpanded by viewModel.bleScannerExpanded.collectAsState()
     val showPluginPicker by viewModel.showPluginPicker.collectAsState()
     
@@ -363,6 +367,7 @@ fun SettingsScreen(
                     enabledPlugins = listOf(
                         // OneControl is always enabled, not in picker
                         if (easyTouchEnabled) "easytouch" else null,
+                        if (goPowerEnabled) "gopower" else null,
                         if (bleScannerEnabled) "ble_scanner" else null
                     ).filterNotNull()
                 )
@@ -438,7 +443,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
                         StatusIndicator(
-                            label = "BLE",
+                            label = "Connected",
                             isActive = bleConnected
                         )
                         StatusIndicator(
@@ -446,7 +451,7 @@ fun SettingsScreen(
                             isActive = dataHealthy
                         )
                         StatusIndicator(
-                            label = "Paired",
+                            label = "Authenticated",
                             isActive = devicePaired
                         )
                     }
@@ -527,6 +532,29 @@ fun SettingsScreen(
                         
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         
+                        // Health Status Indicators
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            StatusIndicator(
+                                label = "Connected",
+                                isActive = bleConnected
+                            )
+                            StatusIndicator(
+                                label = "Data",
+                                isActive = dataHealthy
+                            )
+                            StatusIndicator(
+                                label = "Authenticated",
+                                isActive = devicePaired
+                            )
+                        }
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        
                         // Thermostat Settings
                         ExpandableSection(
                             title = "Thermostat Settings",
@@ -556,6 +584,102 @@ fun SettingsScreen(
                             
                             Text(
                                 text = "Enter the thermostat MAC address and password from the EasyTouch app.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            
+            // GoPower Plugin (only show if enabled)
+            if (goPowerEnabled) {
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "GoPower Solar",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "PWM Solar Charge Controller",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { 
+                                        pluginToRemove = "gopower"
+                                        showRemoveConfirmation = true
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove plugin",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                        
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        
+                        // Health Status Indicators (only show when MAC is configured)
+                        // Note: Status only reflects GoPower when it's the active plugin
+                        if (goPowerControllerMac.isNotBlank()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                StatusIndicator(
+                                    label = "Connected",
+                                    isActive = bleConnected
+                                )
+                                StatusIndicator(
+                                    label = "Data",
+                                    isActive = dataHealthy
+                                )
+                            }
+                            
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        
+                        // Controller Settings
+                        ExpandableSection(
+                            title = "Controller Settings",
+                            expanded = goPowerExpanded,
+                            onToggle = { viewModel.toggleGoPowerExpanded() },
+                            modifier = Modifier.padding(top = 2.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = goPowerControllerMac,
+                                onValueChange = { viewModel.setGoPowerControllerMac(it) },
+                                label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
+                                textStyle = MaterialTheme.typography.bodyMedium,
+                                placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = true
+                            )
+                            
+                            Text(
+                                text = "Enter the solar controller MAC address. No password required.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(vertical = 4.dp)
@@ -699,6 +823,7 @@ private fun PluginPickerDialog(
     // Available optional plugins (OneControl is always present, not shown here)
     val availablePlugins = listOf(
         PluginInfo("easytouch", "EasyTouch", "Micro-Air RV thermostat"),
+        PluginInfo("gopower", "GoPower Solar", "PWM Solar Charge Controller"),
         PluginInfo("ble_scanner", "BLE Scanner", "Scan for nearby BLE devices")
     )
     

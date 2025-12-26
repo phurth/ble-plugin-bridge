@@ -37,6 +37,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val easyTouchThermostatMac = settings.easyTouchThermostatMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val easyTouchThermostatPassword = settings.easyTouchThermostatPassword.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     
+    val goPowerEnabled = settings.goPowerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val goPowerControllerMac = settings.goPowerControllerMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    
     val bleScannerEnabled = settings.bleScannerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     
     // Expandable section states (collapsed by default)
@@ -48,6 +51,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     private val _easyTouchExpanded = MutableStateFlow(false)
     val easyTouchExpanded: StateFlow<Boolean> = _easyTouchExpanded
+    
+    private val _goPowerExpanded = MutableStateFlow(false)
+    val goPowerExpanded: StateFlow<Boolean> = _goPowerExpanded
     
     private val _bleScannerExpanded = MutableStateFlow(false)
     val bleScannerExpanded: StateFlow<Boolean> = _bleScannerExpanded
@@ -63,13 +69,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val serviceRunningStatus: StateFlow<Boolean> = _serviceRunningStatus
     
     // Status indicators should only be true if service is running AND the condition is met
-    private val _bleConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.bleConnected.value)
+    private val _bleConnectedStatus = MutableStateFlow(false)
     val bleConnectedStatus: StateFlow<Boolean> = _bleConnectedStatus
     
-    private val _dataHealthyStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.dataHealthy.value)
+    private val _dataHealthyStatus = MutableStateFlow(false)
     val dataHealthyStatus: StateFlow<Boolean> = _dataHealthyStatus
     
-    private val _devicePairedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.devicePaired.value)
+    private val _devicePairedStatus = MutableStateFlow(false)
     val devicePairedStatus: StateFlow<Boolean> = _devicePairedStatus
     
     private val _mqttConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.mqttConnected.value)
@@ -98,18 +104,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
         }
         viewModelScope.launch {
-            BaseBleService.bleConnected.collect { 
-                _bleConnectedStatus.value = _serviceRunningStatus.value && it 
-            }
-        }
-        viewModelScope.launch {
-            BaseBleService.dataHealthy.collect { 
-                _dataHealthyStatus.value = _serviceRunningStatus.value && it 
-            }
-        }
-        viewModelScope.launch {
-            BaseBleService.devicePaired.collect { 
-                _devicePairedStatus.value = _serviceRunningStatus.value && it 
+            BaseBleService.pluginStatuses.collect { statuses ->
+                // Aggregate plugin statuses for overall UI indicators
+                // Connected if ANY plugin is connected
+                _bleConnectedStatus.value = _serviceRunningStatus.value && statuses.values.any { it.connected }
+                // Authenticated if ANY plugin is authenticated
+                _devicePairedStatus.value = _serviceRunningStatus.value && statuses.values.any { it.authenticated }
+                // Data healthy if ANY plugin has healthy data
+                _dataHealthyStatus.value = _serviceRunningStatus.value && statuses.values.any { it.dataHealthy }
             }
         }
         viewModelScope.launch {
@@ -220,6 +222,22 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { settings.setEasyTouchThermostatPassword(password) }
     }
     
+    fun setGoPowerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setGoPowerEnabled(enabled)
+            if (enabled) {
+                ServiceStateManager.enableBlePlugin(context, "gopower")
+            } else {
+                ServiceStateManager.disableBlePlugin(context, "gopower")
+            }
+            restartService()
+        }
+    }
+    
+    fun setGoPowerControllerMac(mac: String) {
+        viewModelScope.launch { settings.setGoPowerControllerMac(mac) }
+    }
+    
     fun toggleMqttExpanded() {
         _mqttExpanded.value = !_mqttExpanded.value
     }
@@ -230,6 +248,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     fun toggleEasyTouchExpanded() {
         _easyTouchExpanded.value = !_easyTouchExpanded.value
+    }
+    
+    fun toggleGoPowerExpanded() {
+        _goPowerExpanded.value = !_goPowerExpanded.value
     }
     
     fun toggleBleScannerExpanded() {
@@ -260,6 +282,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 setEasyTouchEnabled(true)
                 ServiceStateManager.enableBlePlugin(context, "easytouch")
             }
+            "gopower" -> {
+                setGoPowerEnabled(true)
+                ServiceStateManager.enableBlePlugin(context, "gopower")
+            }
         }
         hidePluginPicker()
     }
@@ -270,6 +296,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             "easytouch" -> {
                 setEasyTouchEnabled(false)
                 ServiceStateManager.disableBlePlugin(context, "easytouch")
+            }
+            "gopower" -> {
+                setGoPowerEnabled(false)
+                ServiceStateManager.disableBlePlugin(context, "gopower")
             }
         }
     }

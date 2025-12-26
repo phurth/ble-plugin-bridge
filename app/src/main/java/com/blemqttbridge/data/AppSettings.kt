@@ -36,6 +36,10 @@ class AppSettings(private val context: Context) {
         val EASYTOUCH_THERMOSTAT_MAC = stringPreferencesKey("easytouch_thermostat_mac")
         val EASYTOUCH_THERMOSTAT_PASSWORD = stringPreferencesKey("easytouch_thermostat_password")
         
+        // GoPower Plugin Settings
+        val GOPOWER_ENABLED = booleanPreferencesKey("gopower_enabled")
+        val GOPOWER_CONTROLLER_MAC = stringPreferencesKey("gopower_controller_mac")
+        
         // BLE Scanner Plugin Settings
         val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
         
@@ -69,6 +73,10 @@ class AppSettings(private val context: Context) {
     val easyTouchEnabled: Flow<Boolean> = context.dataStore.data.map { it[EASYTOUCH_ENABLED] ?: false }
     val easyTouchThermostatMac: Flow<String> = context.dataStore.data.map { it[EASYTOUCH_THERMOSTAT_MAC] ?: "" }
     val easyTouchThermostatPassword: Flow<String> = context.dataStore.data.map { it[EASYTOUCH_THERMOSTAT_PASSWORD] ?: "" }
+    
+    // GoPower Plugin Flows
+    val goPowerEnabled: Flow<Boolean> = context.dataStore.data.map { it[GOPOWER_ENABLED] ?: false }
+    val goPowerControllerMac: Flow<String> = context.dataStore.data.map { it[GOPOWER_CONTROLLER_MAC] ?: "" }
     
     // BLE Scanner Plugin Flows
     val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
@@ -124,6 +132,14 @@ class AppSettings(private val context: Context) {
     
     suspend fun setEasyTouchThermostatPassword(password: String) {
         context.dataStore.edit { it[EASYTOUCH_THERMOSTAT_PASSWORD] = password }
+    }
+    
+    suspend fun setGoPowerEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[GOPOWER_ENABLED] = enabled }
+    }
+    
+    suspend fun setGoPowerControllerMac(mac: String) {
+        context.dataStore.edit { it[GOPOWER_CONTROLLER_MAC] = mac }
     }
     
     suspend fun setBleScannerEnabled(enabled: Boolean) {

@@ -2,12 +2,12 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 24, 2025 - v2.3.0  
+> **Last Updated:** December 26, 2025 - v2.3.1  
 > **Major Changes:**  
-> - Phase 1-3 refactoring complete (centralized state publishing, discovery builder, entity models)
-> - OneControl plugin now uses sealed class entity models for type safety
-> - DiscoveryBuilder pattern reduces discovery call parameters from 6-7 to 3-4
-> - Total code reduction: ~85 lines while adding type safety and maintainability
+> - Added GoPower solar charge controller plugin with full diagnostic support
+> - Refactored status/health indicators to be per-plugin instead of global
+> - BLE Scanner plugin now only initializes when enabled
+> - Added comprehensive system diagnostic sensors (battery, RAM, CPU, storage, WiFi, device info)
 
 ---
 
@@ -18,12 +18,13 @@
 3. [Plugin System](#3-plugin-system)
 4. [OneControl Protocol Deep Dive](#4-onecontrol-protocol-deep-dive)
 5. [EasyTouch Thermostat Protocol](#5-easytouch-thermostat-protocol)
-6. [MQTT Integration](#6-mqtt-integration)
-7. [Home Assistant Discovery](#7-home-assistant-discovery)
-8. [Adding New Entity Types](#8-adding-new-entity-types)
-9. [Creating New Plugins](#9-creating-new-plugins)
-10. [State Management & UI](#10-state-management--ui)
-11. [Common Pitfalls](#11-common-pitfalls)
+6. [GoPower Solar Controller Protocol](#6-gopower-solar-controller-protocol)
+7. [MQTT Integration](#7-mqtt-integration)
+8. [Home Assistant Discovery](#8-home-assistant-discovery)
+9. [State Management & Status Indicators](#9-state-management--status-indicators)
+10. [Adding New Entity Types](#10-adding-new-entity-types)
+11. [Creating New Plugins](#11-creating-new-plugins)
+12. [Common Pitfalls](#12-common-pitfalls)
 
 ---
 
@@ -1114,7 +1115,252 @@ override fun handleCommand(commandTopic: String, payload: String): Result<Unit> 
 
 ---
 
-## 6. MQTT Integration
+## 6. GoPower Solar Controller Protocol
+
+### Overview
+
+The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. Unlike OneControl and EasyTouch, the GoPower controller uses a **read-only** protocol - it broadcasts solar system status via BLE notifications but does not accept commands.
+
+**Location:** `app/src/main/java/com/blemqttbridge/plugins/gopower/`
+
+### Protocol Characteristics
+
+| Characteristic | Value |
+|---------------|-------|
+| Connection Type | BLE notifications only (read-only) |
+| Pairing | Not required (no bonding needed) |
+| Authentication | None |
+| Service UUID | `0000fff0-0000-1000-8000-00805f9b34fb` |
+| Notify UUID | `0000fff1-0000-1000-8000-00805f9b34fb` |
+| Data Format | Fixed 20-byte comma-delimited ASCII string |
+| Update Rate | ~1 second (automatic from controller) |
+| Encoding | ASCII text, fields separated by commas |
+
+### Notification Data Format
+
+The controller sends a 20-byte notification containing comma-separated integer values:
+
+```
+Format: "f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15"
+Example: "123,456,789,0,1,2,3,4,5,6,7,8,9,10,ABC,16"
+
+Field Mapping (0-indexed):
+Field 0:  PV Voltage (integer, divide by 10 for actual voltage)
+Field 1:  Battery Voltage (integer, divide by 10 for actual voltage)
+Field 2:  Charge Current (integer, divide by 100 for actual amperage)
+Field 3:  Controller Temperature (integer, degrees Celsius)
+Field 4:  Battery Percentage (integer, 0-100%)
+Field 5:  Load Current (integer, divide by 100 for actual amperage)
+Field 6:  Load Status (integer, 0=off, 1=on)
+Field 7:  Unknown / Reserved
+Field 8:  Firmware Version (integer, e.g., 5 = v5)
+Field 9:  Unknown / Reserved
+Field 10: Unknown / Reserved
+Field 11: Unknown / Reserved
+Field 12: Unknown / Reserved
+Field 13: Unknown / Reserved
+Field 14: Serial Number (hex string, needs conversion to decimal)
+Field 15: Unknown / Reserved
+```
+
+### Key Implementation Details
+
+#### Serial Number Hex Parsing
+
+Field 14 contains the device serial number as a **hexadecimal string** that must be converted to decimal:
+
+```kotlin
+// GoPowerConstants.kt
+const val FIELD_SERIAL = 14
+const val FIELD_FIRMWARE = 8
+
+// GoPowerDevicePlugin.kt
+private fun parseStatusNotification(data: ByteArray) {
+    val dataString = String(data, Charsets.UTF_8).trim()
+    val fields = dataString.split(",")
+    
+    if (fields.size >= FIELD_SERIAL + 1) {
+        val serialHex = fields[FIELD_SERIAL].trim()
+        try {
+            // Convert hex string to decimal (e.g., "177" hex -> "375" decimal)
+            deviceSerial = serialHex.toInt(16).toString()
+        } catch (e: NumberFormatException) {
+            Log.w(TAG, "Failed to parse serial number: $serialHex")
+            deviceSerial = "unknown"
+        }
+    }
+}
+```
+
+**Important:** The official GoPower app displays serial numbers in **decimal**, not hex. Field 14's raw value (e.g., `"177"`) must be interpreted as hexadecimal (`0x177 = 375 decimal`) to match the official app.
+
+#### Model Number Detection
+
+The GoPower controller does not report its model number via BLE. The plugin derives the model from the serial number prefix:
+
+```kotlin
+// Serial numbers starting with "3" are GP-PWM-30-SB model
+deviceModel = when {
+    deviceSerial.startsWith("3") -> "GP-PWM-30-SB"
+    else -> "GP-PWM-30-SB"  // Default assumption
+}
+```
+
+This heuristic may need adjustment as more models are supported.
+
+#### Data Parsing and Validation
+
+```kotlin
+private fun parseStatusNotification(data: ByteArray) {
+    val dataString = String(data, Charsets.UTF_8).trim()
+    val fields = dataString.split(",")
+    
+    // Validate field count
+    if (fields.size < 15) {
+        Log.w(TAG, "Incomplete data: ${fields.size} fields")
+        return
+    }
+    
+    try {
+        // Parse sensors with scaling
+        val pvVoltage = fields[0].toIntOrNull()?.let { it / 10.0f } ?: 0f
+        val batteryVoltage = fields[1].toIntOrNull()?.let { it / 10.0f } ?: 0f
+        val chargeCurrent = fields[2].toIntOrNull()?.let { it / 100.0f } ?: 0f
+        val batteryPercent = fields[4].toIntOrNull() ?: 0
+        val loadCurrent = fields[5].toIntOrNull()?.let { it / 100.0f } ?: 0f
+        val temperature = fields[3].toIntOrNull() ?: 0
+        val loadOn = fields[6].toIntOrNull() == 1
+        
+        // Calculate derived values
+        val chargeWatts = pvVoltage * chargeCurrent
+        val loadWatts = batteryVoltage * loadCurrent
+        
+        // Publish to MQTT
+        publishSensorData(pvVoltage, batteryVoltage, chargeCurrent, ...)
+        
+    } catch (e: Exception) {
+        Log.e(TAG, "Error parsing status", e)
+    }
+}
+```
+
+### Home Assistant Entities
+
+The plugin publishes the following sensors to Home Assistant:
+
+| Entity Type | Entity ID | Description | Unit | Device Class |
+|------------|-----------|-------------|------|--------------|
+| Sensor | `pv_voltage` | Solar panel voltage | V | voltage |
+| Sensor | `battery_voltage` | Battery voltage | V | voltage |
+| Sensor | `charge_current` | Charge current | A | current |
+| Sensor | `charge_watts` | Charge power (calculated) | W | power |
+| Sensor | `battery_percent` | Battery state of charge | % | battery |
+| Sensor | `load_current` | Load current | A | current |
+| Sensor | `load_watts` | Load power (calculated) | W | power |
+| Sensor | `controller_temp` | Controller temperature | °C | temperature |
+| Binary Sensor | `load_status` | Load output status | - | power |
+| Text Sensor | `device_model` | Device model number | - | diagnostic |
+| Text Sensor | `device_serial` | Device serial number (decimal) | - | diagnostic |
+| Text Sensor | `device_firmware` | Firmware version | - | diagnostic |
+
+### Plugin Structure
+
+```
+plugins/gopower/
+├── GoPowerDevicePlugin.kt          # Main plugin implementation
+├── protocol/
+│   ├── GoPowerConstants.kt         # UUIDs and field indices
+│   └── GoPowerGattCallback.kt      # BLE notification handler
+```
+
+### Configuration Requirements
+
+Unlike OneControl, GoPower does not require pairing or authentication:
+
+1. Configure the controller MAC address in app settings
+2. Enable the GoPower plugin
+3. Enable the BLE Service
+
+The controller will immediately start sending status notifications.
+
+### Key Differences from Other Plugins
+
+| Feature | OneControl | EasyTouch | GoPower |
+|---------|-----------|-----------|---------|
+| Pairing Required | Yes (bonding) | No | No |
+| Authentication | TEA encryption | Password auth | None |
+| Commands | Full bidirectional | Climate control | **None (read-only)** |
+| Notification Type | Event-driven | JSON status | Fixed ASCII string |
+| Data Format | COBS-encoded binary | JSON | Comma-delimited ASCII |
+| Heartbeat Needed | Yes (GetDevices) | No | No |
+| Multi-device | Yes (gateway) | Yes (zones) | No (single controller) |
+
+### Diagnostic Sensors
+
+The GoPower plugin adds three diagnostic text sensors for device identification and troubleshooting:
+
+```kotlin
+// Published on connect and when data is first received
+publishDiagnosticSensor(
+    objectId = "device_model",
+    name = "Device Model",
+    value = deviceModel  // "GP-PWM-30-SB"
+)
+
+publishDiagnosticSensor(
+    objectId = "device_serial", 
+    name = "Device Serial",
+    value = deviceSerial  // Decimal format (e.g., "375")
+)
+
+publishDiagnosticSensor(
+    objectId = "device_firmware",
+    name = "Device Firmware",
+    value = deviceFirmware  // Integer version (e.g., "5")
+)
+```
+
+These sensors are marked with `entity_category: "diagnostic"` and appear in the device diagnostics section in Home Assistant.
+
+### Per-Plugin Status Tracking
+
+The GoPower plugin uses the centralized per-plugin status tracking system:
+
+```kotlin
+// Update status in MqttPublisher
+mqttPublisher.updatePluginStatus(
+    pluginId = "gopower",
+    connected = isConnected,
+    authenticated = isConnected,  // No auth needed, so use connected state
+    dataHealthy = isReceivingData
+)
+```
+
+This allows the UI to display GoPower's connection status independently from other plugins.
+
+### Troubleshooting
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| No data received | Controller out of range | Move Android device closer |
+| Serial shows "unknown" | Field 14 parse error | Check notification format matches spec |
+| Wrong serial number | Decimal/hex confusion | Ensure using `toInt(16)` conversion |
+| Sensors not appearing | Discovery not published | Check MQTT logs, verify baseTopic |
+| Load status incorrect | Field 6 not 0 or 1 | Validate notification data format |
+
+### Future Enhancements
+
+Potential additions if GoPower releases command specifications:
+- Load output control (ON/OFF)
+- Charging parameters configuration
+- Battery type selection
+- Temperature compensation settings
+
+Currently, the GoPower protocol is **read-only** - the controller does not accept write commands via BLE.
+
+---
+
+## 7. MQTT Integration
 
 ### MqttOutputPlugin
 
@@ -1817,48 +2063,253 @@ init {
 
 ---
 
-## 10. State Management & UI
+## 9. State Management & Status Indicators
 
-### SettingsViewModel
+### Per-Plugin Status Architecture (v2.3.1+)
+
+Starting in v2.3.1, status indicators are tracked **per-plugin** instead of globally. This allows each plugin (EasyTouch, GoPower, OneControl) to have independent connection and health status in both the app UI and Home Assistant MQTT sensors.
+
+**Key Change:** Replaced global `StateFlow` values with a `Map<String, PluginStatus>` keyed by plugin ID.
+
+#### PluginStatus Data Class
+
+**Location:** `app/src/main/java/com/blemqttbridge/mqtt/MqttPublisher.kt`
+
+```kotlin
+data class PluginStatus(
+    val pluginId: String,
+    val connected: Boolean,      // BLE connection status
+    val authenticated: Boolean,  // Authentication status (if applicable)
+    val dataHealthy: Boolean     // Receiving valid data
+)
+```
+
+#### BaseBleService State Management
+
+**Location:** `app/src/main/java/com/blemqttbridge/core/BaseBleService.kt`
+
+```kotlin
+companion object {
+    // Per-plugin status tracking (v2.3.1+)
+    private val _pluginStatuses = MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
+    val pluginStatuses: StateFlow<Map<String, PluginStatus>> = _pluginStatuses.asStateFlow()
+    
+    // Global MQTT status (still global as it's shared across plugins)
+    private val _mqttConnected = MutableStateFlow(false)
+    val mqttConnected: StateFlow<Boolean> = _mqttConnected.asStateFlow()
+    
+    // Service running status
+    private val _serviceRunning = MutableStateFlow(false)
+    val serviceRunning: StateFlow<Boolean> = _serviceRunning.asStateFlow()
+}
+```
+
+#### MqttPublisher Interface Update
+
+Plugins call `updatePluginStatus()` to report their individual status:
+
+```kotlin
+interface MqttPublisher {
+    // Per-plugin status update (v2.3.1+)
+    fun updatePluginStatus(
+        pluginId: String,
+        connected: Boolean,
+        authenticated: Boolean,
+        dataHealthy: Boolean
+    )
+    
+    // Deprecated global methods (kept for backwards compatibility)
+    @Deprecated("Use updatePluginStatus() instead")
+    fun updateBleStatus(connected: Boolean, paired: Boolean)
+    
+    @Deprecated("Use updatePluginStatus() instead")
+    fun updateDiagnosticStatus(dataHealthy: Boolean)
+}
+```
+
+#### Plugin Implementation Example
+
+Each plugin calls `updatePluginStatus()` with its own ID:
+
+```kotlin
+// GoPowerDevicePlugin.kt
+class GoPowerGattCallback(...) : BluetoothGattCallback() {
+    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        when (newState) {
+            BluetoothProfile.STATE_CONNECTED -> {
+                mqttPublisher.updatePluginStatus(
+                    pluginId = "gopower",
+                    connected = true,
+                    authenticated = true,  // No auth needed for GoPower
+                    dataHealthy = isReceivingData
+                )
+            }
+            BluetoothProfile.STATE_DISCONNECTED -> {
+                mqttPublisher.updatePluginStatus(
+                    pluginId = "gopower",
+                    connected = false,
+                    authenticated = false,
+                    dataHealthy = false
+                )
+            }
+        }
+    }
+}
+
+// EasyTouchDevicePlugin.kt
+mqttPublisher.updatePluginStatus(
+    pluginId = "easytouch",
+    connected = isConnected,
+    authenticated = isAuthenticated,
+    dataHealthy = isReceivingData
+)
+
+// OneControlDevicePlugin.kt
+mqttPublisher.updatePluginStatus(
+    pluginId = "onecontrol",
+    connected = isConnected,
+    authenticated = isPaired,
+    dataHealthy = isReceivingData
+)
+```
+
+### MQTT Diagnostic Sensors (Per-Plugin)
+
+Each plugin publishes its own diagnostic sensors to Home Assistant:
+
+```kotlin
+// Published under each plugin's base topic
+// Example: homeassistant/sensor/gopower_XX_XX_XX/diag/connected/config
+
+Topic Pattern:
+  $baseTopic/diag/connected      - BLE connection status
+  $baseTopic/diag/authenticated  - Authentication status
+  $baseTopic/diag/data_healthy   - Data health status
+
+// OneControlDevicePlugin.kt example:
+private fun publishDiagnosticSensors() {
+    val baseTopic = "onecontrol/${device.address}"
+    
+    // Connected sensor
+    publishBinarySensor(
+        topic = "$topicPrefix/binary_sensor/$nodeId/diag_connected/config",
+        name = "Connected",
+        stateTopic = "$topicPrefix/$baseTopic/diag/connected",
+        deviceClass = "connectivity"
+    )
+    
+    // Authenticated sensor
+    publishBinarySensor(
+        topic = "$topicPrefix/binary_sensor/$nodeId/diag_authenticated/config",
+        name = "Authenticated",
+        stateTopic = "$topicPrefix/$baseTopic/diag/authenticated",
+        deviceClass = "connectivity"
+    )
+    
+    // Data healthy sensor
+    publishBinarySensor(
+        topic = "$topicPrefix/binary_sensor/$nodeId/diag_data_healthy/config",
+        name = "Data Healthy",
+        stateTopic = "$topicPrefix/$baseTopic/diag/data_healthy",
+        deviceClass = "connectivity"
+    )
+}
+```
+
+### SettingsViewModel UI Status Aggregation
 
 **Location:** `app/src/main/java/com/blemqttbridge/ui/viewmodel/SettingsViewModel.kt`
 
-Collects StateFlows from `BaseBleService` companion object:
+The UI shows an **aggregate** status - green if ANY plugin is healthy:
 
 ```kotlin
 class SettingsViewModel : ViewModel() {
-    private val _serviceRunningStatus = MutableStateFlow(false)
-    private val _bleConnectedStatus = MutableStateFlow(false)
-    private val _dataHealthyStatus = MutableStateFlow(false)
-    private val _mqttConnectedStatus = MutableStateFlow(false)
-    
     init {
         viewModelScope.launch {
-            // CRITICAL: Gate all status flows by serviceRunning
-            BaseBleService.serviceRunning.collect { running ->
-                _serviceRunningStatus.value = running
-                if (!running) {
-                    // Clear status indicators when service stops
+            BaseBleService.pluginStatuses.collect { statuses ->
+                if (_serviceRunningStatus.value) {
+                    // Show connected if ANY plugin is connected
+                    _bleConnectedStatus.value = statuses.values.any { it.connected }
+                    
+                    // Show healthy if ANY plugin is healthy
+                    _dataHealthyStatus.value = statuses.values.any { it.dataHealthy }
+                    
+                    // Show authenticated if ANY plugin is authenticated
+                    _devicePairedStatus.value = statuses.values.any { it.authenticated }
+                } else {
+                    // Service not running - clear all indicators
                     _bleConnectedStatus.value = false
                     _dataHealthyStatus.value = false
-                    _mqttConnectedStatus.value = false
+                    _devicePairedStatus.value = false
                 }
             }
         }
-        
-        viewModelScope.launch {
-            BaseBleService.bleConnected.collect { connected ->
-                // Only update if service is running
-                if (_serviceRunningStatus.value) {
-                    _bleConnectedStatus.value = connected
-                }
-            }
-        }
-        
-        // ... similar for other flows
     }
 }
 ```
+
+### BLE Scanner Conditional Initialization
+
+The BLE Scanner plugin (PoC utility for device discovery) is now **conditionally initialized** based on whether it's enabled in app settings:
+
+```kotlin
+// BaseBleService.kt
+private suspend fun initializeMultiplePlugins(...) {
+    // Only initialize BLE Scanner if enabled
+    if (ServiceStateManager.isBlePluginEnabled(applicationContext, BleScannerPlugin.PLUGIN_ID)) {
+        bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+        if (bleScannerPlugin?.initialize() == true) {
+            Log.i(TAG, "BLE Scanner plugin initialized")
+        } else {
+            Log.w(TAG, "BLE Scanner plugin failed to initialize")
+            bleScannerPlugin = null
+        }
+    } else {
+        Log.i(TAG, "BLE Scanner plugin is disabled, skipping initialization")
+        bleScannerPlugin = null
+    }
+}
+```
+
+**Why this matters:** Previously, BLE Scanner would always publish Home Assistant discovery even when disabled in the app, causing it to reappear in HA after being removed. Now it only initializes (and publishes discovery) when explicitly enabled.
+
+### System Diagnostic Sensors
+
+The MQTT bridge device itself publishes comprehensive system diagnostics:
+
+**Location:** `app/src/main/java/com/blemqttbridge/plugins/output/MqttOutputPlugin.kt`
+
+```kotlin
+private fun publishSystemDiagnostics() {
+    // Battery sensors
+    publishDiagnosticSensor("battery", "Battery Level", getBatteryLevel())
+    publishDiagnosticSensor("battery_status", "Battery Status", getBatteryStatus())
+    publishDiagnosticSensor("battery_temp", "Battery Temperature", getBatteryTemperature())
+    
+    // Memory sensors
+    publishDiagnosticSensor("ram_used", "RAM Used %", getMemoryUsedPercent())
+    publishDiagnosticSensor("ram_available", "RAM Available MB", getMemoryAvailableMB())
+    
+    // CPU sensor
+    publishDiagnosticSensor("cpu_usage", "CPU Usage %", getCpuUsage())
+    
+    // Storage sensors
+    publishDiagnosticSensor("storage_available", "Storage Available GB", getStorageAvailableGB())
+    publishDiagnosticSensor("storage_used", "Storage Used %", getStorageUsedPercent())
+    
+    // Network sensors
+    publishDiagnosticSensor("wifi_ssid", "WiFi Network", getWifiSSID())
+    publishDiagnosticSensor("wifi_rssi", "WiFi Signal dBm", getWifiRSSI())
+    
+    // Device info sensors
+    publishDiagnosticSensor("device_name", "Device Name", Build.MODEL)
+    publishDiagnosticSensor("device_manufacturer", "Device Manufacturer", Build.MANUFACTURER)
+    publishDiagnosticSensor("android_version", "Android Version", Build.VERSION.RELEASE)
+    publishDiagnosticSensor("device_uptime", "Device Uptime Hours", getDeviceUptimeHours())
+}
+```
+
+All system diagnostic sensors are published under the **"BLE MQTT Bridge"** device in Home Assistant with `entity_category: "diagnostic"`.
 
 ### Settings Screen
 
@@ -1868,10 +2319,11 @@ class SettingsViewModel : ViewModel() {
 - When toggle ON: settings fields locked (grayed out)
 - When toggle OFF: settings editable
 - Confirmation dialog for destructive actions (removing BLE Scanner)
+- Status indicators show aggregate of all plugin statuses
 
 ---
 
-## 11. Common Pitfalls
+## 10. Adding New Entity Types
 
 ### 1. MQTT Publish Exceptions
 
@@ -1971,10 +2423,11 @@ if (age <= DIMMER_PENDING_WINDOW_MS && brightness != desired) {
 
 | File | Purpose |
 |------|---------|
-| `BaseBleService.kt` | Foreground service, plugin orchestration |
+| `BaseBleService.kt` | Foreground service, plugin orchestration, per-plugin status tracking |
 | `PluginRegistry.kt` | Plugin factory management |
 | `BleDevicePlugin.kt` | Plugin interface definition |
-| `MqttPublisher.kt` | MQTT abstraction for plugins |
+| `MqttPublisher.kt` | MQTT abstraction for plugins, status reporting interface |
+| `ServiceStateManager.kt` | Plugin enable/disable state management |
 | **OneControl Plugin** | |
 | `OneControlDevicePlugin.kt` | Main OneControl implementation |
 | `protocol/Constants.kt` | UUIDs, encryption constants |
@@ -1986,12 +2439,18 @@ if (age <= DIMMER_PENDING_WINDOW_MS && brightness != desired) {
 | **EasyTouch Plugin** | |
 | `EasyTouchDevicePlugin.kt` | EasyTouch thermostat implementation |
 | `protocol/EasyTouchConstants.kt` | UUIDs, status indices, mode mappings |
+| **GoPower Plugin** | |
+| `GoPowerDevicePlugin.kt` | GoPower solar controller implementation |
+| `protocol/GoPowerConstants.kt` | Service/characteristic UUIDs, field indices |
+| `protocol/GoPowerGattCallback.kt` | BLE notification handler, data parsing |
+| **BLE Scanner Plugin** | |
+| `BleScannerPlugin.kt` | Device discovery utility (conditional initialization) |
 | **Output & UI** | |
-| `MqttOutputPlugin.kt` | Paho MQTT client wrapper |
-| `SettingsViewModel.kt` | UI state management |
+| `MqttOutputPlugin.kt` | Paho MQTT client wrapper, system diagnostics |
+| `SettingsViewModel.kt` | UI state management, status aggregation |
 | `SettingsScreen.kt` | Main settings UI |
 
 ---
 
-*Document version: 2.1.0*
-*Last updated: January 2025 - Added EasyTouch Thermostat Protocol section*
+*Document version: 2.3.1*
+*Last updated: December 26, 2025 - Added GoPower plugin, per-plugin status tracking, system diagnostics*

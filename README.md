@@ -94,6 +94,12 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 
 The EasyTouch plugin connects to Micro-Air EasyTouch BLE thermostats commonly found in RVs.
 
+#### ⚠️ Firmware Requirement
+
+**This plugin requires EasyTouch firmware version 1.0.6.0 or newer.** The plugin uses the unified JSON protocol introduced in firmware 1.0.6.0. Older firmware versions use model-specific protocols that are not supported.
+
+To check your firmware version, connect to the thermostat and look for the "Firmware Version" diagnostic sensor in Home Assistant, or check the official EasyTouch RV app.
+
 #### Acknowledgments
 
 Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and their [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) HACS integration. Their project inspired the plugin architecture and their work decoding the thermostat's BLE protocol was essential to this implementation.
@@ -128,6 +134,52 @@ Modes are discovered dynamically from device. Common modes:
 
 ---
 
+### GoPower Solar Controller
+
+The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. This is a **read-only** plugin - it monitors solar system status but does not send commands.
+
+#### Configuration
+
+1. Expand "GoPower Settings" in the app
+2. Enter the **Controller MAC Address** (found in Bluetooth settings)
+3. Enable the **GoPower** toggle, then the **BLE Service** toggle
+
+**Note:** GoPower controllers do not require pairing or authentication.
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Read-Only Protocol** | Monitors status only, no control commands |
+| **No Authentication** | Connects without pairing or password |
+| **Real-Time Data** | ~1 second update rate |
+| **Device Diagnostics** | Model, serial number, firmware version |
+
+#### Sensors
+
+| Sensor | Description | Unit |
+|--------|-------------|------|
+| PV Voltage | Solar panel voltage | V |
+| Battery Voltage | Battery voltage | V |
+| Charge Current | Charging current | A |
+| Charge Power | Charging power (calculated) | W |
+| Battery Percentage | State of charge | % |
+| Load Current | Load current | A |
+| Load Power | Load power (calculated) | W |
+| Controller Temperature | Internal temperature | °C |
+| Load Status | Load output on/off | binary |
+| Device Model | Controller model number | text |
+| Device Serial | Serial number (decimal) | text |
+| Device Firmware | Firmware version | text |
+
+#### Troubleshooting
+
+- **No data received:** Ensure controller is in BLE range (within ~30 feet)
+- **Wrong serial number:** Plugin converts hex to decimal to match official app
+- **Connection drops:** Verify no other device is connected to the controller
+
+---
+
 ### BLE Scanner Plugin
 
 A utility plugin that scans for nearby BLE devices and publishes results to MQTT. This is not needed for anything else to function, but was added as a proof of concept for supporting multiple BLE connected plugins and might be useful, so I left it in.
@@ -142,6 +194,8 @@ A utility plugin that scans for nearby BLE devices and publishes results to MQTT
 
 Enable via the **BLE Scanner** toggle. Results are published as sensor attributes in Home Assistant.
 
+**Note:** Starting in v2.3.1, BLE Scanner only initializes and publishes to Home Assistant when enabled in the app.
+
 ---
 
 ## 🏗️ Architecture
@@ -150,14 +204,16 @@ Enable via the **BLE Scanner** toggle. Results are published as sensor attribute
 BaseBleService (foreground service)
   ├─> MqttOutputPlugin (MQTT connection & publishing)
   ├─> OneControlDevicePlugin (RV automation)
-  │    └─> Plugin-owned GATT callback for protocol handling
-  └─> BleScannerPlugin (device discovery)
+  ├─> EasyTouchDevicePlugin (climate control)
+  ├─> GoPowerDevicePlugin (solar monitoring)
+  └─> BleScannerPlugin (device discovery - optional)
 ```
 
 Each BLE device plugin:
 - Owns its `BluetoothGattCallback` completely
 - Handles authentication, framing, and protocol specifics
 - Publishes state via the `MqttPublisher` interface
+- Reports status independently (per-plugin health indicators)
 
 See [docs/INTERNALS.md](docs/INTERNALS.md) for detailed architecture documentation.
 

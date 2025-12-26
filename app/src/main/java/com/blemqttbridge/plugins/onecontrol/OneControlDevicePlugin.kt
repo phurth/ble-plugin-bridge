@@ -1230,6 +1230,7 @@ class OneControlGattCallback(
      * Handle RelayBasicLatchingStatus event (lights, switches)
      * Per decompiled LogicalDeviceRelayStatusType2: raw output state in LOW NIBBLE
      * Status byte format: upper nibble = flags, lower nibble = state (0x00=OFF, 0x01=ON)
+     * Extended format (9 bytes): includes DTC code for fault diagnostics
      */
     private fun handleRelayStatus(data: ByteArray) {
         if (data.size < 5) return
@@ -1240,6 +1241,13 @@ class OneControlGattCallback(
         val rawOutputState = statusByte and 0x0F  // State is in LOW NIBBLE
         val isOn = rawOutputState == 0x01  // 0x01 = ON, 0x00 = OFF
         
+        // Parse extended data if available (DTC code)
+        val dtc = if (data.size >= 9) {
+            ((data[5].toInt() and 0xFF) shl 8) or (data[6].toInt() and 0xFF)
+        } else {
+            null
+        }
+        
         // Create entity instance
         val entity = OneControlEntity.Switch(
             tableId = tableId,
@@ -1247,8 +1255,10 @@ class OneControlGattCallback(
             isOn = isOn
         )
         
-        Log.i(TAG, "📦 Relay ${entity.address} statusByte=0x%02X rawOutput=0x%02X state=${entity.state}".format(statusByte, rawOutputState))
+        val dtcStr = dtc?.let { " DTC=$it(${DtcCodes.getName(it)})" } ?: ""
+        Log.i(TAG, "📦 Relay ${entity.address} statusByte=0x%02X rawOutput=0x%02X state=${entity.state}$dtcStr".format(statusByte, rawOutputState))
         
+        // Publish entity state
         publishEntityState(
             entityType = EntityType.SWITCH,
             tableId = entity.tableId,
@@ -1258,11 +1268,27 @@ class OneControlGattCallback(
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
             val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
             val commandTopic = "$baseTopic/command/switch/${entity.tableId}/${entity.deviceId}"
+            val attributesTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/attributes"
+            
+            // Publish DTC attributes only for gas appliances (water heater, furnace, etc.)
+            val shouldPublishDtc = dtc != null && friendlyName.contains("gas", ignoreCase = true)
+            if (shouldPublishDtc) {
+                val attributesJson = JSONObject().apply {
+                    put("dtc_code", dtc)
+                    put("dtc_name", DtcCodes.getName(dtc!!))
+                    put("fault", DtcCodes.isFault(dtc))
+                    put("status_byte", "0x${statusByte.toString(16).uppercase().padStart(2, '0')}")
+                }
+                Log.d(TAG, "📋 Publishing DTC attributes for $friendlyName to $prefix/$attributesTopic: $attributesJson")
+                mqttPublisher.publishState("$prefix/$attributesTopic", attributesJson.toString(), true)
+            }
+            
             discoveryBuilder.buildSwitch(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
-                commandTopic = "$prefix/$commandTopic"
+                commandTopic = "$prefix/$commandTopic",
+                attributesTopic = if (shouldPublishDtc) "$prefix/$attributesTopic" else null
             )
         }
     }
@@ -2412,6 +2438,7 @@ class OneControlGattCallback(
         val macId = device.address.replace(":", "").lowercase()
         val nodeId = "onecontrol_$macId"
         val prefix = mqttPublisher.topicPrefix
+        val baseTopic = "onecontrol/${device.address}"
         
         // Device info for HA discovery - MUST match HomeAssistantMqttDiscovery.getDeviceInfo()
         // to ensure all entities group under one device
@@ -2419,8 +2446,8 @@ class OneControlGattCallback(
         
         // Diagnostic sensors to publish
         val diagnostics = listOf(
-            Triple("device_paired", "Device Paired", "diag/device_paired"),
-            Triple("ble_connected", "BLE Connected", "diag/ble_connected"),
+            Triple("authenticated", "Authenticated", "diag/authenticated"),
+            Triple("connected", "Connected", "diag/connected"),
             Triple("data_healthy", "Data Healthy", "diag/data_healthy")
         )
         
@@ -2431,7 +2458,7 @@ class OneControlGattCallback(
             val payload = JSONObject().apply {
                 put("name", name)
                 put("unique_id", uniqueId)
-                put("state_topic", "$prefix/$stateTopic")
+                put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
                 put("payload_off", "OFF")
                 put("entity_category", "diagnostic")
@@ -2449,18 +2476,24 @@ class OneControlGattCallback(
      * Publish current diagnostic state to MQTT.
      */
     private fun publishDiagnosticsState() {
-        val isPaired = device.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED
+        val isPaired = isAuthenticated  // Use protocol-level auth, not OS bonding
         val dataHealthy = computeDataHealthy()
+        val baseTopic = "onecontrol/${device.address}"
         
         // Publish to MQTT
-        mqttPublisher.publishState("diag/device_paired", if (isPaired) "ON" else "OFF", true)
-        mqttPublisher.publishState("diag/ble_connected", if (isConnected) "ON" else "OFF", true)
-        mqttPublisher.publishState("diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/authenticated", if (isPaired) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/connected", if (isConnected) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
         
-        // Update UI status
-        mqttPublisher.updateDiagnosticStatus(dataHealthy)
+        // Update UI status for this plugin
+        mqttPublisher.updatePluginStatus(
+            pluginId = "onecontrol",
+            connected = isConnected,
+            authenticated = isPaired,
+            dataHealthy = dataHealthy
+        )
         
-        Log.d(TAG, "📡 Published diagnostic state: paired=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy")
+        Log.d(TAG, "📡 Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy")
     }
     
     /**

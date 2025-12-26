@@ -19,6 +19,7 @@ import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
+import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import kotlinx.coroutines.*
 import java.util.UUID
 
@@ -55,14 +56,16 @@ class BaseBleService : Service() {
         private val _serviceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
         val serviceRunning: kotlinx.coroutines.flow.StateFlow<Boolean> = _serviceRunning
         
-        private val _bleConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
-        val bleConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _bleConnected
+        // Per-plugin status tracking
+        data class PluginStatus(
+            val pluginId: String,
+            val connected: Boolean = false,
+            val authenticated: Boolean = false,
+            val dataHealthy: Boolean = false
+        )
         
-        private val _dataHealthy = kotlinx.coroutines.flow.MutableStateFlow(false)
-        val dataHealthy: kotlinx.coroutines.flow.StateFlow<Boolean> = _dataHealthy
-        
-        private val _devicePaired = kotlinx.coroutines.flow.MutableStateFlow(false)
-        val devicePaired: kotlinx.coroutines.flow.StateFlow<Boolean> = _devicePaired
+        private val _pluginStatuses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
+        val pluginStatuses: kotlinx.coroutines.flow.StateFlow<Map<String, PluginStatus>> = _pluginStatuses
         
         private val _mqttConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
         val mqttConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _mqttConnected
@@ -135,7 +138,8 @@ class BaseBleService : Service() {
         
         override fun publishAvailability(topic: String, online: Boolean) {
             serviceScope.launch {
-                outputPlugin?.publishAvailability(online)
+                (outputPlugin as? MqttOutputPlugin)?.publishAvailability(topic, online)
+                    ?: outputPlugin?.publishAvailability(online)
             }
         }
         
@@ -144,14 +148,19 @@ class BaseBleService : Service() {
         }
         
         override fun updateDiagnosticStatus(dataHealthy: Boolean) {
-            Log.i(TAG, "📊 updateDiagnosticStatus: dataHealthy=$dataHealthy (was ${_dataHealthy.value})")
-            _dataHealthy.value = dataHealthy
+            // Deprecated - plugins should use updatePluginStatus instead
+            Log.w(TAG, "⚠️ updateDiagnosticStatus called (deprecated) - use updatePluginStatus instead")
         }
         
         override fun updateBleStatus(connected: Boolean, paired: Boolean) {
-            Log.i(TAG, "📊 updateBleStatus: connected=$connected, paired=$paired (was ble=${_bleConnected.value}, paired=${_devicePaired.value})")
-            _bleConnected.value = connected
-            _devicePaired.value = paired
+            // Deprecated - plugins should use updatePluginStatus instead
+            Log.w(TAG, "⚠️ updateBleStatus called (deprecated) - use updatePluginStatus instead")
+        }
+        
+        override fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
+            val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
+            _pluginStatuses.value = _pluginStatuses.value + (pluginId to status)
+            Log.d(TAG, "📊 Updated plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
         }
         
         override fun updateMqttStatus(connected: Boolean) {
@@ -295,9 +304,8 @@ class BaseBleService : Service() {
         // Mark service as stopped
         ServiceStateManager.setServiceRunning(applicationContext, false)
         _serviceRunning.value = false
-        _bleConnected.value = false
-        _dataHealthy.value = false
-        _devicePaired.value = false
+        // Clear plugin statuses
+        _pluginStatuses.value = emptyMap()
         _mqttConnected.value = false
         Log.i(TAG, "Service marked as stopped")
         
@@ -358,12 +366,17 @@ class BaseBleService : Service() {
             remoteControlManager?.initialize(outputPlugin!!)
             Log.i(TAG, "Remote control manager initialized")
             
-            // Initialize BLE Scanner plugin (PoC)
-            bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
-            if (bleScannerPlugin?.initialize() == true) {
-                Log.i(TAG, "BLE Scanner plugin initialized")
+            // Initialize BLE Scanner plugin only if enabled
+            if (ServiceStateManager.isBlePluginEnabled(applicationContext, BleScannerPlugin.PLUGIN_ID)) {
+                bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+                if (bleScannerPlugin?.initialize() == true) {
+                    Log.i(TAG, "BLE Scanner plugin initialized")
+                } else {
+                    Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                    bleScannerPlugin = null
+                }
             } else {
-                Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                Log.i(TAG, "BLE Scanner plugin is disabled, skipping initialization")
                 bleScannerPlugin = null
             }
         }
@@ -423,12 +436,17 @@ class BaseBleService : Service() {
             remoteControlManager?.initialize(outputPlugin!!)
             Log.i(TAG, "Remote control manager initialized")
             
-            // Initialize BLE Scanner plugin (PoC)
-            bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
-            if (bleScannerPlugin?.initialize() == true) {
-                Log.i(TAG, "BLE Scanner plugin initialized")
+            // Initialize BLE Scanner plugin only if enabled
+            if (ServiceStateManager.isBlePluginEnabled(applicationContext, BleScannerPlugin.PLUGIN_ID)) {
+                bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+                if (bleScannerPlugin?.initialize() == true) {
+                    Log.i(TAG, "BLE Scanner plugin initialized")
+                } else {
+                    Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                    bleScannerPlugin = null
+                }
             } else {
-                Log.w(TAG, "BLE Scanner plugin failed to initialize")
+                Log.i(TAG, "BLE Scanner plugin is disabled, skipping initialization")
                 bleScannerPlugin = null
             }
         }
@@ -753,10 +771,6 @@ class BaseBleService : Service() {
             
             connectedDevices[device.address] = Pair(gatt, pluginId)
             
-            // Update status flows
-            _bleConnected.value = true
-            _devicePaired.value = device.bondState == BluetoothDevice.BOND_BONDED
-            
             // Notify plugin of GATT connection
             devicePlugin?.onGattConnected(device, gatt)
             
@@ -830,10 +844,6 @@ class BaseBleService : Service() {
         
         connectedDevices.remove(device.address)
         
-        // Update status flows
-        _bleConnected.value = connectedDevices.isNotEmpty()
-        _dataHealthy.value = false
-        
         // Notify plugin
         val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
         devicePlugin?.onDeviceDisconnected(device)
@@ -872,7 +882,6 @@ class BaseBleService : Service() {
                             BluetoothDevice.BOND_BONDED -> {
                                 Log.i(TAG, "✅✅✅ Device ${it.address} bonded successfully!")
                                 pendingBondDevices.remove(it.address)
-                                _devicePaired.value = true
                                 updateNotification("Bonded - Discovering services...")
                                 
                                 // Proceed with service discovery if connected
@@ -1747,9 +1756,10 @@ class BaseBleService : Service() {
                 out.appendLine("BLE-MQTT Plugin Bridge debug log")
                 out.appendLine("Timestamp: $ts")
                 out.appendLine("Service running: ${_serviceRunning.value}")
-                out.appendLine("BLE connected: ${_bleConnected.value}")
-                out.appendLine("Device paired: ${_devicePaired.value}")
-                out.appendLine("Data healthy: ${_dataHealthy.value}")
+                out.appendLine("Plugin statuses:")
+                _pluginStatuses.value.forEach { (pluginId, status) ->
+                    out.appendLine("  $pluginId: connected=${status.connected}, auth=${status.authenticated}, dataHealthy=${status.dataHealthy}")
+                }
                 out.appendLine("MQTT connected: ${_mqttConnected.value}")
                 out.appendLine("Trace active: $traceEnabled")
                 traceFile?.let { out.appendLine("Trace file: ${it.absolutePath}") }
