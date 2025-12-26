@@ -57,6 +57,7 @@ Thumbs.db
 # Keystore files (sensitive)
 *.jks
 *.keystore
+.signing/
 
 # External native build
 .externalNativeBuild
@@ -127,4 +128,7 @@ REMOTE_CONTROL_QUICKSTART.md
 REMOTE_CONTROL_TESTING.md
 TESTING.md
 UI_IMPLEMENTATION.md
-*.sh
+
+# Test scripts (moved to scripts/ directory)
+# Note: scripts/ directory IS tracked in git for utility purposes
+
