@@ -541,14 +541,14 @@ class GoPowerGattCallback(
         
         // Define sensors
         val sensors = listOf(
-            SensorConfig("solar_voltage", "Solar Voltage", "V", "voltage", "mdi:solar-panel", "$baseTopic/solar_voltage"),
-            SensorConfig("solar_current", "Solar Current", "A", "current", "mdi:current-dc", "$baseTopic/solar_current"),
-            SensorConfig("solar_power", "Solar Power", "W", "power", "mdi:solar-power", "$baseTopic/solar_power"),
-            SensorConfig("battery_voltage", "Battery Voltage", "V", "voltage", "mdi:car-battery", "$baseTopic/battery_voltage"),
-            SensorConfig("state_of_charge", "State of Charge", "%", "battery", "mdi:battery", "$baseTopic/state_of_charge"),
-            SensorConfig("temperature", "Temperature", "°C", "temperature", "mdi:thermometer", "$baseTopic/temperature"),
-            SensorConfig("energy_today", "Energy Today", "Wh", "energy", "mdi:lightning-bolt", "$baseTopic/energy_today"),
-            SensorConfig("amp_hours", "Amp Hours", "Ah", null, "mdi:battery-charging", "$baseTopic/amp_hours")
+            SensorConfig("solar_voltage", "Solar Voltage", "V", "voltage", "measurement", "mdi:solar-panel", "$baseTopic/solar_voltage"),
+            SensorConfig("solar_current", "Solar Current", "A", "current", "measurement", "mdi:current-dc", "$baseTopic/solar_current"),
+            SensorConfig("solar_power", "Solar Power", "W", "power", "measurement", "mdi:solar-power", "$baseTopic/solar_power"),
+            SensorConfig("battery_voltage", "Battery Voltage", "V", "voltage", "measurement", "mdi:car-battery", "$baseTopic/battery_voltage"),
+            SensorConfig("state_of_charge", "State of Charge", "%", "battery", "measurement", "mdi:battery", "$baseTopic/state_of_charge"),
+            SensorConfig("temperature", "Temperature", "°C", "temperature", "measurement", "mdi:thermometer", "$baseTopic/temperature"),
+            SensorConfig("energy_today", "Energy Today", "Wh", "energy", "total_increasing", "mdi:lightning-bolt", "$baseTopic/energy_today"),
+            SensorConfig("amp_hours", "Amp Hours", "Ah", null, "total_increasing", "mdi:battery-charging", "$baseTopic/amp_hours")
         )
         
         // Publish sensor discovery
@@ -563,6 +563,9 @@ class GoPowerGattCallback(
                 put("unit_of_measurement", sensor.unit)
                 if (sensor.deviceClass != null) {
                     put("device_class", sensor.deviceClass)
+                }
+                if (sensor.stateClass != null) {
+                    put("state_class", sensor.stateClass)
                 }
                 put("icon", sensor.icon)
                 put("availability", availabilityConfig)
@@ -780,6 +783,7 @@ private data class SensorConfig(
     val name: String,
     val unit: String,
     val deviceClass: String?,
+    val stateClass: String?,
     val icon: String,
     val stateTopic: String
 )
