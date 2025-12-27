@@ -13,8 +13,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,19 +26,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.blemqttbridge.ui.components.ExpandableSection
 import com.blemqttbridge.ui.viewmodel.SettingsViewModel
+import com.blemqttbridge.utils.BatteryOptimizationHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel = viewModel(),
-    onRequestPermissions: () -> Unit
+    onNavigateToSystemSettings: () -> Unit
 ) {
     val scrollState = rememberScrollState()
     val context = LocalContext.current
@@ -104,6 +110,14 @@ fun SettingsScreen(
                         Text("v$appVersion", style = MaterialTheme.typography.labelSmall)
                     }
                 },
+                actions = {
+                    IconButton(onClick = onNavigateToSystemSettings) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "System Settings"
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -148,77 +162,6 @@ fun SettingsScreen(
                     Switch(
                         checked = serviceEnabled,
                         onCheckedChange = { viewModel.setServiceEnabled(it) }
-                    )
-                }
-            }
-            
-            // Permissions Header (above the card)
-            Text(
-                text = "Permissions",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
-            )
-            
-            // Permissions Card
-            ElevatedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    // Location Permission
-                    val hasLocation = ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.ACCESS_FINE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-                    
-                    PermissionSwitch(
-                        title = "Location",
-                        description = "Required for BLE scanning",
-                        isGranted = hasLocation,
-                        onToggle = onRequestPermissions
-                    )
-                    
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    
-                    // Bluetooth Permissions (Android 12+)
-                    val hasBluetooth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.BLUETOOTH_SCAN
-                        ) == PackageManager.PERMISSION_GRANTED &&
-                        ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.BLUETOOTH_CONNECT
-                        ) == PackageManager.PERMISSION_GRANTED
-                    } else {
-                        true // Not needed on older versions
-                    }
-                    
-                    PermissionSwitch(
-                        title = "Bluetooth",
-                        description = "Connect to BLE devices",
-                        isGranted = hasBluetooth,
-                        onToggle = onRequestPermissions
-                    )
-                    
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    
-                    // Notification Permission (Android 13+)
-                    val hasNotifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.POST_NOTIFICATIONS
-                        ) == PackageManager.PERMISSION_GRANTED
-                    } else {
-                        true // Not needed on older versions
-                    }
-                    
-                    PermissionSwitch(
-                        title = "Notifications",
-                        description = "Service status updates",
-                        isGranted = hasNotifications,
-                        onToggle = onRequestPermissions
                     )
                 }
             }
@@ -481,9 +424,10 @@ fun SettingsScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     
                     ExpandableSection(
-                        title = "Gateway Settings",
+                        title = "Settings",
                         expanded = oneControlExpanded,
                         onToggle = { viewModel.toggleOneControlExpanded() },
+                        leadingIcon = Icons.Filled.Settings,
                         modifier = Modifier.padding(top = 2.dp)
                     ) {
                         OutlinedTextField(
@@ -581,9 +525,10 @@ fun SettingsScreen(
                         
                         // Thermostat Settings
                         ExpandableSection(
-                            title = "Thermostat Settings",
+                            title = "Settings",
                             expanded = easyTouchExpanded,
                             onToggle = { viewModel.toggleEasyTouchExpanded() },
+                            leadingIcon = Icons.Filled.Settings,
                             modifier = Modifier.padding(top = 2.dp)
                         ) {
                             OutlinedTextField(
@@ -688,9 +633,10 @@ fun SettingsScreen(
                         
                         // Controller Settings
                         ExpandableSection(
-                            title = "Controller Settings",
+                            title = "Settings",
                             expanded = goPowerExpanded,
                             onToggle = { viewModel.toggleGoPowerExpanded() },
+                            leadingIcon = Icons.Filled.Settings,
                             modifier = Modifier.padding(top = 2.dp)
                         ) {
                             OutlinedTextField(
@@ -775,64 +721,6 @@ fun SettingsScreen(
                             )
                         }
                     }
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(4.dp))
-            
-            // Diagnostics Section
-            SectionHeader("Diagnostics")
-            
-            // Debug Log Export
-            ElevatedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { viewModel.exportDebugLog() },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(6.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
-                ) {
-                    Text("Export Debug Log", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            
-            // BLE Trace Toggle
-            val traceActive by viewModel.traceActive.collectAsState()
-            val traceFilePath by viewModel.traceFilePath.collectAsState()
-            
-            ElevatedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Column(modifier = Modifier.padding(6.dp)) {
-                    OutlinedButton(
-                        onClick = { viewModel.toggleBleTrace() },
-                        modifier = Modifier.fillMaxWidth(),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = if (traceActive) "Stop Trace & Send" else "Start BLE Trace",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                    
-                    // Trace status indicator
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = when {
-                            traceActive -> "Trace: active"
-                            traceFilePath != null -> "Trace: saved to $traceFilePath"
-                            else -> "Trace: inactive"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 4.dp)
-                    )
                 }
             }
         }

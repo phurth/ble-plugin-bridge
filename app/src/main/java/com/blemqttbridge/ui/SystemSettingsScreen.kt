@@ -1,0 +1,347 @@
+package com.blemqttbridge.ui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.blemqttbridge.ui.viewmodel.SettingsViewModel
+import com.blemqttbridge.utils.BatteryOptimizationHelper
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SystemSettingsScreen(
+    viewModel: SettingsViewModel = viewModel(),
+    onRequestPermissions: () -> Unit,
+    onNavigateBack: () -> Unit
+) {
+    val scrollState = rememberScrollState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("System Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(
+                            imageVector = Icons.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .verticalScroll(scrollState),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Permissions & Optimizations Section
+            SectionHeader("Permissions & Optimizations")
+            
+            // Runtime Permissions
+            Text(
+                text = "Runtime Permissions",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 6.dp, end = 6.dp, bottom = 8.dp, top = 0.dp)
+            )
+            
+            var hasLocation by remember {
+                mutableStateOf(
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+                )
+            }
+            
+            var hasBluetooth by remember {
+                mutableStateOf(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.BLUETOOTH_SCAN
+                        ) == PackageManager.PERMISSION_GRANTED
+                    } else {
+                        true
+                    }
+                )
+            }
+            
+            var hasNotifications by remember {
+                mutableStateOf(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+                    } else {
+                        true
+                    }
+                )
+            }
+            
+            // Refresh permission states when screen becomes visible (user returns from settings)
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        hasLocation = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.ACCESS_FINE_LOCATION
+                        ) == PackageManager.PERMISSION_GRANTED
+                        
+                        hasBluetooth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.BLUETOOTH_SCAN
+                            ) == PackageManager.PERMISSION_GRANTED
+                        } else {
+                            true
+                        }
+                        
+                        hasNotifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS
+                            ) == PackageManager.PERMISSION_GRANTED
+                        } else {
+                            true
+                        }
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+            }
+            
+            Column(
+                modifier = Modifier.padding(horizontal = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // Location Permission
+                PermissionRow(
+                    name = "Location",
+                    granted = hasLocation,
+                    onToggle = onRequestPermissions
+                )
+                
+                // Bluetooth Permission (Android 12+)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    PermissionRow(
+                        name = "Bluetooth",
+                        granted = hasBluetooth,
+                        onToggle = onRequestPermissions
+                    )
+                }
+                
+                // Notification Permission (Android 13+)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    PermissionRow(
+                        name = "Notifications",
+                        granted = hasNotifications,
+                        onToggle = onRequestPermissions
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Battery Optimization subsection
+            var batteryExempt by remember {
+                mutableStateOf(BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context))
+            }
+            
+            // Refresh battery exemption status when screen becomes visible (user returns from settings)
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        batteryExempt = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+            }
+            
+            Text(
+                text = "Battery Optimization",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp)
+            )
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Battery Optimization Exemption",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (batteryExempt)
+                            "Active - Service protected"
+                        else
+                            "Inactive - Service may be killed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (batteryExempt)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.error
+                    )
+                }
+                
+                Switch(
+                    checked = batteryExempt,
+                    onCheckedChange = { wantsExempt ->
+                        if (wantsExempt && !batteryExempt) {
+                            // User wants exemption - open system settings
+                            val intent = BatteryOptimizationHelper.createBatteryOptimizationIntent(context)
+                            if (intent != null) {
+                                context.startActivity(intent)
+                            }
+                        } else if (!wantsExempt && batteryExempt) {
+                            // User wants to remove exemption - open battery settings
+                            val intent = BatteryOptimizationHelper.createBatterySettingsIntent(context)
+                            context.startActivity(intent)
+                        }
+                    }
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Diagnostics Section
+            SectionHeader("Diagnostics")
+            
+            // Debug Log Export
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { viewModel.exportDebugLog() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    Text("Export Debug Log", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            
+            // BLE Trace Toggle
+            val traceActive by viewModel.traceActive.collectAsState()
+            val traceFilePath by viewModel.traceFilePath.collectAsState()
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(6.dp)) {
+                    OutlinedButton(
+                        onClick = { viewModel.toggleBleTrace() },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = if (traceActive) "Stop Trace & Send" else "Start BLE Trace",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    
+                    // Trace status indicator
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = when {
+                            traceActive -> "Trace: active"
+                            traceFilePath != null -> "Trace: saved to $traceFilePath"
+                            else -> "Trace: inactive"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionRow(
+    name: String,
+    granted: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                text = if (granted) "Granted" else "Not granted",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (granted)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.error
+            )
+        }
+        
+        Switch(
+            checked = granted,
+            onCheckedChange = { onToggle() }
+        )
+    }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+    )
+}

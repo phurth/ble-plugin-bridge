@@ -2,12 +2,17 @@ package com.blemqttbridge
 
 import android.app.Application
 import android.util.Log
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import com.blemqttbridge.core.PluginRegistry
 import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
 import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
+import com.blemqttbridge.workers.ServiceWatchdogWorker
+import java.util.concurrent.TimeUnit
 
 /**
  * Application class for BLE Plugin Bridge.
@@ -62,5 +67,27 @@ class BlePluginBridgeApplication : Application() {
         Log.i(TAG, "Plugin factory registration complete")
         Log.i(TAG, "  Available BLE plugins: ${registry.getRegisteredBlePlugins().joinToString(", ")}")
         Log.i(TAG, "  Available output plugins: ${registry.getRegisteredOutputPlugins().joinToString(", ")}")
+        
+        // Schedule service watchdog (runs every 15 minutes to ensure service stays alive)
+        scheduleServiceWatchdog()
+    }
+    
+    /**
+     * Schedule periodic watchdog to monitor service health.
+     * Runs every 15 minutes (minimum allowed by WorkManager).
+     * Survives app restart and device reboot.
+     */
+    private fun scheduleServiceWatchdog() {
+        val watchdogRequest = PeriodicWorkRequestBuilder<ServiceWatchdogWorker>(
+            15, TimeUnit.MINUTES
+        ).build()
+        
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            ServiceWatchdogWorker.WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP, // Don't reschedule if already running
+            watchdogRequest
+        )
+        
+        Log.i(TAG, "Service watchdog scheduled (15min interval)")
     }
 }

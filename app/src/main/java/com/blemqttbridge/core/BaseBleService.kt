@@ -112,6 +112,7 @@ class BaseBleService : Service() {
     private val pendingBondDevices = mutableSetOf<String>()
     
     private var isScanning = false
+    private var bluetoothEnabled = true
     
     // Debug logging and trace
     private val debugLogBuffer = ArrayDeque<String>()
@@ -122,6 +123,17 @@ class BaseBleService : Service() {
     private var traceStartedAt: Long = 0
     private var traceTimeout: Runnable? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    
+    // Bluetooth state receiver
+    private val bluetoothStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            val action = intent?.action ?: return
+            if (action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                handleBluetoothStateChange(state)
+            }
+        }
+    }
     
     /**
      * MQTT Publisher implementation for plugins.
@@ -224,6 +236,12 @@ class BaseBleService : Service() {
         val bondFilter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         registerReceiver(bondStateReceiver, bondFilter)
         Log.d(TAG, "Bond state receiver registered")
+        
+        // Register Bluetooth state receiver
+        val btStateFilter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        registerReceiver(bluetoothStateReceiver, btStateFilter)
+        bluetoothEnabled = bluetoothAdapter.isEnabled
+        Log.d(TAG, "Bluetooth state receiver registered (BT currently ${if (bluetoothEnabled) "ON" else "OFF"})")
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
@@ -357,6 +375,14 @@ class BaseBleService : Service() {
             Log.d(TAG, "Bond state receiver unregistered")
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "Bond state receiver not registered")
+        }
+        
+        // Unregister Bluetooth state receiver
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+            Log.d(TAG, "Bluetooth state receiver unregistered")
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Bluetooth state receiver not registered")
         }
         
         // Cleanup remote control manager
@@ -780,6 +806,13 @@ class BaseBleService : Service() {
             Log.w(TAG, "No target MACs configured - using unfiltered scan (may not work with screen off)")
         }
         
+        // Check if Bluetooth is enabled before scanning
+        if (!bluetoothAdapter.isEnabled) {
+            Log.w(TAG, "Cannot start scan: Bluetooth is disabled")
+            updateNotification("Bluetooth is disabled")
+            return
+        }
+        
         val scanSettings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -794,6 +827,9 @@ class BaseBleService : Service() {
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE scan", e)
             updateNotification("Error: BLE permission denied")
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "Bluetooth adapter state error", e)
+            updateNotification("Bluetooth error")
         }
     }
     
@@ -809,6 +845,56 @@ class BaseBleService : Service() {
             Log.i(TAG, "BLE scan stopped")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for stopping scan", e)
+        }
+    }
+    
+    /**
+     * Handle Bluetooth adapter state changes.
+     */
+    private fun handleBluetoothStateChange(state: Int) {
+        when (state) {
+            BluetoothAdapter.STATE_OFF -> {
+                Log.w(TAG, "⚠️ Bluetooth turned OFF")
+                bluetoothEnabled = false
+                
+                // Stop scanning if active
+                if (isScanning) {
+                    isScanning = false  // Set directly without calling stopScan (BT is off)
+                    Log.i(TAG, "Scanning stopped due to Bluetooth OFF")
+                }
+                
+                updateNotification("Bluetooth is OFF - waiting...")
+                
+                // Disconnect all devices gracefully
+                serviceScope.launch {
+                    Log.i(TAG, "Disconnecting ${connectedDevices.size} device(s) due to BT OFF")
+                    disconnectAll()
+                }
+            }
+            
+            BluetoothAdapter.STATE_ON -> {
+                Log.i(TAG, "✅ Bluetooth turned ON")
+                bluetoothEnabled = true
+                
+                updateNotification("Bluetooth restored - reconnecting...")
+                
+                // Wait a bit for BT stack to stabilize, then reconnect
+                serviceScope.launch {
+                    delay(2000)
+                    Log.i(TAG, "Attempting to reconnect devices after BT restore")
+                    reconnectToBondedDevices()
+                }
+            }
+            
+            BluetoothAdapter.STATE_TURNING_OFF -> {
+                Log.w(TAG, "⚠️ Bluetooth turning OFF...")
+                updateNotification("Bluetooth turning off...")
+            }
+            
+            BluetoothAdapter.STATE_TURNING_ON -> {
+                Log.i(TAG, "Bluetooth turning ON...")
+                updateNotification("Bluetooth turning on...")
+            }
         }
     }
     

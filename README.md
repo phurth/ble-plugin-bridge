@@ -2,11 +2,14 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
+**Current Version:** v2.3.6 - Added service hardening features and improved UI organization
+
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- **Android Device:** Android 8.0+ with BLE support
+- **Android Device:** Android 8.0+ with BLE support  
+  - **Recommended:** Android 12+ for best battery optimization support
 - **MQTT Broker:** Accessible from the Android device (e.g., Mosquitto on Home Assistant)
 - **Home Assistant:** MQTT integration enabled
 
@@ -15,15 +18,19 @@ Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQ
 1. Download the latest APK from [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases)
 2. Enable "Install unknown apps" for your browser/file manager
 3. Install the APK and grant all requested permissions
+4. **Important:** Configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
 
 ### Initial Configuration
 
 1. Open the app - all toggles will be OFF by default
-2. Configure **MQTT broker settings** (expand "Broker Settings"):
+2. Tap the **⚙️ Settings icon** (top-right) to configure system permissions:
+   - Grant **Location, Bluetooth, and Notification** permissions
+   - Enable **Battery Optimization Exemption** (critical for reliable operation)
+3. Return to main screen and configure **MQTT broker settings** (expand "Broker Settings"):
    - Host, Port, Username, Password
    - Topic Prefix: `homeassistant` (recommended for auto-discovery)
-3. Configure your **device plugin settings** (see plugin sections below)
-4. Enable toggles in order: **MQTT → Plugin → BLE Service**
+4. Configure your **device plugin settings** (see plugin sections below)
+5. Enable toggles in order: **MQTT → Plugin → BLE Service**
 
 > **Note:** Settings are locked while their toggle is ON. Turn OFF to edit.
 
@@ -195,6 +202,46 @@ A utility plugin that scans for nearby BLE devices and publishes results to MQTT
 Enable via the **BLE Scanner** toggle. Results are published as sensor attributes in Home Assistant.
 
 **Note:** Starting in v2.3.1, BLE Scanner only initializes and publishes to Home Assistant when enabled in the app.
+
+---
+
+## 🛡️ Service Reliability
+
+### Battery Optimization & Background Execution
+
+**v2.3.6 introduces comprehensive service hardening features** to prevent Android from killing the app during idle periods:
+
+#### Defense Layers
+
+1. **Battery Optimization Exemption**
+   - Prevents Doze mode from stopping the service
+   - Configure via Settings (⚙️) → Battery Optimization Exemption
+   - **Critical for overnight operation**
+
+2. **Bluetooth State Monitoring**
+   - Automatically detects when OS disables Bluetooth (common on Samsung/TCL devices)
+   - Graceful cleanup when BT turns off
+   - Auto-reconnect when BT turns back on
+
+3. **WorkManager Watchdog**
+   - Checks service health every 15 minutes
+   - Auto-restarts service if killed by OS
+   - Survives device reboots
+
+4. **Adaptive Scanning**
+   - Uses BLE scan filters for screen-off operation
+   - Maintains connections during deep sleep
+
+#### Recommended Settings
+
+For maximum reliability on aggressive battery management devices (Samsung, Xiaomi, OnePlus, etc.):
+
+1. **Battery Optimization:** Set to "Active - Service protected"
+2. **Auto-start:** Enable in device settings if available
+3. **Background restrictions:** Disable for this app
+4. **Data saver:** Add app to exception list
+
+See [docs/SERVICE_HARDENING.md](docs/SERVICE_HARDENING.md) for detailed hardening strategy.
 
 ---
 

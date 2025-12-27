@@ -21,6 +21,9 @@
     <!-- Boot permission for auto-start -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     
+    <!-- Battery optimization exemption -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    
     <!-- Declare BLE feature requirement -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 

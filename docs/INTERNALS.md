@@ -2,17 +2,16 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 26, 2025 - v2.3.5  
+> **Last Updated:** December 27, 2025 - v2.3.6  
 > **Major Changes:**  
-> - Plugin removal now kills the app and clears HA discovery topics
-> - Discovery topics are tracked for cleanup when plugins are removed
-> - Added GoPower solar charge controller plugin with full diagnostic support
-> - Refactored status/health indicators to be per-plugin instead of global
-> - UI now shows per-plugin status indicators (each plugin card shows its own connection/health status)
-> - BLE Scanner plugin now only initializes when enabled
-> - Added comprehensive system diagnostic sensors (battery, RAM, CPU, storage, WiFi, device info)
-> - Implemented trace-aware debug logging with DebugLog utility (performance optimization)
-> - Removed emoji overhead from all plugin log statements
+> - **Service Hardening:** Added battery optimization exemption, WorkManager watchdog, and Bluetooth state monitoring
+> - **UI Reorganization:** Split settings into main screen (plugins) and system settings screen (permissions/diagnostics)
+> - **Battery Optimization Helper:** Utility class for checking and requesting battery exemptions
+> - **Bluetooth State Recovery:** BroadcastReceiver monitors BT on/off events, graceful cleanup and auto-reconnect
+> - **WorkManager Watchdog:** Periodic health checks (15min) with auto-restart if service killed by OS
+> - **Lifecycle-aware State Refresh:** Permission/battery states auto-refresh when returning from system settings
+> - **Improved UI:** Settings gear icon, collapsible plugin settings sections with icons
+> - **Smart Fallback:** Permanently denied permissions → auto-open app settings page
 
 ---
 
