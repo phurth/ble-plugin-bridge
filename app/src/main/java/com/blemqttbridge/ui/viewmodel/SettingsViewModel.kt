@@ -68,15 +68,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _serviceRunningStatus = MutableStateFlow(BaseBleService.serviceRunning.value)
     val serviceRunningStatus: StateFlow<Boolean> = _serviceRunningStatus
     
-    // Status indicators should only be true if service is running AND the condition is met
-    private val _bleConnectedStatus = MutableStateFlow(false)
-    val bleConnectedStatus: StateFlow<Boolean> = _bleConnectedStatus
-    
-    private val _dataHealthyStatus = MutableStateFlow(false)
-    val dataHealthyStatus: StateFlow<Boolean> = _dataHealthyStatus
-    
-    private val _devicePairedStatus = MutableStateFlow(false)
-    val devicePairedStatus: StateFlow<Boolean> = _devicePairedStatus
+// Per-plugin status indicators - each plugin has its own status
+    // Key is plugin ID (e.g., "onecontrol", "easytouch", "gopower")
+    private val _pluginStatuses = MutableStateFlow<Map<String, BaseBleService.Companion.PluginStatus>>(emptyMap())
+    val pluginStatuses: StateFlow<Map<String, BaseBleService.Companion.PluginStatus>> = _pluginStatuses
     
     private val _mqttConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.mqttConnected.value)
     val mqttConnectedStatus: StateFlow<Boolean> = _mqttConnectedStatus
@@ -90,34 +85,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     init {
         // Collect status updates from the service companion object
-        // All status indicators are gated by serviceRunning
+        // All status indicators are gated by serviceRunning using combine() to prevent race conditions
+        
+        // Combine serviceRunning with pluginStatuses to ensure atomic updates
         viewModelScope.launch {
-            BaseBleService.serviceRunning.collect { running ->
+            combine(
+                BaseBleService.serviceRunning,
+                BaseBleService.pluginStatuses
+            ) { running, statuses ->
+                Pair(running, statuses)
+            }.collect { (running, statuses) ->
                 _serviceRunningStatus.value = running
-                // Reset all status indicators to false when service stops
+                
                 if (!running) {
-                    _bleConnectedStatus.value = false
-                    _dataHealthyStatus.value = false
-                    _devicePairedStatus.value = false
-                    _mqttConnectedStatus.value = false
+                    // Service stopped - clear ALL plugin statuses
+                    _pluginStatuses.value = emptyMap()
+                } else {
+                    // Service running - pass through per-plugin statuses directly
+                    _pluginStatuses.value = statuses
                 }
             }
         }
+        
+        // Combine serviceRunning with mqttConnected
         viewModelScope.launch {
-            BaseBleService.pluginStatuses.collect { statuses ->
-                // Aggregate plugin statuses for overall UI indicators
-                // Connected if ANY plugin is connected
-                _bleConnectedStatus.value = _serviceRunningStatus.value && statuses.values.any { it.connected }
-                // Authenticated if ANY plugin is authenticated
-                _devicePairedStatus.value = _serviceRunningStatus.value && statuses.values.any { it.authenticated }
-                // Data healthy if ANY plugin has healthy data
-                _dataHealthyStatus.value = _serviceRunningStatus.value && statuses.values.any { it.dataHealthy }
-            }
-        }
-        viewModelScope.launch {
-            BaseBleService.mqttConnected.collect { 
-                android.util.Log.i("SettingsViewModel", "MQTT status updated: $it (service running: ${_serviceRunningStatus.value})")
-                _mqttConnectedStatus.value = _serviceRunningStatus.value && it 
+            combine(
+                BaseBleService.serviceRunning,
+                BaseBleService.mqttConnected
+            ) { running, connected ->
+                Pair(running, connected)
+            }.collect { (running, connected) ->
+                android.util.Log.i("SettingsViewModel", "MQTT status updated: $connected (service running: $running)")
+                _mqttConnectedStatus.value = running && connected
             }
         }
         

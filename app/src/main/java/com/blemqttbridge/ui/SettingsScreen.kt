@@ -3,6 +3,7 @@ package com.blemqttbridge.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import com.blemqttbridge.core.BaseBleService
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -70,11 +71,12 @@ fun SettingsScreen(
     val bleScannerExpanded by viewModel.bleScannerExpanded.collectAsState()
     val showPluginPicker by viewModel.showPluginPicker.collectAsState()
     
-    // Status flows
-    val bleConnected by viewModel.bleConnectedStatus.collectAsState()
-    val dataHealthy by viewModel.dataHealthyStatus.collectAsState()
-    val devicePaired by viewModel.devicePairedStatus.collectAsState()
+    // Status flows - per-plugin status map
+    val pluginStatuses by viewModel.pluginStatuses.collectAsState()
     val mqttConnected by viewModel.mqttConnectedStatus.collectAsState()
+    
+    // Helper function to get plugin status
+    fun getPluginStatus(pluginId: String): BaseBleService.Companion.PluginStatus? = pluginStatuses[pluginId]
     
     // Confirmation dialog state
     var showRemoveConfirmation by remember { mutableStateOf(false) }
@@ -435,24 +437,25 @@ fun SettingsScreen(
                     
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     
-                    // Status Indicators (always visible for OneControl)
+                    // Status Indicators (always visible for OneControl) - per-plugin status
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 6.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
+                        val oneControlStatus = getPluginStatus("onecontrol")
                         StatusIndicator(
                             label = "Connected",
-                            isActive = bleConnected
+                            isActive = oneControlStatus?.connected == true
                         )
                         StatusIndicator(
                             label = "Data",
-                            isActive = dataHealthy
+                            isActive = oneControlStatus?.dataHealthy == true
                         )
                         StatusIndicator(
                             label = "Authenticated",
-                            isActive = devicePaired
+                            isActive = oneControlStatus?.authenticated == true
                         )
                     }
                     
@@ -532,24 +535,25 @@ fun SettingsScreen(
                         
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         
-                        // Health Status Indicators
+                        // Health Status Indicators - per-plugin status for EasyTouch
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 6.dp, vertical = 4.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
+                            val easyTouchStatus = getPluginStatus("easytouch")
                             StatusIndicator(
                                 label = "Connected",
-                                isActive = bleConnected
+                                isActive = easyTouchStatus?.connected == true
                             )
                             StatusIndicator(
                                 label = "Data",
-                                isActive = dataHealthy
+                                isActive = easyTouchStatus?.dataHealthy == true
                             )
                             StatusIndicator(
                                 label = "Authenticated",
-                                isActive = devicePaired
+                                isActive = easyTouchStatus?.authenticated == true
                             )
                         }
                         
@@ -640,7 +644,7 @@ fun SettingsScreen(
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         
                         // Health Status Indicators (only show when MAC is configured)
-                        // Note: Status only reflects GoPower when it's the active plugin
+                        // Per-plugin status for GoPower
                         if (goPowerControllerMac.isNotBlank()) {
                             Row(
                                 modifier = Modifier
@@ -648,13 +652,14 @@ fun SettingsScreen(
                                     .padding(horizontal = 6.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.SpaceEvenly
                             ) {
+                                val goPowerStatus = getPluginStatus("gopower")
                                 StatusIndicator(
                                     label = "Connected",
-                                    isActive = bleConnected
+                                    isActive = goPowerStatus?.connected == true
                                 )
                                 StatusIndicator(
                                     label = "Data",
-                                    isActive = dataHealthy
+                                    isActive = goPowerStatus?.dataHealthy == true
                                 )
                             }
                             

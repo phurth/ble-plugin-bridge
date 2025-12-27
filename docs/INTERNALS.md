@@ -2,10 +2,11 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 26, 2025 - v2.3.1  
+> **Last Updated:** December 26, 2025 - v2.3.3  
 > **Major Changes:**  
 > - Added GoPower solar charge controller plugin with full diagnostic support
 > - Refactored status/health indicators to be per-plugin instead of global
+> - UI now shows per-plugin status indicators (each plugin card shows its own connection/health status)
 > - BLE Scanner plugin now only initializes when enabled
 > - Added comprehensive system diagnostic sensors (battery, RAM, CPU, storage, WiFi, device info)
 > - Implemented trace-aware debug logging with DebugLog utility (performance optimization)
@@ -2217,37 +2218,72 @@ private fun publishDiagnosticSensors() {
 }
 ```
 
-### SettingsViewModel UI Status Aggregation
+### SettingsViewModel UI Per-Plugin Status (v2.3.2+)
 
 **Location:** `app/src/main/java/com/blemqttbridge/ui/viewmodel/SettingsViewModel.kt`
 
-The UI shows an **aggregate** status - green if ANY plugin is healthy:
+The UI shows **per-plugin** status indicators - each plugin card displays its own connection and health status independently:
 
 ```kotlin
 class SettingsViewModel : ViewModel() {
+    // Per-plugin status map (replaces aggregated booleans)
+    private val _pluginStatuses = MutableStateFlow<Map<String, BaseBleService.Companion.PluginStatus>>(emptyMap())
+    val pluginStatuses: StateFlow<Map<String, BaseBleService.Companion.PluginStatus>> = _pluginStatuses
+    
     init {
         viewModelScope.launch {
             BaseBleService.pluginStatuses.collect { statuses ->
                 if (_serviceRunningStatus.value) {
-                    // Show connected if ANY plugin is connected
-                    _bleConnectedStatus.value = statuses.values.any { it.connected }
-                    
-                    // Show healthy if ANY plugin is healthy
-                    _dataHealthyStatus.value = statuses.values.any { it.dataHealthy }
-                    
-                    // Show authenticated if ANY plugin is authenticated
-                    _devicePairedStatus.value = statuses.values.any { it.authenticated }
+                    // Pass through per-plugin statuses
+                    _pluginStatuses.value = statuses
                 } else {
                     // Service not running - clear all indicators
-                    _bleConnectedStatus.value = false
-                    _dataHealthyStatus.value = false
-                    _devicePairedStatus.value = false
+                    _pluginStatuses.value = emptyMap()
                 }
             }
         }
     }
 }
 ```
+
+### SettingsScreen Per-Plugin Indicators
+
+**Location:** `app/src/main/java/com/blemqttbridge/ui/screens/SettingsScreen.kt`
+
+Each plugin card uses a helper function to retrieve its specific status:
+
+```kotlin
+// Collect per-plugin statuses
+val pluginStatuses by viewModel.pluginStatuses.collectAsState()
+
+// Helper to get status for a specific plugin
+fun getPluginStatus(pluginId: String): BaseBleService.Companion.PluginStatus? {
+    return if (serviceRunning) pluginStatuses[pluginId] else null
+}
+
+// OneControl plugin card
+val oneControlStatus = getPluginStatus("onecontrol")
+StatusIndicator(label = "Connected", isActive = oneControlStatus?.connected == true)
+StatusIndicator(label = "Paired", isActive = oneControlStatus?.authenticated == true)
+StatusIndicator(label = "Data Healthy", isActive = oneControlStatus?.dataHealthy == true)
+
+// EasyTouch plugin card  
+val easyTouchStatus = getPluginStatus("easytouch")
+StatusIndicator(label = "Connected", isActive = easyTouchStatus?.connected == true)
+StatusIndicator(label = "Authenticated", isActive = easyTouchStatus?.authenticated == true)
+StatusIndicator(label = "Data Healthy", isActive = easyTouchStatus?.dataHealthy == true)
+
+// GoPower plugin card
+val goPowerStatus = getPluginStatus("gopower")
+StatusIndicator(label = "Connected", isActive = goPowerStatus?.connected == true)
+StatusIndicator(label = "Authenticated", isActive = goPowerStatus?.authenticated == true)
+StatusIndicator(label = "Data Healthy", isActive = goPowerStatus?.dataHealthy == true)
+```
+
+**Plugin IDs:**
+- `"onecontrol"` - OneControl RV gateway
+- `"easytouch"` - EasyTouch/Micro-Air thermostat
+- `"gopower"` - GoPower solar charge controller
 
 ### BLE Scanner Conditional Initialization
 
@@ -2320,7 +2356,7 @@ All system diagnostic sensors are published under the **"BLE MQTT Bridge"** devi
 - When toggle ON: settings fields locked (grayed out)
 - When toggle OFF: settings editable
 - Confirmation dialog for destructive actions (removing BLE Scanner)
-- Status indicators show aggregate of all plugin statuses
+- Status indicators show per-plugin status (each plugin card has independent indicators)
 
 ---
 
