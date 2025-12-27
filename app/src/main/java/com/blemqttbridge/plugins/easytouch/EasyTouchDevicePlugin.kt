@@ -138,7 +138,8 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
     
     override fun getCommandTopicPattern(device: BluetoothDevice): String {
         // EasyTouch uses zone-based topics: easytouch/{MAC}/zone_N/command/#
-        // The + wildcard matches zone_0, zone_1, etc.
+        // Also supports device-level commands: easytouch/{MAC}/device/command/reboot
+        // The + wildcard matches zone_0, zone_1, device, etc.
         return "${getMqttBaseTopic(device)}/+/command/#"
     }
     
@@ -1161,6 +1162,7 @@ class EasyTouchGattCallback(
         
         return try {
             when {
+                commandTopic.endsWith("/command/reboot") -> handleRebootCommand(payload)
                 commandTopic.endsWith("/command/mode") -> handleModeCommand(zone, payload)
                 commandTopic.endsWith("/command/temperature") -> handleTemperatureCommand(zone, payload)
                 commandTopic.endsWith("/command/temperature_high") -> handleTemperatureHighCommand(zone, payload)
@@ -1297,6 +1299,34 @@ class EasyTouchGattCallback(
         return Result.success(Unit)
     }
     
+    // ===== DEVICE COMMANDS =====
+    
+    /**
+     * Handle reboot command.
+     * Sends reset command to thermostat which triggers a device reboot.
+     * Based on HACS integration: {"Type": "Change", "Changes": {"zone": 0, "reset": " OK"}}
+     */
+    private fun handleRebootCommand(payload: String): Result<Unit> {
+        // Payload is typically "PRESS" from Home Assistant button
+        Log.i(TAG, "📤 Sending REBOOT command to thermostat")
+        
+        val command = JSONObject().apply {
+            put("Type", "Change")
+            put("Changes", JSONObject().apply {
+                put("zone", 0)
+                put("reset", " OK")  // Note: space before OK is required per HACS integration
+            })
+        }
+        
+        writeJsonCommand(command)
+        
+        // The device will disconnect as it reboots
+        // Suppress status updates to avoid confusing the UI during reboot
+        suppressStatusUpdates(10000)  // 10 seconds for reboot
+        
+        return Result.success(Unit)
+    }
+    
     // ===== DIAGNOSTIC HEALTH STATUS =====
     
     private var diagnosticsDiscoveryPublished = false
@@ -1380,7 +1410,35 @@ class EasyTouchGattCallback(
             Log.i(TAG, "Published diagnostic sensor discovery: ${sensor.objectId}")
         }
         
+        // Reboot button - device configuration control
+        publishRebootButtonDiscovery(macId, nodeId, prefix, deviceInfo)
+        
         diagnosticsDiscoveryPublished = true
+    }
+    
+    /**
+     * Publish reboot button discovery to Home Assistant.
+     * This creates a button entity that triggers thermostat reboot when pressed.
+     */
+    private fun publishRebootButtonDiscovery(macId: String, nodeId: String, prefix: String, deviceInfo: JSONObject) {
+        val uniqueId = "easytouch_${macId}_reboot"
+        val discoveryTopic = "$prefix/button/$nodeId/reboot/config"
+        
+        val payload = JSONObject().apply {
+            put("name", "Reboot")
+            put("unique_id", uniqueId)
+            // Use device/ as pseudo-zone to match existing wildcard pattern: +/command/#
+            put("command_topic", "$prefix/$baseTopic/device/command/reboot")
+            put("payload_press", "PRESS")
+            put("device_class", "restart")
+            put("entity_category", "config")
+            put("icon", "mdi:restart")
+            put("device", deviceInfo)
+            put("availability_topic", "$prefix/$baseTopic/availability")
+        }.toString()
+        
+        mqttPublisher.publishDiscovery(discoveryTopic, payload)
+        Log.i(TAG, "Published reboot button discovery")
     }
     
     /**
