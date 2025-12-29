@@ -254,10 +254,19 @@ class BaseBleService : Service() {
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
+        
+        // Schedule keepalive as backup (in case onStartCommand doesn't get ACTION_START_SCAN)
+        // This ensures keepalive is always active regardless of startup path
+        if (isKeepAliveEnabled()) {
+            Log.i(TAG, "⏰ Scheduling keepalive from onCreate() (backup path)")
+            scheduleKeepAlive()
+        } else {
+            Log.i(TAG, "⏰ Keepalive is disabled, skipping schedule")
+        }
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand: ${intent?.action}")
+        Log.i(TAG, "⚙️ onStartCommand: action=${intent?.action ?: "null"}, startId=$startId")
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
@@ -280,16 +289,32 @@ class BaseBleService : Service() {
                     // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
                     // either connects to bonded devices or falls back to scanning
                     
-                    // Schedule keepalive if enabled
+                    // Schedule keepalive if enabled (redundant with onCreate but ensures it's set)
                     if (isKeepAliveEnabled()) {
+                        Log.i(TAG, "⏰ Scheduling keepalive from ACTION_START_SCAN (primary path)")
                         scheduleKeepAlive()
+                    } else {
+                        Log.i(TAG, "⏰ Keepalive is disabled")
                     }
+                }
+            }
+            
+            null -> {
+                // Service started without explicit action (e.g., from MainActivity or system restart)
+                Log.i(TAG, "⚙️ Service started with null action - likely from UI or system restart")
+                
+                // Ensure keepalive is scheduled (onCreate already did this, but be explicit)
+                if (isKeepAliveEnabled() && keepAlivePendingIntent == null) {
+                    Log.i(TAG, "⏰ Keepalive not yet scheduled, scheduling now")
+                    scheduleKeepAlive()
                 }
             }
             
             ACTION_STOP_SCAN -> {
                 stopScanning()
             }
+            
+
             
             ACTION_STOP_SERVICE -> {
                 Log.i(TAG, "Stopping service...")
