@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.3.7 - Fixed keepalive scheduling bug and added Android TV compatibility
+**Current Version:** v2.3.8 - Fixed text input cursor jumping, permission crashes, and OneControl health indicator
 
 ## 🚀 Quick Start
 
@@ -17,20 +17,25 @@ Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQ
 
 1. Download the latest APK from [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases)
 2. Enable "Install unknown apps" for your browser/file manager
-3. Install the APK and grant all requested permissions
-4. **Important:** Configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
+3. Install the APK
+4. **On first launch:** The app will automatically request required permissions (Location, Bluetooth, Notifications)
+5. **Important:** Configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
 
 ### Initial Configuration
 
 1. Open the app - all toggles will be OFF by default
-2. Tap the **⚙️ Settings icon** (top-right) to configure system permissions:
-   - Grant **Location, Bluetooth, and Notification** permissions
+2. **Grant permissions:** On first launch, the app will request:
+   - **Location** (required for BLE scanning)
+   - **Bluetooth Scan/Connect** (Android 12+)
+   - **Notifications** (for foreground service)
+3. Tap the **⚙️ Settings icon** (top-right) to:
    - Enable **Battery Optimization Exemption** (critical for reliable operation)
-3. Return to main screen and configure **MQTT broker settings** (expand "Broker Settings"):
+   - Verify all permissions are granted
+4. Return to main screen and configure **MQTT broker settings** (expand "Broker Settings"):
    - Host, Port, Username, Password
    - Topic Prefix: `homeassistant` (recommended for auto-discovery)
-4. Configure your **device plugin settings** (see plugin sections below)
-5. Enable toggles in order: **MQTT → Plugin → BLE Service**
+5. Configure your **device plugin settings** (see plugin sections below)
+6. Enable toggles in order: **MQTT → Plugin → BLE Service**
 
 > **Note:** Settings are locked while their toggle is ON. Turn OFF to edit.
 
@@ -203,9 +208,18 @@ Enable via the **BLE Scanner** toggle. Results are published as sensor attribute
 
 **Note:** Starting in v2.3.1, BLE Scanner only initializes and publishes to Home Assistant when enabled in the app.
 
----
+---ckground Operation
 
-## 🛡️ Service Reliability
+**The app runs as a foreground service, not a foreground app.** This means:
+- ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
+- ✅ Maintains BLE connections and MQTT publishing in the background
+- ✅ Shows a persistent notification (required by Android)
+- ✅ Survives screen-off and deep sleep (with proper configuration)
+- ✅ No need to keep the app visible - perfect for kiosk setups
+
+### Battery Optimization & Background Execution
+
+**v2.3.6+ includliability
 
 ### Battery Optimization & Background Execution
 

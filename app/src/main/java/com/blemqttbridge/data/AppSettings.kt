@@ -49,8 +49,8 @@ class AppSettings(private val context: Context) {
         const val DEFAULT_MQTT_USERNAME = "mqtt"
         const val DEFAULT_MQTT_PASSWORD = "mqtt"
         const val DEFAULT_TOPIC_PREFIX = "homeassistant"
-        const val DEFAULT_GATEWAY_MAC = "24:DC:C3:ED:1E:0A"
-        const val DEFAULT_GATEWAY_PIN = "090336"
+        const val DEFAULT_GATEWAY_MAC = ""
+        const val DEFAULT_GATEWAY_PIN = ""
     }
     
     // MQTT Settings Flows

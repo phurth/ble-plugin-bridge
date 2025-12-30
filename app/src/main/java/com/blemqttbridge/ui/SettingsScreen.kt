@@ -49,24 +49,26 @@ fun SettingsScreen(
     
     // Collect all state flows
     val mqttEnabled by viewModel.mqttEnabled.collectAsState()
-    val mqttBrokerHost by viewModel.mqttBrokerHost.collectAsState()
-    val mqttBrokerPort by viewModel.mqttBrokerPort.collectAsState()
-    val mqttUsername by viewModel.mqttUsername.collectAsState()
-    val mqttPassword by viewModel.mqttPassword.collectAsState()
-    val mqttTopicPrefix by viewModel.mqttTopicPrefix.collectAsState()
+    
+    // Use local mutable state for text fields to prevent cursor jumping
+    var mqttBrokerHost by remember { mutableStateOf(viewModel.mqttBrokerHost.value) }
+    var mqttBrokerPort by remember { mutableStateOf(viewModel.mqttBrokerPort.value.toString()) }
+    var mqttUsername by remember { mutableStateOf(viewModel.mqttUsername.value) }
+    var mqttPassword by remember { mutableStateOf(viewModel.mqttPassword.value) }
+    var mqttTopicPrefix by remember { mutableStateOf(viewModel.mqttTopicPrefix.value) }
     
     val serviceEnabled by viewModel.serviceEnabled.collectAsState()
     
     val oneControlEnabled by viewModel.oneControlEnabled.collectAsState()
-    val oneControlGatewayMac by viewModel.oneControlGatewayMac.collectAsState()
-    val oneControlGatewayPin by viewModel.oneControlGatewayPin.collectAsState()
+    var oneControlGatewayMac by remember { mutableStateOf(viewModel.oneControlGatewayMac.value) }
+    var oneControlGatewayPin by remember { mutableStateOf(viewModel.oneControlGatewayPin.value) }
     
     val easyTouchEnabled by viewModel.easyTouchEnabled.collectAsState()
-    val easyTouchThermostatMac by viewModel.easyTouchThermostatMac.collectAsState()
-    val easyTouchThermostatPassword by viewModel.easyTouchThermostatPassword.collectAsState()
+    var easyTouchThermostatMac by remember { mutableStateOf(viewModel.easyTouchThermostatMac.value) }
+    var easyTouchThermostatPassword by remember { mutableStateOf(viewModel.easyTouchThermostatPassword.value) }
     
     val goPowerEnabled by viewModel.goPowerEnabled.collectAsState()
-    val goPowerControllerMac by viewModel.goPowerControllerMac.collectAsState()
+    var goPowerControllerMac by remember { mutableStateOf(viewModel.goPowerControllerMac.value) }
     
     val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
     
@@ -230,7 +232,10 @@ fun SettingsScreen(
                     ) {
                         OutlinedTextField(
                             value = mqttBrokerHost,
-                            onValueChange = { viewModel.setMqttBrokerHost(it) },
+                            onValueChange = { 
+                                mqttBrokerHost = it
+                                viewModel.setMqttBrokerHost(it)
+                            },
                             label = { Text("Host", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
@@ -238,8 +243,9 @@ fun SettingsScreen(
                         )
                         
                         OutlinedTextField(
-                            value = mqttBrokerPort.toString(),
+                            value = mqttBrokerPort,
                             onValueChange = { 
+                                mqttBrokerPort = it
                                 it.toIntOrNull()?.let { port -> viewModel.setMqttBrokerPort(port) }
                             },
                             label = { Text("Port", style = MaterialTheme.typography.bodySmall) },
@@ -251,7 +257,10 @@ fun SettingsScreen(
                         
                         OutlinedTextField(
                             value = mqttUsername,
-                            onValueChange = { viewModel.setMqttUsername(it) },
+                            onValueChange = { 
+                                mqttUsername = it
+                                viewModel.setMqttUsername(it)
+                            },
                             label = { Text("Username", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
@@ -260,7 +269,10 @@ fun SettingsScreen(
                         
                         OutlinedTextField(
                             value = mqttPassword,
-                            onValueChange = { viewModel.setMqttPassword(it) },
+                            onValueChange = { 
+                                mqttPassword = it
+                                viewModel.setMqttPassword(it)
+                            },
                             label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             visualTransformation = PasswordVisualTransformation(),
@@ -270,7 +282,10 @@ fun SettingsScreen(
                         
                         OutlinedTextField(
                             value = mqttTopicPrefix,
-                            onValueChange = { viewModel.setMqttTopicPrefix(it) },
+                            onValueChange = { 
+                                mqttTopicPrefix = it
+                                viewModel.setMqttTopicPrefix(it)
+                            },
                             label = { Text("Topic Prefix", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
@@ -432,7 +447,10 @@ fun SettingsScreen(
                     ) {
                         OutlinedTextField(
                             value = oneControlGatewayMac,
-                            onValueChange = { viewModel.setOneControlGatewayMac(it) },
+                            onValueChange = { 
+                                oneControlGatewayMac = it
+                                viewModel.setOneControlGatewayMac(it)
+                            },
                             label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
@@ -441,7 +459,10 @@ fun SettingsScreen(
                         
                         OutlinedTextField(
                             value = oneControlGatewayPin,
-                            onValueChange = { viewModel.setOneControlGatewayPin(it) },
+                            onValueChange = { 
+                                oneControlGatewayPin = it
+                                viewModel.setOneControlGatewayPin(it)
+                            },
                             label = { Text("PIN", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -533,7 +554,10 @@ fun SettingsScreen(
                         ) {
                             OutlinedTextField(
                                 value = easyTouchThermostatMac,
-                                onValueChange = { viewModel.setEasyTouchThermostatMac(it) },
+                                onValueChange = { 
+                                    easyTouchThermostatMac = it
+                                    viewModel.setEasyTouchThermostatMac(it)
+                                },
                                 label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
@@ -543,7 +567,10 @@ fun SettingsScreen(
                             
                             OutlinedTextField(
                                 value = easyTouchThermostatPassword,
-                                onValueChange = { viewModel.setEasyTouchThermostatPassword(it) },
+                                onValueChange = { 
+                                    easyTouchThermostatPassword = it
+                                    viewModel.setEasyTouchThermostatPassword(it)
+                                },
                                 label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 visualTransformation = PasswordVisualTransformation(),
@@ -641,7 +668,10 @@ fun SettingsScreen(
                         ) {
                             OutlinedTextField(
                                 value = goPowerControllerMac,
-                                onValueChange = { viewModel.setGoPowerControllerMac(it) },
+                                onValueChange = { 
+                                    goPowerControllerMac = it
+                                    viewModel.setGoPowerControllerMac(it)
+                                },
                                 label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },

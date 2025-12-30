@@ -2,14 +2,20 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 29, 2025 - v2.3.7  
-> **Major Changes (v2.3.7):**  
+> **Last Updated:** December 30, 2025 - v2.3.8  
+> **Major Changes (v2.3.8):**  
+> - **Text Input Fix:** Fixed cursor jumping on keystroke by using local mutableStateOf() instead of collectAsState()
+> - **Permission Fixes:** Added SCHEDULE_EXACT_ALARM, USE_EXACT_ALARM, and BLUETOOTH_SCAN neverForLocation flag
+> - **Automatic Permissions:** Added checkAndRequestPermissionsOnStartup() in MainActivity.onCreate()
+> - **OneControl DataHealthy:** Fixed bouncing indicator by removing time-based check for event-driven plugin
+> 
+> **Previous Changes (v2.3.7):**  
 > - **Keepalive Scheduling Fix:** Fixed critical bug where keepalive would not schedule if service started from UI instead of explicit intent
 > - **Multi-path Scheduling:** Keepalive now schedules in onCreate() as backup, onStartCommand with ACTION_START_SCAN, and null action handler
 > - **Android TV Compatibility:** Added optional touchscreen and leanback features for Android TV box support
 > - **Improved Logging:** Better startup path tracking and keepalive status visibility
 >
-> **Previous Changes (v2.3.6):**  
+> **Changes (v2.3.6):**  
 > - **Service Hardening:** Added battery optimization exemption, WorkManager watchdog, and Bluetooth state monitoring
 > - **UI Reorganization:** Split settings into main screen (plugins) and system settings screen (permissions/diagnostics)
 > - **Battery Optimization Helper:** Utility class for checking and requesting battery exemptions

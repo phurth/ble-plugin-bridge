@@ -57,6 +57,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // Check and request critical permissions on startup
+        checkAndRequestPermissionsOnStartup()
+        
         setContent {
             BleTheme {
                 var showSystemSettings by remember { mutableStateOf(false) }
@@ -72,6 +75,40 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+    
+    private fun checkAndRequestPermissionsOnStartup() {
+        val missingPermissions = mutableListOf<String>()
+        
+        // Check location permission (required for BLE)
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            missingPermissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        
+        // Check Bluetooth permissions (Android 12+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+        
+        // Check notification permission (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        
+        // Request missing permissions immediately
+        if (missingPermissions.isNotEmpty()) {
+            android.util.Log.d("MainActivity", "Requesting ${missingPermissions.size} missing permissions on startup")
+            permissionLauncher.launch(missingPermissions.toTypedArray())
+        } else {
+            android.util.Log.d("MainActivity", "All required permissions already granted")
         }
     }
     

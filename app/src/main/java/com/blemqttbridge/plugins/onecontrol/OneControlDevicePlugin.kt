@@ -2403,9 +2403,10 @@ class OneControlGattCallback(
      * Compute if data stream is healthy (recent frames seen within timeout).
      */
     private fun computeDataHealthy(): Boolean {
-        val now = System.currentTimeMillis()
-        val hasRecentData = lastDataTimestampMs > 0 && (now - lastDataTimestampMs) <= DATA_HEALTH_TIMEOUT_MS
-        return isConnected && hasRecentData
+        // OneControl is event-driven - it only sends notifications when RV-C state changes.
+        // Silence doesn't indicate unhealthy data, just that nothing has changed.
+        // Data is healthy as long as we're connected and authenticated.
+        return isConnected && isAuthenticated
     }
     
     /**
