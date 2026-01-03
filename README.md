@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.3.9 - Fixed dimmable light panel updates not syncing to Home Assistant
+**Current Version:** v2.4.0 - Added connection watchdog and fixed diagnostic sensor availability tracking
 
 ## 🚀 Quick Start
 

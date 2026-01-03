@@ -2,8 +2,15 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 30, 2025 - v2.3.9  
-> **Major Changes (v2.3.9):**  
+> **Last Updated:** January 3, 2026 - v2.4.0  
+> **Major Changes (v2.4.0):**  
+> - **Connection Watchdog:** Added 60-second watchdog to detect zombie states and stale connections
+> - **Diagnostic Sensor LWT:** All diagnostic sensors now reference global availability topic for proper offline status
+> - **OneControl Disconnect Fix:** Diagnostic state now updates immediately on disconnect
+> - **Zombie State Detection:** Automatically detects when GATT connection exists but isConnected=false
+> - **Stale Connection Detection:** Triggers reconnection if no successful operations for 5 minutes
+> 
+> **Previous Changes (v2.3.9):**  
 > - **Dimmable Light Panel Sync Fix:** Removed overly-aggressive spurious status guard that blocked panel-initiated updates
 > - Panel operations (ON/OFF/dimming) now update Home Assistant immediately
 > - Pending guard still protects against spurious updates during HA→panel commands

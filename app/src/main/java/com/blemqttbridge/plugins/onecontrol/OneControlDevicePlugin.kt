@@ -204,6 +204,7 @@ class OneControlGattCallback(
         
         // Timing constants from legacy app
         private const val HEARTBEAT_INTERVAL_MS = 5000L
+        private const val WATCHDOG_INTERVAL_MS = 60000L  // Check connection health every 60s
         private const val DEFAULT_DEVICE_TABLE_ID: Byte = 0x08
         
         // MTU size from legacy app (Constants.BLE_MTU_SIZE)
@@ -381,6 +382,8 @@ class OneControlGattCallback(
     
     // Heartbeat
     private var heartbeatRunnable: Runnable? = null
+    private var watchdogRunnable: Runnable? = null
+    private var lastSuccessfulOperationTime: Long = System.currentTimeMillis()
     
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         Log.i(TAG, "🔌 Connection state changed: status=$status, newState=$newState, callback=${this.hashCode()}")
@@ -734,6 +737,8 @@ class OneControlGattCallback(
             return
         }
         
+        lastSuccessfulOperationTime = System.currentTimeMillis()
+        
         if (data == null || data.isEmpty()) {
             Log.w(TAG, "⚠️ Empty data from characteristic read")
             return
@@ -841,6 +846,9 @@ class OneControlGattCallback(
             
             // Start heartbeat
             startHeartbeat()
+            
+            // Start connection watchdog
+            startWatchdog()
         }, 500)
         
         // Send GetDevicesMetadata to get friendly names - ALWAYS send, no guards
@@ -943,6 +951,7 @@ class OneControlGattCallback(
         Log.i(TAG, "📝 onCharacteristicWrite: $uuid, status=$status")
         
         if (status == BluetoothGatt.GATT_SUCCESS) {
+            lastSuccessfulOperationTime = System.currentTimeMillis()
             Log.i(TAG, "✅ Write successful to $uuid")
             
             // After KEY write, handleUnlockStatusRead will re-read UNLOCK_STATUS to verify
@@ -2369,8 +2378,53 @@ class OneControlGattCallback(
         }
     }
     
+    /**
+     * Start connection watchdog - detects zombie states
+     */
+    private fun startWatchdog() {
+        stopWatchdog()
+        
+        watchdogRunnable = object : Runnable {
+            override fun run() {
+                val currentGattInstance = currentGatt
+                val timeSinceLastOp = System.currentTimeMillis() - lastSuccessfulOperationTime
+                
+                Log.d(TAG, "🐕 Watchdog check: isConnected=$isConnected, isAuth=$isAuthenticated, gatt=${currentGattInstance != null}, timeSince=${timeSinceLastOp}ms")
+                
+                // Detect zombie state: should be connected but isn't
+                if (currentGattInstance != null && !isConnected) {
+                    Log.e(TAG, "🐕 ZOMBIE STATE DETECTED: GATT exists but isConnected=false")
+                    Log.e(TAG, "🐕 Forcing cleanup and reconnection...")
+                    cleanup(currentGattInstance)
+                    onDisconnect(device, -1)
+                }
+                // Detect stale connection: connected but no operations for 5 minutes
+                else if (isConnected && isAuthenticated && timeSinceLastOp > 300000) {
+                    Log.e(TAG, "🐕 STALE CONNECTION DETECTED: No operations for ${timeSinceLastOp/1000}s")
+                    Log.e(TAG, "🐕 Forcing reconnection...")
+                    currentGattInstance?.let { cleanup(it) }
+                    onDisconnect(device, -1)
+                }
+                
+                handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            }
+        }
+        
+        handler.postDelayed(watchdogRunnable!!, WATCHDOG_INTERVAL_MS)
+        Log.i(TAG, "🐕 Connection watchdog started (every ${WATCHDOG_INTERVAL_MS/1000}s)")
+    }
+    
+    private fun stopWatchdog() {
+        watchdogRunnable?.let {
+            handler.removeCallbacks(it)
+            watchdogRunnable = null
+            Log.d(TAG, "🐕 Watchdog stopped")
+        }
+    }
+    
     private fun cleanup(gatt: BluetoothGatt) {
         stopHeartbeat()
+        stopWatchdog()
         stopActiveStreamReading()
         
         try {
@@ -2382,6 +2436,7 @@ class OneControlGattCallback(
         isConnected = false
         isAuthenticated = false
         mqttPublisher.updateBleStatus(connected = false, paired = false)
+        publishDiagnosticsState()  // Update diagnostic sensors on disconnect
         notificationsEnableStarted = false
         seedValue = null
         currentGatt = null
@@ -2443,6 +2498,9 @@ class OneControlGattCallback(
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
                 put("payload_off", "OFF")
+                put("availability_topic", "$prefix/availability")
+                put("payload_available", "online")
+                put("payload_not_available", "offline")
                 put("entity_category", "diagnostic")
                 put("device", deviceInfo)
             }.toString()
