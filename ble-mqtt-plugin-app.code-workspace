@@ -1,16 +1,10 @@
 {
 	"folders": [
 		{
-			"path": "../EasyTouch"
-		},
-		{
 			"path": "."
 		},
 		{
 			"path": "../../../.gradle"
-		},
-		{
-			"path": "../../../Library/CloudStorage/SynologyDrive-synctask/Documents/Technology/Dev Stuff/Decom (from backup)/android_ble_bridge"
 		}
 	],
 	"settings": {

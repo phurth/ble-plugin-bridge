@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.2 - Fire tablet compatibility fix
+**Current Version:** v2.4.3 - Android TV launcher support, graceful BLE unavailable handling
 
 ## 🚀 Quick Start
 

@@ -2,15 +2,13 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 4, 2026 - v2.4.2  
-> **Major Changes (v2.4.2):**  
-> - **Fire Tablet Compatibility:** Added `tools:targetApi="s"` annotations to Android 12+ BLE permissions for compatibility with older Fire OS versions
+> **Last Updated:** January 4, 2026 - v2.4.3  
+> **Major Changes (v2.4.3):**  
+> - **Android TV Launcher Support:** Added LEANBACK_LAUNCHER category so app appears in Android TV/Google TV launcher
+> - **BLE Unavailable Handling:** Graceful error handling when BLE scanner not available (e.g., Emteria Android on RPi)
 >
-> **Previous Changes (v2.4.1):**  
-> - **GoPower Energy Sensor:** New "Energy" sensor shows daily energy production in Wh (Ah × battery voltage)
-> - **GoPower Protocol Cleanup:** Removed unreliable serial number sensor, simplified to essential sensors only
-> - **GoPower Reboot Command:** Added unlock sequence (&G++0900) before reboot command per official app protocol
-> - **Removed Historical Fault Sensors:** Field 5 contains historical fault data, not current fault status - removed as misleading
+> **Previous Changes (v2.4.2):**  
+> - **Fire Tablet Compatibility:** Added `tools:targetApi="s"` annotations to Android 12+ BLE permissions for compatibility with older Fire OS versions
 >
 > **Previous Changes (v2.4.0):**  
 > - **Connection Watchdog:** Added 60-second watchdog to detect zombie states and stale connections

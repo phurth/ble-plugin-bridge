@@ -5,6 +5,24 @@ All notable changes to the BLE-MQTT Plugin Bridge project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.3] - 2026-01-04
+
+### Added
+- **Android TV Launcher Support**: App now appears in Android TV / Google TV launcher
+  - Added `LEANBACK_LAUNCHER` category to MainActivity intent filter
+  - Added banner attribute for TV launcher display
+  - Tested on Onn 4K Pro Streaming Device
+
+### Fixed
+- **BLE Unavailable Crash**: App no longer crashes on devices without BLE support
+  - Root cause: `BluetoothAdapter.getBluetoothLeScanner()` returns null on some devices (e.g., Emteria Android on Raspberry Pi)
+  - Solution: Added null-safety checks and graceful error handling
+  - Result: App shows "BLE not available" message instead of crash loop
+
+### Tested Devices
+- **Onn 4K Pro Streaming Device** (Android 14): Full BLE support confirmed, ethernet + WiFi
+- **Raspberry Pi 4 + Emteria** (Android 14): No BLE support (driver limitation), app handles gracefully
+
 ## [2.4.2] - 2026-01-04
 
 ### Fixed

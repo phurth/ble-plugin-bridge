@@ -92,7 +92,8 @@ class BaseBleService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
     private lateinit var bluetoothAdapter: BluetoothAdapter
-    private lateinit var bluetoothLeScanner: BluetoothLeScanner
+    private var bluetoothLeScanner: BluetoothLeScanner? = null
+    private var bleNotAvailable: Boolean = false
     private lateinit var pluginRegistry: PluginRegistry
     private lateinit var memoryManager: MemoryManager
     private var alarmManager: AlarmManager? = null
@@ -228,6 +229,12 @@ class BaseBleService : Service() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
         bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+        
+        // Check if BLE is available
+        if (bluetoothLeScanner == null) {
+            Log.e(TAG, "BLE Scanner not available - device may not support Bluetooth Low Energy")
+            bleNotAvailable = true
+        }
         
         pluginRegistry = PluginRegistry.getInstance()
         memoryManager = MemoryManager(application)
@@ -862,6 +869,14 @@ class BaseBleService : Service() {
             return
         }
         
+        // Check if BLE scanner is available
+        val scanner = bluetoothLeScanner
+        if (scanner == null) {
+            Log.e(TAG, "Cannot start scan: BLE not available on this device")
+            updateNotification("BLE not available")
+            return
+        }
+        
         val scanSettings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -869,7 +884,7 @@ class BaseBleService : Service() {
         try {
             // Use filters if available, otherwise null (unfiltered)
             val filters = if (scanFilters.isNotEmpty()) scanFilters else null
-            bluetoothLeScanner.startScan(filters, scanSettings, scanCallback)
+            scanner.startScan(filters, scanSettings, scanCallback)
             isScanning = true
             updateNotification("Scanning for devices...")
             Log.i(TAG, "BLE scan started with ${scanFilters.size} filter(s)")
@@ -888,8 +903,10 @@ class BaseBleService : Service() {
     private fun stopScanning() {
         if (!isScanning) return
         
+        val scanner = bluetoothLeScanner ?: return
+        
         try {
-            bluetoothLeScanner.stopScan(scanCallback)
+            scanner.stopScan(scanCallback)
             isScanning = false
             Log.i(TAG, "BLE scan stopped")
         } catch (e: SecurityException) {
