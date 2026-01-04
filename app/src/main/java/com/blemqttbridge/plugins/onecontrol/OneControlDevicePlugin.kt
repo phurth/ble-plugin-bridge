@@ -57,6 +57,13 @@ class OneControlDevicePlugin : BleDevicePlugin {
     override val pluginId: String = PLUGIN_ID
     override val displayName: String = "OneControl Gateway (v2)"
     
+    /**
+     * OneControl gateways require explicit bonding for authentication.
+     * This will only bond with the user-configured MAC address, preventing
+     * accidental connections to neighbors' gateways in RV parks.
+     */
+    override fun requiresBonding(): Boolean = true
+    
     private lateinit var context: Context
     private var config: PluginConfig? = null
     

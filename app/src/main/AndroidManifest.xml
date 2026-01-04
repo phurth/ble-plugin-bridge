@@ -88,6 +88,7 @@
                 <action android:name="com.blemqttbridge.ENABLE_PLUGIN" />
                 <action android:name="com.blemqttbridge.DISABLE_PLUGIN" />
                 <action android:name="com.blemqttbridge.LIST_PLUGINS" />
+                <action android:name="com.blemqttbridge.CONFIGURE_ONECONTROL" />
             </intent-filter>
         </receiver>
 

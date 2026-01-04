@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,15 +61,27 @@ fun SettingsScreen(
     val serviceEnabled by viewModel.serviceEnabled.collectAsState()
     
     val oneControlEnabled by viewModel.oneControlEnabled.collectAsState()
-    var oneControlGatewayMac by remember { mutableStateOf(viewModel.oneControlGatewayMac.value) }
-    var oneControlGatewayPin by remember { mutableStateOf(viewModel.oneControlGatewayPin.value) }
+    val oneControlGatewayMacFlow by viewModel.oneControlGatewayMac.collectAsState()
+    val oneControlGatewayPinFlow by viewModel.oneControlGatewayPin.collectAsState()
+    var oneControlGatewayMac by remember { mutableStateOf("") }
+    var oneControlGatewayPin by remember { mutableStateOf("") }
     
     val easyTouchEnabled by viewModel.easyTouchEnabled.collectAsState()
-    var easyTouchThermostatMac by remember { mutableStateOf(viewModel.easyTouchThermostatMac.value) }
-    var easyTouchThermostatPassword by remember { mutableStateOf(viewModel.easyTouchThermostatPassword.value) }
+    val easyTouchThermostatMacFlow by viewModel.easyTouchThermostatMac.collectAsState()
+    val easyTouchThermostatPasswordFlow by viewModel.easyTouchThermostatPassword.collectAsState()
+    var easyTouchThermostatMac by remember { mutableStateOf("") }
+    var easyTouchThermostatPassword by remember { mutableStateOf("") }
     
     val goPowerEnabled by viewModel.goPowerEnabled.collectAsState()
-    var goPowerControllerMac by remember { mutableStateOf(viewModel.goPowerControllerMac.value) }
+    val goPowerControllerMacFlow by viewModel.goPowerControllerMac.collectAsState()
+    var goPowerControllerMac by remember { mutableStateOf("") }
+    
+    // Sync flow values to local state when they change (fixes empty fields issue)
+    LaunchedEffect(oneControlGatewayMacFlow) { oneControlGatewayMac = oneControlGatewayMacFlow }
+    LaunchedEffect(oneControlGatewayPinFlow) { oneControlGatewayPin = oneControlGatewayPinFlow }
+    LaunchedEffect(easyTouchThermostatMacFlow) { easyTouchThermostatMac = easyTouchThermostatMacFlow }
+    LaunchedEffect(easyTouchThermostatPasswordFlow) { easyTouchThermostatPassword = easyTouchThermostatPasswordFlow }
+    LaunchedEffect(goPowerControllerMacFlow) { goPowerControllerMac = goPowerControllerMacFlow }
     
     val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
     
@@ -300,10 +313,10 @@ fun SettingsScreen(
             // Plugins Section
             SectionHeader("Plugins")
             
-            // Add Plugin Button
+            // Add Plugin Button (disabled when service is running)
             OutlinedButton(
                 onClick = { viewModel.showPluginPicker() },
-                enabled = true,
+                enabled = !serviceEnabled,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(32.dp)
@@ -316,7 +329,10 @@ fun SettingsScreen(
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Add Plugin", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    text = if (serviceEnabled) "Stop service to add plugins" else "Add Plugin",
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
             
             // Plugin Picker Dialog
@@ -400,12 +416,13 @@ fun SettingsScreen(
                                         pluginToRemove = "onecontrol"
                                         showRemoveConfirmation = true
                                     },
+                                    enabled = !serviceEnabled,
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Remove plugin",
-                                        tint = MaterialTheme.colorScheme.error,
+                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -445,6 +462,13 @@ fun SettingsScreen(
                         leadingIcon = Icons.Filled.Settings,
                         modifier = Modifier.padding(top = 2.dp)
                     ) {
+                        Text(
+                            text = "Enter MAC and PIN, then toggle service ON with gateway in pairing mode (hold button until LED blinks).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        
                         OutlinedTextField(
                             value = oneControlGatewayMac,
                             onValueChange = { 
@@ -454,7 +478,7 @@ fun SettingsScreen(
                             label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = true
+                            enabled = !serviceEnabled
                         )
                         
                         OutlinedTextField(
@@ -467,7 +491,7 @@ fun SettingsScreen(
                             textStyle = MaterialTheme.typography.bodyMedium,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = true
+                            enabled = !serviceEnabled
                         )
                     }
                 }
@@ -506,12 +530,13 @@ fun SettingsScreen(
                                         pluginToRemove = "easytouch"
                                         showRemoveConfirmation = true
                                     },
+                                    enabled = !serviceEnabled,
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Remove plugin",
-                                        tint = MaterialTheme.colorScheme.error,
+                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -562,7 +587,7 @@ fun SettingsScreen(
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
                                 modifier = Modifier.fillMaxWidth(),
-                                enabled = true
+                                enabled = !serviceEnabled
                             )
                             
                             OutlinedTextField(
@@ -575,7 +600,7 @@ fun SettingsScreen(
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 visualTransformation = PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(),
-                                enabled = true
+                                enabled = !serviceEnabled
                             )
                             
                             Text(
@@ -621,12 +646,13 @@ fun SettingsScreen(
                                         pluginToRemove = "gopower"
                                         showRemoveConfirmation = true
                                     },
+                                    enabled = !serviceEnabled,
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Remove plugin",
-                                        tint = MaterialTheme.colorScheme.error,
+                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -676,7 +702,7 @@ fun SettingsScreen(
                                 textStyle = MaterialTheme.typography.bodyMedium,
                                 placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
                                 modifier = Modifier.fillMaxWidth(),
-                                enabled = true
+                                enabled = !serviceEnabled
                             )
                             
                             Text(

@@ -537,6 +537,12 @@ class BaseBleService : Service() {
     ) {
         Log.i(TAG, "Initializing ${enabledBlePlugins.size} BLE plugins: $enabledBlePlugins")
         
+        // CRITICAL: Clear any previously loaded plugins to ensure fresh state
+        // This prevents stale plugin instances from interfering when service restarts
+        // or when plugins are added/removed dynamically
+        Log.i(TAG, "Clearing previously loaded plugins before initialization...")
+        pluginRegistry.cleanup()
+        
         // Load output plugin first (needed for publishing)
         outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
         if (outputPlugin == null) {
@@ -1084,16 +1090,34 @@ class BaseBleService : Service() {
             // Subscribe to command topics for this device
             subscribeToDeviceCommands(device, pluginId, devicePlugin)
             
-            // NOTE: Do NOT call createBond() explicitly here!
-            // The legacy app does not call createBond() - it lets the BLE stack
-            // handle bonding automatically when accessing encrypted characteristics.
-            // Calling createBond() explicitly can cause bond instability and status 133 errors.
-            Log.i(TAG, "Connected GATT - bond state: ${device.bondState} (${when(device.bondState) {
+            // Log current bond state
+            val bondStateStr = when(device.bondState) {
                 BluetoothDevice.BOND_BONDED -> "BONDED"
                 BluetoothDevice.BOND_BONDING -> "BONDING"
                 BluetoothDevice.BOND_NONE -> "NONE"
                 else -> "UNKNOWN"
-            }})")
+            }
+            Log.i(TAG, "Connected GATT - bond state: ${device.bondState} ($bondStateStr)")
+            
+            // Check if this is a CONFIGURED device that requires bonding
+            // SECURITY: Only call createBond() for explicitly configured devices,
+            // not auto-discovered devices. This prevents unwanted pairing in
+            // crowded environments like RV parks.
+            val isConfiguredDevice = devicePlugin?.getConfiguredDevices()
+                ?.any { it.equals(device.address, ignoreCase = true) } == true
+            val requiresBonding = devicePlugin?.requiresBonding() == true
+            
+            if (isConfiguredDevice && requiresBonding && device.bondState == BluetoothDevice.BOND_NONE) {
+                Log.i(TAG, "🔐 Device ${device.address} requires bonding - initiating createBond()")
+                Log.i(TAG, "   (This is a CONFIGURED device - safe to bond)")
+                pendingBondDevices.add(device.address)
+                updateNotification("Pairing with ${device.address}...")
+                val bondResult = device.createBond()
+                Log.i(TAG, "🔐 createBond() returned: $bondResult")
+            } else if (!isConfiguredDevice && requiresBonding) {
+                Log.w(TAG, "⚠️ Device ${device.address} requires bonding but is NOT configured - skipping createBond()")
+                Log.w(TAG, "   (This prevents accidental pairing with neighbors' devices)")
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")

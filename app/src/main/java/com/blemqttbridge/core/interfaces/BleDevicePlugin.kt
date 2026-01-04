@@ -188,6 +188,24 @@ interface BleDevicePlugin {
      * Clean up all resources.
      */
     fun destroy()
+    
+    // ===== BONDING =====
+    
+    /**
+     * Whether this device type requires explicit bonding/pairing.
+     * 
+     * If true, the service will call createBond() for CONFIGURED devices
+     * (from getConfiguredDevices()) that are not already bonded.
+     * 
+     * This is ONLY called for devices the user has explicitly configured,
+     * NOT for auto-discovered devices. This prevents unwanted pairing attempts
+     * to neighbors' devices in crowded environments like RV parks.
+     * 
+     * Default is false (let BLE stack handle bonding implicitly).
+     * 
+     * @return true if explicit bonding is required
+     */
+    fun requiresBonding(): Boolean = false
 }
 
 /**
