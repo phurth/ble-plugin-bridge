@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.3 - Android TV launcher support, graceful BLE unavailable handling
+**Current Version:** v2.4.6 - Android TV Power Fix, prevents service from being killed when TV enters standby
 
 ## 🚀 Quick Start
 
@@ -258,6 +258,25 @@ Enable via the **BLE Scanner** toggle. Results are published as sensor attribute
    **When to disable:**
    - ❌ Battery-powered devices where power savings are critical
    - ❌ You only use the app occasionally (connections auto-reconnect on device wake)
+
+6. **Android TV Power Fix (v2.4.6+)**
+   - **Prevents service from being killed when TV enters standby**
+   - HDMI-CEC sends "standby" command to streaming devices when TV powers off
+   - This setting disables the device's response to CEC standby commands
+   - **Requires ADB permission grant (one-time setup)**
+   - Auto-applies on service start once permission is granted
+   
+   **Setup (via ADB):**
+   ```bash
+   adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS
+   ```
+   
+   **Or manually disable CEC:**
+   ```bash
+   adb shell settings put global hdmi_control_auto_device_off_enabled 0
+   ```
+   
+   **UI Access:** Settings → System Settings → Android TV Power Fix (only visible on Android TV devices)
 
 #### Recommended Settings
 

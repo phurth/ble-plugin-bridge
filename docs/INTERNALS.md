@@ -2,8 +2,14 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 4, 2026 - v2.4.3  
-> **Major Changes (v2.4.3):**  
+> **Last Updated:** January 5, 2026 - v2.4.6  
+> **Major Changes (v2.4.6):**  
+> - **Android TV Power Fix:** Prevents foreground service from being killed when TV enters standby mode via HDMI-CEC
+> - **AndroidTvHelper Utility:** Detects Android TV, manages HDMI-CEC auto device off setting
+> - **Auto-Apply on Service Start:** Service automatically disables CEC auto-off when permission granted
+> - **Settings UI:** New "Android TV Power Fix" section in System Settings (only visible on Android TV)
+>
+> **Previous Changes (v2.4.3):**  
 > - **Android TV Launcher Support:** Added LEANBACK_LAUNCHER category so app appears in Android TV/Google TV launcher
 > - **BLE Unavailable Handling:** Graceful error handling when BLE scanner not available (e.g., Emteria Android on RPi)
 >
