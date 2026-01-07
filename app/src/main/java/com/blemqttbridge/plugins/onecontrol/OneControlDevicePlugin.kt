@@ -1821,7 +1821,16 @@ class OneControlGattCallback(
     }
     
     /**
-     * Re-publish HA discovery with friendly name
+     * Re-publish HA discovery with friendly name when metadata arrives.
+     * 
+     * CRITICAL: The guards checking haDiscoveryPublished MUST remain in place.
+     * They prevent publishing ALL entity types (switch, light, cover_state, tank) for EVERY device.
+     * Only entity types that were already published (based on actual device state) get republished
+     * with friendly names. Without these guards, a single device creates 4 duplicate entities.
+     * 
+     * Example: A switch device publishes switch discovery when its state arrives.
+     * When metadata arrives later, this only republishes the switch discovery with the friendly name.
+     * It does NOT publish light/cover/tank discoveries for that switch.
      */
     private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, friendlyName: String) {
         val keyHex = "%02x%02x".format(tableId, deviceId)
@@ -1829,67 +1838,78 @@ class OneControlGattCallback(
         val prefix = mqttPublisher.topicPrefix
         val baseTopic = "onecontrol/${device.address}"
         
-        Log.i(TAG, "📢 Publishing discovery with friendly name for $tableId:$deviceId: $friendlyName")
+        Log.d(TAG, "🔍 Republish check for $tableId:$deviceId ($friendlyName) - published set: ${haDiscoveryPublished.filter { it.contains(keyHex) }}")
         
-        // Publish switch discovery - even if not in haDiscoveryPublished yet
-        // This handles the race where metadata arrives before entity states
-        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-        val switchCommandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
-        val switchDiscovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
-            gatewayMac = device.address,
-            deviceAddr = deviceAddr,
-            deviceName = friendlyName,
-            stateTopic = "$prefix/$stateTopic",
-            commandTopic = "$prefix/$switchCommandTopic",
-            appVersion = appVersion
-        )
-        val switchDiscoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
-        mqttPublisher.publishDiscovery(switchDiscoveryTopic, switchDiscovery.toString())
-        haDiscoveryPublished.add("switch_$keyHex")
+        // GUARD: Only republish switch if it was already published (prevents duplicate entities)
+        if (haDiscoveryPublished.contains("switch_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub switch: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
+            val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
         
-        // Publish light discovery
-        val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
-        val lightCommandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
-        val lightDiscovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
-            gatewayMac = device.address,
-            deviceAddr = deviceAddr,
-            deviceName = friendlyName,
-            stateTopic = "$prefix/$stateTopic",
-            commandTopic = "$prefix/$lightCommandTopic",
-            brightnessTopic = "$prefix/$brightnessTopic",
-            appVersion = appVersion
-        )
-        val lightDiscoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
-        mqttPublisher.publishDiscovery(lightDiscoveryTopic, lightDiscovery.toString())
-        haDiscoveryPublished.add("light_$keyHex")
+        // GUARD: Only republish light if it was already published (prevents duplicate entities)
+        if (haDiscoveryPublished.contains("light_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub light: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
+            val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
+            val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                brightnessTopic = "$prefix/$brightnessTopic",
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
         
-        // Publish cover state sensor discovery
-        val coverDiscovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
-            gatewayMac = device.address,
-            deviceAddr = deviceAddr,
-            deviceName = friendlyName,
-            stateTopic = "$prefix/$stateTopic",
-            appVersion = appVersion
-        )
-        val coverDiscoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
-        mqttPublisher.publishDiscovery(coverDiscoveryTopic, coverDiscovery.toString())
-        haDiscoveryPublished.add("cover_state_$keyHex")
+        // GUARD: Only republish tank if it was already published (prevents duplicate entities)
+        if (haDiscoveryPublished.contains("tank_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub tank: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+            val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                gatewayMac = device.address,
+                sensorName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                unit = "%",
+                icon = "mdi:gauge",
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        // Note: If tank discovery was deferred (no haDiscoveryPublished entry),
+        // it will be published on next tank status event now that metadata is loaded
         
-        // Publish tank sensor discovery
-        val levelTopic = "$baseTopic/device/$tableId/$deviceId/level"
-        val tankDiscovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
-            gatewayMac = device.address,
-            sensorName = friendlyName,
-            stateTopic = "$prefix/$levelTopic",
-            unit = "%",
-            icon = "mdi:gauge",
-            appVersion = appVersion
-        )
-        val tankDiscoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
-        mqttPublisher.publishDiscovery(tankDiscoveryTopic, tankDiscovery.toString())
-        haDiscoveryPublished.add("tank_$keyHex")
-        
-        Log.d(TAG, "📢 Published all discovery types for $friendlyName")
+        // GUARD: Only republish cover state sensor if it was already published (prevents duplicate entities)
+        if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub cover state sensor: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val discovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        // Note: If cover discovery was deferred (no haDiscoveryPublished entry),
+        // it will be published on next cover status event now that metadata is loaded
     }
     
     /**

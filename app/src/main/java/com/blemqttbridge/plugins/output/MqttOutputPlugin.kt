@@ -9,6 +9,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.provider.Settings
 import android.util.Log
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -28,6 +29,19 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
         private const val TAG = "MqttOutputPlugin"
         private const val QOS = 1
         private const val AVAILABILITY_TOPIC = "availability"
+        
+        /**
+         * Get a unique device suffix based on Android device ID.
+         * Returns last 6 characters to keep identifiers short.
+         */
+        private fun getDeviceSuffix(context: Context): String {
+            return try {
+                val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+                androidId?.takeLast(6)?.lowercase() ?: "unknown"
+            } catch (e: Exception) {
+                "unknown"
+            }
+        }
     }
     
     private var mqttClient: MqttAndroidClient? = null
@@ -320,8 +334,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     private fun publishAvailabilityDiscovery() {
         try {
             val client = mqttClient ?: return
-            val nodeId = "ble_mqtt_bridge"
-            val uniqueId = "ble_mqtt_bridge_availability"
+            val deviceSuffix = getDeviceSuffix(context)
+            val nodeId = "ble_mqtt_bridge_${deviceSuffix}"
+            val uniqueId = "ble_mqtt_bridge_${deviceSuffix}_availability"
             
             // Get app version
             val appVersion = try {
@@ -339,8 +354,8 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 put("device_class", "connectivity")
                 put("entity_category", "diagnostic")
                 put("device", org.json.JSONObject().apply {
-                    put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge"))
-                    put("name", "BLE MQTT Bridge")
+                    put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge_${deviceSuffix}"))
+                    put("name", "BLE MQTT Bridge ${deviceSuffix.uppercase()}")
                     put("model", "Android BLE to MQTT Bridge")
                     put("manufacturer", "phurth")
                     put("sw_version", appVersion)
@@ -366,7 +381,8 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     private fun publishSystemDiagnostics() {
         try {
             val client = mqttClient ?: return
-            val nodeId = "ble_mqtt_bridge"
+            val deviceSuffix = getDeviceSuffix(context)
+            val nodeId = "ble_mqtt_bridge_${deviceSuffix}"
             
             // Get device info for the shared device definition
             val appVersion = try {
@@ -376,8 +392,8 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             }
             
             val deviceInfo = org.json.JSONObject().apply {
-                put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge"))
-                put("name", "BLE MQTT Bridge")
+                put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge_${deviceSuffix}"))
+                put("name", "BLE MQTT Bridge ${deviceSuffix.uppercase()}")
                 put("model", "Android BLE to MQTT Bridge")
                 put("manufacturer", "phurth")
                 put("sw_version", appVersion)

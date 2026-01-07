@@ -9,6 +9,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import org.json.JSONArray
@@ -33,10 +34,21 @@ class BleScannerPlugin(
         private const val SCAN_DURATION_MS = 60_000L // 60 seconds
         
         // HA Device Info
-        private const val DEVICE_ID = "ble_scanner"
         private const val DEVICE_NAME = "BLE Scanner"
         private const val DEVICE_MANUFACTURER = "phurth"
         private const val DEVICE_MODEL = "BLE scanner plugin for the Android BLE to MQTT Bridge"
+        
+        /**
+         * Get a unique device suffix based on Android device ID.
+         */
+        private fun getDeviceSuffix(context: Context): String {
+            return try {
+                val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+                androidId?.takeLast(6)?.lowercase() ?: "unknown"
+            } catch (e: Exception) {
+                "unknown"
+            }
+        }
     }
     
     private val handler = Handler(Looper.getMainLooper())
@@ -240,6 +252,8 @@ class BleScannerPlugin(
     
     private fun publishDiscovery() {
         val topicPrefix = mqttPublisher.topicPrefix
+        val deviceSuffix = getDeviceSuffix(context)
+        val deviceId = "ble_scanner_${deviceSuffix}"
         
         // Get app version
         val appVersion = try {
@@ -250,8 +264,8 @@ class BleScannerPlugin(
         
         // Device info for all entities
         val deviceInfo = JSONObject().apply {
-            put("identifiers", JSONArray().put(DEVICE_ID))
-            put("name", DEVICE_NAME)
+            put("identifiers", JSONArray().put(deviceId))
+            put("name", "$DEVICE_NAME ${deviceSuffix.uppercase()}")
             put("manufacturer", DEVICE_MANUFACTURER)
             put("model", DEVICE_MODEL)
             put("sw_version", appVersion)
@@ -260,7 +274,7 @@ class BleScannerPlugin(
         // 1. Scanning binary sensor
         val scanningDiscovery = JSONObject().apply {
             put("name", "Scanning")
-            put("unique_id", "${DEVICE_ID}_scanning")
+            put("unique_id", "${deviceId}_scanning")
             put("device", deviceInfo)
             put("state_topic", "$topicPrefix/ble_scanner/scanning/state")
             put("payload_on", "ON")
@@ -269,14 +283,14 @@ class BleScannerPlugin(
             put("icon", "mdi:bluetooth-search")
         }
         mqttPublisher.publishDiscovery(
-            "$topicPrefix/binary_sensor/$DEVICE_ID/scanning/config",
+            "$topicPrefix/binary_sensor/$deviceId/scanning/config",
             scanningDiscovery.toString()
         )
         
         // 2. Device count sensor with attributes
         val devicesDiscovery = JSONObject().apply {
             put("name", "Devices Found")
-            put("unique_id", "${DEVICE_ID}_devices")
+            put("unique_id", "${deviceId}_devices")
             put("device", deviceInfo)
             put("state_topic", "$topicPrefix/ble_scanner/devices/state")
             put("value_template", "{{ value_json.count }}")
@@ -286,21 +300,21 @@ class BleScannerPlugin(
             put("icon", "mdi:bluetooth")
         }
         mqttPublisher.publishDiscovery(
-            "$topicPrefix/sensor/$DEVICE_ID/devices/config",
+            "$topicPrefix/sensor/$deviceId/devices/config",
             devicesDiscovery.toString()
         )
         
         // 3. Scan button
         val buttonDiscovery = JSONObject().apply {
             put("name", "Start Scan")
-            put("unique_id", "${DEVICE_ID}_scan_button")
+            put("unique_id", "${deviceId}_scan_button")
             put("device", deviceInfo)
             put("command_topic", "$topicPrefix/ble_scanner/scan/set")
             put("payload_press", "PRESS")
             put("icon", "mdi:magnify")
         }
         mqttPublisher.publishDiscovery(
-            "$topicPrefix/button/$DEVICE_ID/scan/config",
+            "$topicPrefix/button/$deviceId/scan/config",
             buttonDiscovery.toString()
         )
         
