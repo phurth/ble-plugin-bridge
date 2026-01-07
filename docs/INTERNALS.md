@@ -2,66 +2,15 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 6, 2026 - v2.4.7  
-> **Major Changes (v2.4.7):**  
-> - **Critical BLE Notification Race Condition Fix:** Added synchronization flags (servicesDiscovered, mtuReady) to OneControl plugin
-> - **Callback Synchronization:** Ensures both onServicesDiscovered and onMtuChanged complete before authentication begins
-> - **Fixes Regression:** Physical device state changes now properly update in Home Assistant
-> - **BLE Trace Logging:** All plugins (OneControl, EasyTouch, GoPower) now log GATT events for debugging
-> - **Friendly Name Fix:** Removed race condition preventing friendly device names from appearing in HA
-> - **Discovery Republishing:** Always publish discovery when metadata arrives, regardless of timing
->
-> **Previous Changes (v2.4.6):**  
-> - **Android TV Power Fix:** Prevents foreground service from being killed when TV enters standby mode via HDMI-CEC
-> - **AndroidTvHelper Utility:** Detects Android TV, manages HDMI-CEC auto device off setting
-> - **Auto-Apply on Service Start:** Service automatically disables CEC auto-off when permission granted
-> - **Settings UI:** New "Android TV Power Fix" section in System Settings (only visible on Android TV)
->
-> **Previous Changes (v2.4.3):**  
-> - **Android TV Launcher Support:** Added LEANBACK_LAUNCHER category so app appears in Android TV/Google TV launcher
-> - **BLE Unavailable Handling:** Graceful error handling when BLE scanner not available (e.g., Emteria Android on RPi)
->
-> **Previous Changes (v2.4.2):**  
-> - **Fire Tablet Compatibility:** Added `tools:targetApi="s"` annotations to Android 12+ BLE permissions for compatibility with older Fire OS versions
->
-> **Previous Changes (v2.4.0):**  
-> - **Connection Watchdog:** Added 60-second watchdog to detect zombie states and stale connections
-> - **Diagnostic Sensor LWT:** All diagnostic sensors now reference global availability topic for proper offline status
-> - **OneControl Disconnect Fix:** Diagnostic state now updates immediately on disconnect
-> - **Zombie State Detection:** Automatically detects when GATT connection exists but isConnected=false
-> - **Stale Connection Detection:** Triggers reconnection if no successful operations for 5 minutes
-> 
-> **Previous Changes (v2.3.9):**  
-> - **Dimmable Light Panel Sync Fix:** Removed overly-aggressive spurious status guard that blocked panel-initiated updates
-> - Panel operations (ON/OFF/dimming) now update Home Assistant immediately
-> - Pending guard still protects against spurious updates during HA→panel commands
-> 
-> **Previous Changes (v2.3.8):**  
-> - **Text Input Fix:** Fixed cursor jumping on keystroke by using local mutableStateOf() instead of collectAsState()
-> - **Permission Fixes:** Added SCHEDULE_EXACT_ALARM, USE_EXACT_ALARM, and BLUETOOTH_SCAN neverForLocation flag
-> - **Automatic Permissions:** Added checkAndRequestPermissionsOnStartup() in MainActivity.onCreate()
-> - **OneControl DataHealthy:** Fixed bouncing indicator by removing time-based check for event-driven plugin
-> 
-> **Changes (v2.3.7):**  
-> - **Keepalive Scheduling Fix:** Fixed critical bug where keepalive would not schedule if service started from UI instead of explicit intent
-> - **Multi-path Scheduling:** Keepalive now schedules in onCreate() as backup, onStartCommand with ACTION_START_SCAN, and null action handler
-> - **Android TV Compatibility:** Added optional touchscreen and leanback features for Android TV box support
-> - **Improved Logging:** Better startup path tracking and keepalive status visibility
->
-> **Changes (v2.3.6):**  
-> - **Service Hardening:** Added battery optimization exemption, WorkManager watchdog, and Bluetooth state monitoring
-> - **UI Reorganization:** Split settings into main screen (plugins) and system settings screen (permissions/diagnostics)
-> - **Battery Optimization Helper:** Utility class for checking and requesting battery exemptions
-> - **Bluetooth State Recovery:** BroadcastReceiver monitors BT on/off events, graceful cleanup and auto-reconnect
-> - **WorkManager Watchdog:** Periodic health checks (15min) with auto-restart if service killed by OS
-> - **Lifecycle-aware State Refresh:** Permission/battery states auto-refresh when returning from system settings
-> - **Improved UI:** Settings gear icon, collapsible plugin settings sections with icons
-> - **Smart Fallback:** Permanently denied permissions → auto-open app settings page
+> **Current Version:** v2.4.8  
+> **Last Updated:** January 7, 2026  
+> **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
 
 ## Table of Contents
 
+0. [Quick Reference for LLMs](#0-quick-reference-for-llms)
 1. [High-Level Architecture](#1-high-level-architecture)
 2. [Service Layer](#2-service-layer)
 3. [Plugin System](#3-plugin-system)
@@ -69,12 +18,49 @@
 5. [EasyTouch Thermostat Protocol](#5-easytouch-thermostat-protocol)
 6. [GoPower Solar Controller Protocol](#6-gopower-solar-controller-protocol)
 7. [MQTT Integration](#7-mqtt-integration)
+   - 7.5. [Multi-Gateway Support](#75-multi-gateway-support-v248)
 8. [Home Assistant Discovery](#8-home-assistant-discovery)
 9. [State Management & Status Indicators](#9-state-management--status-indicators)
 10. [Debug Logging & Performance](#10-debug-logging--performance)
 11. [Adding New Entity Types](#11-adding-new-entity-types)
 12. [Creating New Plugins](#12-creating-new-plugins)
-13. [Common Pitfalls](#13-common-pitfalls)
+- [Appendix: File Quick Reference](#appendix-file-quick-reference)
+
+---
+
+## 0. Quick Reference for LLMs
+
+### Common Tasks
+
+- **Adding new OneControl entity type:** See [Section 11](#11-adding-new-entity-types)
+- **Creating new plugin:** See [Section 12](#12-creating-new-plugins)
+- **Understanding MQTT topics:** See [Section 7.5 (Multi-Gateway)](#75-multi-gateway-support-v248) and [Section 7](#7-mqtt-integration)
+- **Debugging connection issues:** See [Section 13 (Common Pitfalls)](#13-common-pitfalls)
+- **Multi-gateway deployment:** See [Section 7.5](#75-multi-gateway-support-v248)
+
+### Key Files
+
+- **Gateway device:** `MqttOutputPlugin.kt` (includes multi-gateway device ID suffix)
+- **Scanner device:** `BleScannerPlugin.kt` (includes multi-gateway device ID suffix)
+- **OneControl:** `OneControlDevicePlugin.kt`
+- **EasyTouch:** `EasyTouchDevicePlugin.kt`
+- **GoPower:** `GoPowerDevicePlugin.kt`
+- **Entity models:** `OneControlEntity.kt`
+- **Service layer:** `BaseBleService.kt`
+
+### Recent Critical Changes
+
+**v2.4.8 (January 2026):**
+- Multi-gateway support: Gateway and scanner devices now use Android device ID suffix
+- OneControl guard check fix: Restored guards preventing 4x entity duplication
+- Device IDs now include suffix: `ble_mqtt_bridge_{android_id}`, `ble_scanner_{android_id}`
+
+**v2.4.7 (January 2026):**
+- BLE notification race condition fix (servicesDiscovered/mtuReady flags)
+- BLE trace logging for all plugins
+
+**v2.4.6 (January 2026):**
+- Android TV power fix (prevents service kill on TV standby)
 
 ---
 
@@ -1422,30 +1408,38 @@ Uses Eclipse Paho MQTT client with:
 - LWT (Last Will and Testament) for availability
 - QoS 1 for reliability
 
-#### Topic Structure
+#### Topic Structure (v2.4.8+)
 
 ```
-homeassistant/                              # prefix (configurable)
-├── availability                            # online/offline LWT
-├── onecontrol/{MAC}/                       # device namespace
-│   ├── status                              # ready/offline
-│   ├── gateway                             # gateway info JSON
-│   ├── system/
-│   │   ├── voltage                         # system voltage
-│   │   └── temperature                     # system temperature
-│   ├── device/{tableId}/{deviceId}/
-│   │   ├── state                           # ON/OFF
-│   │   ├── brightness                      # 0-255 (dimmables)
-│   │   ├── level                           # 0-100 (tanks)
-│   │   └── hvac                            # HVAC JSON
-│   ├── command/{type}/{tableId}/{deviceId} # commands from HA
-│   │   └── brightness                      # brightness subcommand
-│   └── events/                             # generic events
-└── diag/                                   # diagnostic sensors
-    ├── device_paired
-    ├── ble_connected
-    └── data_healthy
+homeassistant/                                    # prefix (configurable)
+├── availability                                  # online/offline LWT (global)
+├── binary_sensor/ble_mqtt_bridge_{suffix}/       # Gateway device (unique per Android device)
+│   └── availability/config                       # Gateway availability discovery
+├── sensor/ble_mqtt_bridge_{suffix}/              # System diagnostics (unique per Android device)
+│   ├── battery_level/config
+│   ├── wifi_signal/config
+│   ├── ram_available/config
+│   └── ... (other diagnostics)
+├── sensor/ble_scanner_{suffix}/                  # Scanner device (unique per Android device)
+│   ├── scan_status/config
+│   ├── devices_found/config
+│   └── scan_button/config
+└── onecontrol/{MAC}/                             # BLE device namespace (unique via MAC)
+    ├── status                                    # ready/offline
+    ├── gateway                                   # gateway info JSON
+    ├── system/
+    │   ├── voltage                               # system voltage
+    │   └── temperature                           # system temperature
+    ├── device/{tableId}/{deviceId}/
+    │   ├── state                                 # ON/OFF
+    │   ├── brightness                            # 0-255 (dimmables)
+    │   ├── level                                 # 0-100 (tanks)
+    │   └── hvac                                  # HVAC JSON
+    └── command/{type}/{tableId}/{deviceId}       # commands from HA
+        └── brightness                            # brightness subcommand
 ```
+
+**Note:** `{suffix}` is the last 6 characters of Android ANDROID_ID (e.g., `7c7123`). This enables multi-gateway deployments where multiple Android devices can run the bridge simultaneously without device ID conflicts.
 
 ### Graceful Error Handling
 
@@ -1484,6 +1478,121 @@ private suspend fun publish(topic: String, payload: String, retained: Boolean) =
         }
     }
 ```
+
+---
+
+## 7.5 Multi-Gateway Support (v2.4.8+)
+
+### Overview
+
+Multiple Android devices can run the bridge simultaneously without device ID conflicts. Each device publishes unique gateway and scanner devices while BLE device entities (OneControl, EasyTouch, GoPower) remain unique via their MAC addresses.
+
+**Use Case:** RV deployments with multiple Android devices (front TV and rear TV) monitoring the same OneControl gateway, or separate gateways for different zones.
+
+### Device Identification Strategy
+
+**Gateway Device:**
+- Uses Android ANDROID_ID (last 6 characters) for uniqueness
+- Device ID format: `ble_mqtt_bridge_{suffix}` (e.g., `ble_mqtt_bridge_7c7123`)
+- Device name format: `BLE MQTT Bridge {SUFFIX}` (e.g., `BLE MQTT Bridge 7C7123`)
+- System diagnostics (battery, WiFi, RAM) associated with this unique device
+
+**Scanner Device:**
+- Uses same Android ID suffix
+- Device ID format: `ble_scanner_{suffix}` (e.g., `ble_scanner_7c7123`)
+- Device name format: `BLE Scanner {SUFFIX}` (e.g., `BLE Scanner 7C7123`)
+- Scanner entities (status, device count, scan button) associated with this unique device
+
+**BLE Device Entities:**
+- OneControl, EasyTouch, GoPower entities continue using their own MAC addresses
+- No changes to entity identification
+- Ensures no conflicts across multiple gateways
+
+### Implementation
+
+**Files:** `MqttOutputPlugin.kt`, `BleScannerPlugin.kt`
+
+Both plugins implement identical suffix extraction:
+
+```kotlin
+private fun getDeviceSuffix(context: Context): String {
+    val androidId = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ANDROID_ID
+    ) ?: "unknown"
+    return androidId.takeLast(6)
+}
+
+// Usage in gateway device discovery (MqttOutputPlugin.kt)
+val deviceSuffix = getDeviceSuffix(context)
+val nodeId = "ble_mqtt_bridge_${deviceSuffix}"
+val deviceName = "BLE MQTT Bridge ${deviceSuffix.uppercase()}"
+
+// Usage in scanner device discovery (BleScannerPlugin.kt)
+val deviceSuffix = getDeviceSuffix(context)
+val deviceId = "ble_scanner_${deviceSuffix}"
+val deviceName = "BLE Scanner ${deviceSuffix.uppercase()}"
+```
+
+**Why last 6 characters?**
+- Full Android ID is 16 hex characters (64-bit)
+- Last 6 characters provide 16.7 million unique values (24-bit)
+- Sufficient for RV/marine multi-device deployments
+- Compact enough for MQTT topic readability
+- Fallback: If Android ID unavailable, returns "unknown" (should never happen on real devices)
+
+### System Diagnostics in Multi-Gateway Setup
+
+Each Android device publishes its own system diagnostics under its unique gateway device:
+
+**Device 1 (suffix: 7c7123):**
+- `homeassistant/sensor/ble_mqtt_bridge_7c7123/battery_level/state` → 85%
+- `homeassistant/sensor/ble_mqtt_bridge_7c7123/wifi_signal/state` → -45 dBm
+- `homeassistant/sensor/ble_mqtt_bridge_7c7123/ram_available/state` → 2048 MB
+
+**Device 2 (suffix: abc456):**
+- `homeassistant/sensor/ble_mqtt_bridge_abc456/battery_level/state` → 100% (plugged in)
+- `homeassistant/sensor/ble_mqtt_bridge_abc456/wifi_signal/state` → -60 dBm
+- `homeassistant/sensor/ble_mqtt_bridge_abc456/ram_available/state` → 1024 MB
+
+This allows monitoring each Android device's health independently in Home Assistant.
+
+### Multi-Gateway Deployment Example
+
+**Scenario:** RV with front and rear Android TVs
+
+**Front TV (Android ID: 6f714d7e291cf0d2):**
+- Gateway device: `ble_mqtt_bridge_f0d2`
+- Scanner device: `ble_scanner_f0d2`
+- Monitors OneControl gateway at MAC `24:DC:C3:ED:1E:0A`
+
+**Rear TV (Android ID: 3a82bc4f5a1b9d7e):**
+- Gateway device: `ble_mqtt_bridge_9d7e`
+- Scanner device: `ble_scanner_9d7e`
+- Also monitors same OneControl gateway at MAC `24:DC:C3:ED:1E:0A`
+
+**Home Assistant sees:**
+- 2 gateway devices: `BLE MQTT Bridge F0D2`, `BLE MQTT Bridge 9D7E`
+- 2 scanner devices: `BLE Scanner F0D2`, `BLE Scanner 9D7E`
+- 1 OneControl device: `OneControl BLE Gateway` (with all switches, lights, etc.)
+
+Both Android devices can control the same OneControl devices without conflicts. The OneControl entities use the gateway's MAC address for identification, not the Android device ID.
+
+### Migration Notes
+
+**Upgrading from v2.4.7 or earlier:**
+
+1. **Gateway Device Change:** Your gateway device in Home Assistant will appear with a new ID
+   - Old: `ble_mqtt_bridge`
+   - New: `ble_mqtt_bridge_7c7123` (example suffix)
+
+2. **Scanner Device Change:** Your scanner device will also have a new ID
+   - Old: `ble_scanner`
+   - New: `ble_scanner_7c7123` (example suffix)
+
+3. **OneControl/EasyTouch/GoPower Entities:** No changes - they continue using MAC addresses
+
+4. **Cleanup:** Remove old `ble_mqtt_bridge` and `ble_scanner` devices from Home Assistant after confirming new devices are working
 
 ---
 
@@ -2698,6 +2807,46 @@ override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: Bluetoot
 **Trace File Location:** `/sdcard/Download/trace_YYYYMMDD_HHMMSS.log`
 
 **Example Trace Output:**
+
+### 9. OneControl: Guard Checks in republishDiscoveryWithFriendlyName()
+
+**Problem:** Removing `haDiscoveryPublished.contains()` guard checks causes massive entity duplication.
+
+**Symptom:** OneControl devices show 4x expected entities in Home Assistant (e.g., 56 entities instead of 16).
+
+**Root Cause:** Without guards, the `republishDiscoveryWithFriendlyName()` function publishes ALL entity types (switch, light, cover_state, tank) for EVERY device, regardless of actual device type. A switch device gets switch+light+cover+tank discoveries published.
+
+**Solution:** Guard checks MUST remain:
+
+```kotlin
+// CORRECT: Only republish entity types that were already published
+if (haDiscoveryPublished.contains("switch_$keyHex")) {
+    // Republish switch discovery with friendly name
+}
+if (haDiscoveryPublished.contains("light_$keyHex")) {
+    // Republish light discovery with friendly name
+}
+if (haDiscoveryPublished.contains("tank_$keyHex")) {
+    // Republish tank discovery with friendly name
+}
+if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
+    // Republish cover state discovery with friendly name
+}
+```
+
+**Why Guards Are Needed:**
+- Guards determine entity type based on what was actually published from device state events
+- Only devices that published switch discovery get switch republished with friendly name
+- Prevents publishing irrelevant entity types for each device
+- Without guards, every device receives all 4 entity type discoveries
+
+**Historical Context:** 
+- Guards were temporarily removed in v2.4.7 to fix a friendly name race condition
+- This created a worse bug: 4x entity duplication
+- Restored in v2.4.8 with protective comments explaining their purpose
+- Accepts that friendly names might be delayed if metadata arrives before first state (rare edge case)
+
+**File:** `OneControlDevicePlugin.kt`, method `republishDiscoveryWithFriendlyName()` (lines ~1826-1900)
 ```
 19:03:23.085 TRACE START ts=20260106_190323
 19:03:23.180 NOTIFY 00000034-0200-a58e-e411-afe28044e62c: 00 C5 06 08 08 80 FF 40 01 6D 00
@@ -2727,7 +2876,7 @@ private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, frie
 **Result:** Entities now show friendly names like "Awning" instead of "cover_160a", regardless of metadata/state arrival order.
 
 ---
-###Background Operation
+##Background Operation
 
 **The app runs as a foreground service, not a foreground app.** This means:
 - ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
@@ -2822,7 +2971,7 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 | `MqttPublisher.kt` | MQTT abstraction for plugins, status reporting interface |
 | `ServiceStateManager.kt` | Plugin enable/disable state management |
 | **OneControl Plugin** | |
-| `OneControlDevicePlugin.kt` | Main OneControl implementation |
+| `OneControlDevicePlugin.kt` | Main OneControl implementation, **guard checks for entity republishing** |
 | `protocol/Constants.kt` | UUIDs, encryption constants |
 | `protocol/TeaEncryption.kt` | Authentication encryption |
 | `protocol/CobsDecoder.kt` | Frame encoding |
@@ -2837,13 +2986,14 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 | `protocol/GoPowerConstants.kt` | Service/characteristic UUIDs, field indices |
 | `protocol/GoPowerGattCallback.kt` | BLE notification handler, data parsing |
 | **BLE Scanner Plugin** | |
-| `BleScannerPlugin.kt` | Device discovery utility (conditional initialization) |
+| `BleScannerPlugin.kt` | Device discovery utility, **multi-gateway device ID suffix** |
 | **Output & UI** | |
-| `MqttOutputPlugin.kt` | Paho MQTT client wrapper, system diagnostics |
+| `MqttOutputPlugin.kt` | Paho MQTT client wrapper, system diagnostics, **multi-gateway device ID suffix** |
 | `SettingsViewModel.kt` | UI state management, status aggregation |
 | `SettingsScreen.kt` | Main settings UI |
 
 ---
 
-*Document version: 2.4.7*
-*Last updated: January 6, 2026 - BLE notification race condition fix, BLE trace logging, friendly name fix*
+*Document version: 2.4.8*  
+*Last updated: January 7, 2026 - Multi-gateway support, OneControl guard check fix*  
+*See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete version history*
