@@ -2,14 +2,13 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.7 - Critical bug fixes for BLE notifications and friendly names
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- **Android Device:** Android 8.0+ with BLE support  
-  - **Recommended:** Android 12+ for best battery optimization support
+- **Android Device:** Android 8.0+ with BLE support (Recommended: Android 12+ for best battery optimization support)
+  - Tested with tablet, phone and Android TV devices.
 - **MQTT Broker:** Accessible from the Android device (e.g., Mosquitto on Home Assistant)
 - **Home Assistant:** MQTT integration enabled
 
@@ -19,23 +18,24 @@ Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQ
 2. Enable "Install unknown apps" for your browser/file manager
 3. Install the APK
 4. **On first launch:** The app will automatically request required permissions (Location, Bluetooth, Notifications)
-5. **Important:** Configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
+5. **Important:** If desired, configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
 
 ### Initial Configuration
 
-1. Open the app - all toggles will be OFF by default
+1. Open the app - main service and MQTT toggles will be OFF by default
 2. **Grant permissions:** On first launch, the app will request:
    - **Location** (required for BLE scanning)
    - **Bluetooth Scan/Connect** (Android 12+)
-   - **Notifications** (for foreground service)
+   - **Notifications** (for foreground service - this helps keep the app from getting killed by the OS)
 3. Tap the **⚙️ Settings icon** (top-right) to:
-   - Enable **Battery Optimization Exemption** (critical for reliable operation)
+   - Enable **Battery Optimization Exemption** (critical for reliable operation on battery-powered devices, especially phones)
    - Verify all permissions are granted
 4. Return to main screen and configure **MQTT broker settings** (expand "Broker Settings"):
    - Host, Port, Username, Password
    - Topic Prefix: `homeassistant` (recommended for auto-discovery)
 5. Configure your **device plugin settings** (see plugin sections below)
-6. Enable toggles in order: **MQTT → Plugin → BLE Service**
+6. Enable toggles in order: **MQTT → Main Service**
+7. Restarting the device is not necessary, but if things don't start showing up in Home Assistant, you may need to try toggling the main service, or stopping and relaunching the app to get things flowing.
 
 > **Note:** Settings are locked while their toggle is ON. Turn OFF to edit.
 
@@ -43,44 +43,60 @@ Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQ
 
 Once connected, devices are automatically discovered via MQTT auto-discovery:
 
+- **BLE MQTT Bridge {MAC}:** General diagnostic info for the app and Android device
+- Each enabled plugin will be a separate device
+
+The devices will have a mix of the following discovered entities which depend on your specific hardware:
+
 - **Switches** - Binary relays
 - **Lights** - Dimmable with brightness control
 - **Covers** - Slides and awnings
 - **Sensors** - Temperature, voltage, tank levels
 - **Binary Sensors** - Diagnostic indicators
+- **Climate** - Still a work in progress, but OneControl-connected HVAC should be fully supportable
 
 ---
 
 ## 📦 Plugins
 
-### OneControl Gateway (LCI/Lippert)
+### 🔌 OneControl Gateway (LCI/Lippert)
 
-The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in RVs.
+The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in RVs. This is an unofficial, community-developed integration not affiliated with or supported by LCI/Lippert, and is provided "as-is" without warranty—use at your own risk.
 
-#### ⚠️ IMPORTANT: Pair Before Running
+#### Setup
 
-**The OneControl gateway must be paired to your Android device via Bluetooth Settings BEFORE enabling the plugin.** The app will not initiate pairing automatically.
+##### Pairing Information
+
+The OneControl gateway must be paired to the Android device. 
+
+**⚠️ IMPORTANT - Disconnect/unpair from other devices:** If the gateway is currently paired with a different phone or tablet running the official OneControl app (i.e., *not* the device you plan to use with this app), make sure the LCI app is not running, and preferrably unpair it completely (Settings → Bluetooth → Forget Device on that device). The gateway can only connect to one device at a time.
 
 **Pairing Steps:**
 
-1. **Unpair from other devices:** If the gateway is currently paired with a phone or tablet running the official OneControl app, unpair it first (Settings → Bluetooth → Forget Device on that device)
+Newer Android OS versions do not show BLE devices in the Bluetooth pairing settings, so there are a couple of ways to accomplish this:
 
-2. **Pair via Android Bluetooth Settings:**
-   - Go to Android **Settings → Bluetooth**
-   - Ensure Bluetooth is ON
-   - The gateway should appear with a name starting with "LCI..."
-   - Tap to pair - enter your gateway PIN if prompted (this is unlikely, it should just pair)
-   - Wait for "Paired" status to appear
+1. **Use an existing pairing:** 
+  - If you previously connected to the OneControl gateway with the same device, you already have a pair bond (you can confirm this by checking devices in  Bluetooth settings). In this case, you're good to go.
+  - Go ahead and configure the plugin:
+     - Make sure the main service toggle is off (you won't be able to make changes while it's running)
+     - Add the plugin
+     - Expand settings under the OneControl plugin
+     - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
+     - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
+     - Toggle the service on
+     - Plugin status indicators should turn green: Connection → Data → Paired
 
-3. **Configure the plugin:**
-   - In the BLE-MQTT Bridge app, expand "Gateway Settings" under the OneControl plugin
-   - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing)
-   - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
+2. **Let the app trigger pairing:**
+     - Make sure the main service toggle is off (you won't be able to make changes while it's running)
+     - Add the plugin
+     - Expand settings under the OneControl plugin
+     - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
+     - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
+     - **IMPORTANT:** Put the OneControl gateway in pairing mode by pressing the 'Connect' button (the exact process may vary for different gateways, but this is the same process you do to initially connect using the LCI app)
+     - Toggle the service on
+     - The app should trigger pairing with your gateway. You can confirm this by checking Settings → Bluetooth. The Gateway should show as a paired device.
+     - Plugin status indicators should turn green: Connection → Data → Paired
 
-4. **Enable the plugin:**
-   - Turn ON the **OneControl** toggle
-   - Turn ON the **BLE Service** toggle
-   - Status indicators should turn green: BLE → Data → Paired
 
 #### Supported Devices
 
@@ -88,46 +104,44 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 |-------------|-----------|----------|
 | Switches | `switch` | ON/OFF control |
 | Dimmable Lights | `light` | Brightness 0-255 |
-| Covers/Slides/Awnings | `cover` | Open/Close/Stop |
+| Slides/Awnings | `cover` | Open/Close/Stop |
 | Tank Sensors | `sensor` | Fill level % |
 | System Voltage | `sensor` | Battery voltage |
-| System Temperature | `sensor` | Internal temp |
-| HVAC | `sensor` | Status monitoring |
+| HVAC | `climate`,`sensor` | Status monitoring |
 
 #### Troubleshooting
 
-- **Connection fails:** Ensure the gateway is paired in Android Bluetooth settings first
-- **No devices appear:** The app sends a GetDevices command on connect - check MQTT logs
-- **Status 133 errors:** Try unpairing and re-pairing the gateway
+- **Connection fails:** Ensure the gateway shows as paired in Android Bluetooth settings
+- **No devices appear:** The app sends a GetDevices command on connect - toggle the service off/on, or force-close and relaunch the app.
 
 ---
 
-### EasyTouch Thermostat (Micro-Air)
+### 🔌 EasyTouch Thermostat (Micro-Air)
 
-The EasyTouch plugin connects to Micro-Air EasyTouch BLE thermostats commonly found in RVs.
+The EasyTouch plugin connects to the EasyTouch RV thermostat by Micro-Air. This is an unofficial, community-developed integration not affiliated with or supported by Micro-Air, and is provided "as-is" without warranty—use at your own risk.
 
 #### ⚠️ Firmware Requirement
 
-**This plugin requires EasyTouch firmware version 1.0.6.0 or newer.** The plugin uses the unified JSON protocol introduced in firmware 1.0.6.0. Older firmware versions use model-specific protocols that are not supported.
-
-To check your firmware version, connect to the thermostat and look for the "Firmware Version" diagnostic sensor in Home Assistant, or check the official EasyTouch RV app.
+**This plugin requires EasyTouch firmware version 1.0.6.0 or newer.** The plugin uses the unified JSON protocol introduced in firmware 1.0.6.0. Older firmware versions use model-specific protocols that are not supported. To check your firmware version, check the official EasyTouch RV app.
 
 #### Acknowledgments
 
-Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and their [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) HACS integration. Their project inspired the plugin architecture and their work decoding the thermostat's BLE protocol was essential to this implementation.
+Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and his [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) HACS integration. His project inspired this application's creation and his work decoding the thermostat's BLE protocol was essential to this implementation.
 
 #### Configuration
-
-1. Expand "EasyTouch Settings" in the app
-2. Enter the **Thermostat MAC Address** (found in Bluetooth settings or the official app)
-3. Enter your **Thermostat Password** (this is the password you use to login in the Micro-Air app)
-4. Toggle the main service off and on
+  - Make sure the main service toggle is off (you won't be able to make changes while it's running)
+  - Add the plugin
+  - Expand settings under the EasyTouch plugin
+  - Enter the **Thermostat MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
+  - Enter your **Thermostat Password** (this is the password you use to login in the Micro-Air app)
+- Toggle the service on
+- Plugin status indicators should turn green: Connection → Data → Pair
 
 #### Features
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Zone Support** | Up to 4 climate zones |
+| **Multi-Zone Support** | Up to 4 climate zones ** Not yet fully tested** |
 | **Capability Discovery** | Only shows modes your device supports |
 | **Auto Mode** | High/low setpoint UI when in Auto |
 | **Temperature Limits** | Min/max from actual device config |
@@ -140,21 +154,22 @@ Modes are discovered dynamically from device. Common modes:
 
 #### Troubleshooting
 
-- **First command fails:** Normal BLE timing issue - retry built in
-- **Wrong modes showing:** Delete the HA climate entity and let it rediscover
-- **Connection drops:** Check thermostat is in range and not connected to another device
+- **Connection drops:** Check thermostat is in range and not connected to another device, toggle the service off/on, or force-close and relaunch the app.
 
 ---
 
-### GoPower Solar Controller
+### 🔌 GoPower Solar Controller
 
-The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. This is a **read-only** plugin - it monitors solar system status but does not send commands.
+The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. This is an unofficial, community-developed integration not affiliated with or supported by GoPower, and is provided "as-is" without warranty—use at your own risk.
 
 #### Configuration
 
-1. Expand "GoPower Settings" in the app
-2. Enter the **Controller MAC Address** (found in Bluetooth settings)
-3. Toggle the main service off and on
+- Make sure the main service toggle is off (you won't be able to make changes while it's running)
+- Add the plugin
+- Expand settings under the GoPower plugin
+- Enter the **Controller MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant) 
+- Toggle the service on
+- Plugin status indicators should turn green: Connection → Data
 
 **Note:** GoPower controllers do not require pairing or authentication.
 
@@ -162,10 +177,10 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 | Feature | Description |
 |---------|-------------|
-| **Read-Only Protocol** | Monitors status only, no control commands |
+| **Reboot** | Reboot the solar controller |
 | **No Authentication** | Connects without pairing or password |
 | **Real-Time Data** | ~1 second update rate |
-| **Device Diagnostics** | Model, serial number, firmware version |
+| **Device Diagnostics** | Model, firmware version |
 
 #### Sensors
 
@@ -180,16 +195,16 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 | Energy | Daily energy production (Ah × voltage) | Wh |
 | Device Model | Controller model number | text |
 | Device Firmware | Firmware version | text |
+| Reboot Controller | Soft-reboots the controller | button |
 
 #### Troubleshooting
 
 - **No data received:** Ensure controller is in BLE range (within ~30 feet)
 - **Connection drops:** Verify no other device is connected to the controller
-- **Reboot button doesn't work:** The unlock sequence is sent but controller may not respond to BLE reboot commands
 
 ---
 
-### BLE Scanner Plugin
+### 🔌 BLE Scanner Plugin
 
 A utility plugin that scans for nearby BLE devices and publishes results to MQTT. This is not needed for anything else to function, but was added as a proof of concept for supporting multiple BLE connected plugins and might be useful, so I left it in.
 
@@ -201,94 +216,11 @@ A utility plugin that scans for nearby BLE devices and publishes results to MQTT
 
 #### Configuration
 
-Enable via the **BLE Scanner** toggle. Results are published as sensor attributes in Home Assistant.
-
-**Note:** Starting in v2.3.1, BLE Scanner only initializes and publishes to Home Assistant when enabled in the app.
-
----ckground Operation
-
-**The app runs as a foreground service, not a foreground app.** This means:
-- ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
-- ✅ Maintains BLE connections and MQTT publishing in the background
-- ✅ Shows a persistent notification (required by Android)
-- ✅ Survives screen-off and deep sleep (with proper configuration)
-- ✅ No need to keep the app visible - perfect for kiosk setups
-
-### Battery Optimization & Background Execution
-
-**v2.3.6+ includliability
-
-### Battery Optimization & Background Execution
-
-**v2.3.6 introduces comprehensive service hardening features** to prevent Android from killing the app during idle periods:
-
-#### Defense Layers
-
-1. **Battery Optimization Exemption**
-   - Prevents Doze mode from stopping the service
-   - Configure via Settings (⚙️) → Battery Optimization Exemption
-   - **Critical for overnight operation**
-
-2. **Bluetooth State Monitoring**
-   - Automatically detects when OS disables Bluetooth (common on Samsung/TCL devices)
-   - Graceful cleanup when BT turns off
-   - Auto-reconnect when BT turns back on
-
-3. **WorkManager Watchdog**
-   - Checks service health every 15 minutes
-   - Auto-restarts service if killed by OS
-   - Survives device reboots
-
-4. **Adaptive Scanning**
-   - Uses BLE scan filters for screen-off operation
-   - Maintains connections during deep sleep
-
-5. **Doze Mode Keepalive (v2.3.6+)**
-   - **Prevents BLE connections from dropping during deep sleep**
-   - Sends periodic keepalive pings every 30 minutes
-   - Uses `AlarmManager.setExactAndAllowWhileIdle()` to wake device during Doze
-   - **Enabled by default** - ideal for mains-powered devices
-   - **Toggle in Settings:** System Settings (⚙️) → Doze Mode Prevention → Keepalive Pings
-   
-   **When to enable:**
-   - ✅ Device is plugged in/mains-powered (recommended)
-   - ✅ You need 24/7 BLE connectivity without manual intervention
-   - ✅ RV/boat/camper installations with shore power
-   
-   **When to disable:**
-   - ❌ Battery-powered devices where power savings are critical
-   - ❌ You only use the app occasionally (connections auto-reconnect on device wake)
-
-6. **Android TV Power Fix (v2.4.6+)**
-   - **Prevents service from being killed when TV enters standby**
-   - HDMI-CEC sends "standby" command to streaming devices when TV powers off
-   - This setting disables the device's response to CEC standby commands
-   - **Requires ADB permission grant (one-time setup)**
-   - Auto-applies on service start once permission is granted
-   
-   **Setup (via ADB):**
-   ```bash
-   adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS
-   ```
-   
-   **Or manually disable CEC:**
-   ```bash
-   adb shell settings put global hdmi_control_auto_device_off_enabled 0
-   ```
-   
-   **UI Access:** Settings → System Settings → Android TV Power Fix (only visible on Android TV devices)
-
-#### Recommended Settings
-
-For maximum reliability on aggressive battery management devices (Samsung, Xiaomi, OnePlus, etc.):
-
-1. **Battery Optimization:** Set to "Active - Service protected"
-2. **Keepalive Pings:** Enable for mains-powered setups (Settings → Doze Mode Prevention)
-3. **Auto-start:** Enable in device settings if available
-4. **Background restrictions:** Disable for this app
-5. **Data saver:** Add app to exception list
-
-See [docs/SERVICE_HARDENING.md](docs/SERVICE_HARDENING.md) for detailed hardening strategy.
+- Make sure the main service toggle is off (you won't be able to make changes while it's running)
+- Add the plugin
+- Toggle the service on
+- Scanning is triggered by a button in the device in Home Assistant
+- Results are published as sensor attributes in Home Assistant
 
 ---
 
@@ -303,49 +235,7 @@ BaseBleService (foreground service)
   └─> BleScannerPlugin (device discovery - optional)
 ```
 
-Each BLE device plugin:
-- Owns its `BluetoothGattCallback` completely
-- Handles authentication, framing, and protocol specifics
-- Publishes state via the `MqttPublisher` interface
-- Reports status independently (per-plugin health indicators)
-
 See [docs/INTERNALS.md](docs/INTERNALS.md) for detailed architecture documentation.
-
----
-
-## 🔧 Development
-
-### Building
-
-```bash
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-### Debugging
-
-```bash
-# Monitor logs
-adb logcat -s BaseBleService:I OneControlDevice:I MqttOutputPlugin:I
-
-# Check MQTT messages
-mosquitto_sub -h <broker> -u mqtt -P mqtt -t "homeassistant/#" -v
-```
-
-### System Requirements
-
-- **Android:** API 26+ (Android 8.0+)
-- **Permissions:** Bluetooth, Location (for BLE scanning), Notifications
-- **MQTT Broker:** Any MQTT 3.1.1 compatible broker
-
----
-
-## To Do
-
-- [ ] Additional BLE device plugins
-- [ ] Cover position tracking
-- [ ] HVAC control commands
-- [ ] Light effects support
 
 ## License
 

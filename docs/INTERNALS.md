@@ -2727,6 +2727,90 @@ private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, frie
 **Result:** Entities now show friendly names like "Awning" instead of "cover_160a", regardless of metadata/state arrival order.
 
 ---
+###Background Operation
+
+**The app runs as a foreground service, not a foreground app.** This means:
+- ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
+- ✅ Maintains BLE connections and MQTT publishing in the background
+- ✅ Shows a persistent notification (required by Android)
+- ✅ Survives screen-off and deep sleep (with proper configuration)
+- ✅ No need to keep the app visible - perfect for kiosk setups
+
+### Battery Optimization & Background Execution
+
+**v2.3.6+ includliability
+
+### Battery Optimization & Background Execution
+
+**v2.3.6 introduces comprehensive service hardening features** to prevent Android from killing the app during idle periods:
+
+#### Defense Layers
+
+1. **Battery Optimization Exemption**
+   - Prevents Doze mode from stopping the service
+   - Configure via Settings (⚙️) → Battery Optimization Exemption
+   - **Critical for overnight operation**
+
+2. **Bluetooth State Monitoring**
+   - Automatically detects when OS disables Bluetooth (common on Samsung/TCL devices)
+   - Graceful cleanup when BT turns off
+   - Auto-reconnect when BT turns back on
+
+3. **WorkManager Watchdog**
+   - Checks service health every 15 minutes
+   - Auto-restarts service if killed by OS
+   - Survives device reboots
+
+4. **Adaptive Scanning**
+   - Uses BLE scan filters for screen-off operation
+   - Maintains connections during deep sleep
+
+5. **Doze Mode Keepalive (v2.3.6+)**
+   - **Prevents BLE connections from dropping during deep sleep**
+   - Sends periodic keepalive pings every 30 minutes
+   - Uses `AlarmManager.setExactAndAllowWhileIdle()` to wake device during Doze
+   - **Enabled by default** - ideal for mains-powered devices
+   - **Toggle in Settings:** System Settings (⚙️) → Doze Mode Prevention → Keepalive Pings
+   
+   **When to enable:**
+   - ✅ Device is plugged in/mains-powered (recommended)
+   - ✅ You need 24/7 BLE connectivity without manual intervention
+   - ✅ RV/boat/camper installations with shore power
+   
+   **When to disable:**
+   - ❌ Battery-powered devices where power savings are critical
+   - ❌ You only use the app occasionally (connections auto-reconnect on device wake)
+
+6. **Android TV Power Fix (v2.4.6+)**
+   - **Prevents service from being killed when TV enters standby**
+   - HDMI-CEC sends "standby" command to streaming devices when TV powers off
+   - This setting disables the device's response to CEC standby commands
+   - **Requires ADB permission grant (one-time setup)**
+   - Auto-applies on service start once permission is granted
+   
+   **Setup (via ADB):**
+   ```bash
+   adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS
+   ```
+   
+   **Or manually disable CEC:**
+   ```bash
+   adb shell settings put global hdmi_control_auto_device_off_enabled 0
+   ```
+   
+   **UI Access:** Settings → System Settings → Android TV Power Fix (only visible on Android TV devices)
+
+#### Recommended Settings
+
+For maximum reliability on aggressive battery management devices (Samsung, Xiaomi, OnePlus, etc.):
+
+1. **Battery Optimization:** Set to "Active - Service protected"
+2. **Keepalive Pings:** Enable for mains-powered setups (Settings → Doze Mode Prevention)
+3. **Auto-start:** Enable in device settings if available
+4. **Background restrictions:** Disable for this app
+5. **Data saver:** Add app to exception list
+
+---
 
 ## Appendix: File Quick Reference
 
