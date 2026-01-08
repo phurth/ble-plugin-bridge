@@ -1194,12 +1194,12 @@ class BaseBleService : Service() {
         // Publish availability offline
         mqttPublisher.publishAvailability("${pluginId}/${device.address}/availability", false)
         
-        // Resume scanning if no devices connected
-        if (connectedDevices.isEmpty()) {
-            serviceScope.launch {
-                delay(1000)
-                startScanning()
-            }
+        // Always resume scanning to reconnect any missing configured devices
+        // This ensures devices like EasyTouch (not bonded) can reconnect automatically
+        serviceScope.launch {
+            delay(2000)  // Brief delay to avoid immediate churn
+            Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
+            startScanning()
         }
     }
     
