@@ -63,6 +63,11 @@ The devices will have a mix of the following discovered entities which depend on
 
 The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in RVs. This is an unofficial, community-developed integration not affiliated with or supported by LCI/Lippert, and is provided "as-is" without warranty—use at your own risk.
 
+####Tested Gateways
+The following OneControl gateways have been confirmed working:
+- Unity X270D
+- X1.5
+
 #### Setup
 
 ##### Pairing Information

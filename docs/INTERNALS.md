@@ -11,19 +11,132 @@
 ## Table of Contents
 
 0. [Quick Reference for LLMs](#0-quick-reference-for-llms)
+   - [Common Tasks](#common-tasks)
+   - [Key Files](#key-files)
+   - [Recent Critical Changes](#recent-critical-changes)
+
 1. [High-Level Architecture](#1-high-level-architecture)
+   - [Overview](#overview)
+   - [Key Principles](#key-principles)
+
 2. [Service Layer](#2-service-layer)
+   - [BaseBleService](#basebleservice)
+   - [StateFlow Companion Objects](#stateflow-companion-objects)
+   - [MqttPublisher Implementation](#mqttpublisher-implementation)
+   - [Connection Flow](#connection-flow)
+
 3. [Plugin System](#3-plugin-system)
+   - [Plugin Interfaces](#plugin-interfaces)
+   - [BleDevicePlugin (New Architecture)](#bledeviceplugin-new-architecture)
+   - [MqttPublisher Interface](#mqttpublisher-interface)
+   - [PluginRegistry](#pluginregistry)
+
 4. [OneControl Protocol Deep Dive](#4-onecontrol-protocol-deep-dive)
+   - [Overview](#overview-1)
+   - [File Structure](#file-structure)
+   - [BLE Service UUIDs](#ble-service-uuids)
+   - [Authentication Flow](#authentication-flow)
+   - [TEA Encryption](#tea-encryption-authentication-key-calculation)
+   - [COBS Framing](#cobs-framing)
+   - [Stream Reading](#stream-reading)
+   - [Event Types (MyRvLink Protocol)](#event-types-myrvlink-protocol)
+   - [Event Parsing Examples](#event-parsing-examples)
+     - [Relay Status](#relay-status)
+     - [Dimmable Light](#dimmable-light)
+     - [Tank Sensors](#tank-sensors)
+     - [Cover/Slide/Awning Sensors](#coverslideawning-sensors-state-only)
+   - [Command Building](#command-building)
+   - [Command Handling](#command-handling)
+   - [Guard Checks in republishDiscoveryWithFriendlyName()](#guard-checks-in-republishdiscoverywithfriendlyname)
+   - [Friendly Name Race Condition](#friendly-name-race-condition)
+   - [Device Metadata Retrieval](#device-metadata-retrieval-getdevicesmetadata)
+
 5. [EasyTouch Thermostat Protocol](#5-easytouch-thermostat-protocol)
+   - [Overview](#overview-2)
+   - [File Structure](#file-structure-1)
+   - [BLE Service UUIDs](#ble-service-uuids-1)
+   - [Authentication Flow](#authentication-flow-1)
+   - [Read-After-Write Communication Pattern](#read-after-write-communication-pattern)
+   - [Capability Discovery](#capability-discovery-get-config)
+   - [MAV & SPL Arrays](#mav-mode-available-bitmask)
+   - [Write Retry with Delays](#write-retry-with-delays)
+   - [JSON Command Format](#json-command-format)
+   - [Status Response Format](#status-response-format)
+   - [Home Assistant Integration](#home-assistant-integration)
+   - [Command Handling](#command-handling-1)
+   - [Key Differences from OneControl](#key-differences-from-onecontrol)
+
 6. [GoPower Solar Controller Protocol](#6-gopower-solar-controller-protocol)
+   - [Overview](#overview-3)
+   - [Protocol Characteristics](#protocol-characteristics)
+   - [Notification Data Format](#notification-data-format)
+   - [Key Implementation Details](#key-implementation-details)
+   - [Home Assistant Entities](#home-assistant-entities)
+   - [Plugin Structure](#plugin-structure)
+   - [Configuration Requirements](#configuration-requirements)
+   - [Reboot Command](#reboot-command)
+   - [Diagnostic Sensors](#diagnostic-sensors)
+   - [Troubleshooting](#troubleshooting)
+   - [Known Limitations](#known-limitations)
+
 7. [MQTT Integration](#7-mqtt-integration)
-   - 7.5. [Multi-Gateway Support](#75-multi-gateway-support-v248)
+   - [MqttOutputPlugin](#mqttoutputplugin)
+   - [Topic Structure](#topic-structure-v248)
+   - [Graceful Error Handling](#graceful-error-handling)
+   - [Multi-Gateway Support](#75-multi-gateway-support-v248)
+     - [Overview](#overview-4)
+     - [Device Identification Strategy](#device-identification-strategy)
+     - [Implementation](#implementation)
+     - [System Diagnostics](#system-diagnostics-in-multi-gateway-setup)
+     - [Deployment Example](#multi-gateway-deployment-example)
+     - [Migration Notes](#migration-notes)
+
 8. [Home Assistant Discovery](#8-home-assistant-discovery)
+   - [Discovery Payload Format](#discovery-payload-format)
+   - [Device Info (Grouping)](#device-info-grouping)
+   - [Discovery Topic Pattern](#discovery-topic-pattern)
+   - [Entity Model Architecture](#entity-model-architecture-phase-3-refactoring)
+   - [Using Entity Models in Event Handlers](#using-entity-models-in-event-handlers)
+   - [Command Handling with Entity Models](#command-handling-with-entity-models)
+   - [Step-by-Step: Adding a New Entity Type](#step-by-step-adding-a-new-entity-type-example-rgb-light)
+
 9. [State Management & Status Indicators](#9-state-management--status-indicators)
-10. [Debug Logging & Performance](#10-debug-logging--performance)
-11. [Adding New Entity Types](#11-adding-new-entity-types)
-12. [Creating New Plugins](#12-creating-new-plugins)
+   - [Per-Plugin Status Architecture](#per-plugin-status-architecture-v231)
+   - [MQTT Diagnostic Sensors](#mqtt-diagnostic-sensors-per-plugin)
+   - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status-v232)
+   - [SettingsScreen Indicators](#settingsscreen-per-plugin-indicators)
+   - [BLE Scanner Conditional Initialization](#ble-scanner-conditional-initialization)
+   - [System Diagnostic Sensors](#system-diagnostic-sensors)
+   - [Settings Screen](#settings-screen)
+
+10. [Creating New Plugins](#10-creating-new-plugins)
+    - [Plugin Template](#plugin-template)
+    - [Register the Plugin](#register-the-plugin)
+
+11. [Debug Logging & Performance](#11-debug-logging--performance)
+    - [Overview](#overview-5)
+    - [DebugLog Utility](#debuglog-utility)
+    - [Usage Guidelines](#usage-guidelines)
+    - [BLE Trace Capture](#ble-trace-capture)
+    - [Performance Impact](#performance-impact)
+    - [Emoji Removal](#emoji-removal)
+    - [Best Practices](#best-practices)
+
+12. [Common Pitfalls & Solutions](#12-common-pitfalls--solutions)
+    - [MQTT Publish Exceptions](#1-mqtt-publish-exceptions)
+    - [Stale Status Indicators](#2-stale-status-indicators)
+    - [BLE GATT Error 133](#3-ble-gatt-error-133)
+    - [Wrong Byte Order](#4-wrong-byte-order)
+    - [Missing COBS Encoding](#5-missing-cobs-encoding)
+    - [Notification Subscription Race Condition](#6-notification-subscription-race-condition)
+    - [Dimmable Bouncing](#7-dimmable-bouncing)
+    - [BLE Trace Logging](#8-ble-trace-logging)
+
+13. [Background Operation](#13-background-operation)
+    - [Battery Optimization & Background Execution](#battery-optimization--background-execution)
+    - [Defense Layers](#defense-layers)
+    - [Recommended Settings](#recommended-settings)
+
 - [Appendix: File Quick Reference](#appendix-file-quick-reference)
 
 ---
@@ -569,7 +682,9 @@ The first byte of a decoded frame indicates the event type:
 | TankSensorStatusV2 | 0x1B | Tank level v2 | `handleTankStatusV2()` |
 | RealTimeClock | 0x20 | Gateway time | `handleRealTimeClock()` |
 
-### Event Parsing Example: Relay Status
+### Event Parsing Examples
+
+#### Relay Status
 
 ```kotlin
 private fun handleRelayStatus(data: ByteArray) {
@@ -581,21 +696,107 @@ private fun handleRelayStatus(data: ByteArray) {
     val rawOutputState = statusByte and 0x0F  // State in LOW nibble
     val isOn = rawOutputState == 0x01         // 0x01 = ON, 0x00 = OFF
     
+    // Check for extended format with DTC data (9 bytes)
+    val dtcCode = if (data.size >= 9) {
+        ((data[5].toInt() and 0xFF) shl 8) or (data[6].toInt() and 0xFF)
+    } else 0
+    
     // Publish to MQTT
     val stateTopic = "onecontrol/${device.address}/device/$tableId/$deviceId/state"
     mqttPublisher.publishState(stateTopic, if (isOn) "ON" else "OFF", true)
+    
+    // Publish DTC attributes if present and device is gas appliance
+    if (dtcCode != 0 && deviceName.contains("gas", ignoreCase = true)) {
+        val attributes = JSONObject().apply {
+            put("dtc_code", dtcCode)
+            put("dtc_name", DtcCodes.getName(dtcCode))
+            put("fault", DtcCodes.isFault(dtcCode))
+            put("status_byte", "0x%02x".format(statusByte))
+        }
+        val attrTopic = "onecontrol/${device.address}/device/$tableId/$deviceId/attributes"
+        mqttPublisher.publishState(attrTopic, attributes.toString(), true)
+    }
     
     // Publish HA discovery if first time seeing this device
     val keyHex = "%02x%02x".format(tableId, deviceId)
     val discoveryKey = "switch_$keyHex"
     if (haDiscoveryPublished.add(discoveryKey)) {
-        val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(...)
+        val attrTopic = if (dtcCode != 0 && deviceName.contains("gas", ignoreCase = true)) {
+            "onecontrol/${device.address}/device/$tableId/$deviceId/attributes"
+        } else null
+        val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
+            gatewayMac = device.address,
+            deviceAddr = deviceId,
+            deviceName = deviceName,
+            stateTopic = stateTopic,
+            commandTopic = commandTopic,
+            attributesTopic = attrTopic,
+            appVersion = appVersion
+        )
         mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
     }
 }
 ```
 
-### Event Parsing Example: Dimmable Light
+**Diagnostic Trouble Codes (DTC):**
+
+OneControl relay status messages come in two formats:
+
+1. **Standard Format (5 bytes):**
+   - Byte 0: Event type
+   - Byte 1: Table ID
+   - Byte 2: Device ID
+   - Byte 3: Status byte (0x40=off, 0x41=on)
+   - Byte 4: Reserved
+
+2. **Extended Format (9 bytes):**
+   - Bytes 0-4: Same as standard format
+   - **Bytes 5-6: DTC code (16-bit big-endian)**
+   - Bytes 7-8: Reserved
+
+When extended format is detected (9 bytes), the plugin extracts the DTC code and publishes diagnostic information **only for gas appliances** (devices with "gas" in the name). This filtering is intentional because gas appliances (water heaters, furnaces) use DSI (Direct Spark Ignition) systems that generate meaningful diagnostic codes, while non-gas devices don't have relevant DTC data.
+
+**DTC Attributes Published to MQTT:**
+
+Topic: `ble-mqtt-bridge/{gatewayMac}/device/{tableId}/{deviceId}/attributes`
+
+```json
+{
+  "dtc_code": 1589,
+  "dtc_name": "WATER_HEATER_IGNITION_FAILURE",
+  "fault": true,
+  "status_byte": "0x41"
+}
+```
+
+These attributes are automatically exposed in Home Assistant via the `json_attributes_topic` in the switch discovery message, allowing automations to trigger on specific fault conditions:
+
+```yaml
+automation:
+  trigger:
+    - platform: state
+      entity_id: switch.water_heater
+      attribute: fault
+      to: true
+```
+
+**DTC Code Reference:**
+
+The plugin includes 1934 diagnostic trouble code mappings (codes 0-1933) sourced from the IDS.Core.IDS_CAN library. The `DtcCodes.kt` helper object provides:
+
+- `getName(code: Int)`: Returns human-readable name or "DTC_$code" if unknown
+- `isFault(code: Int)`: Returns `code != 0`
+
+Common DTC codes include:
+- **0**: No fault (normal operation)
+- **1589**: WATER_HEATER_IGNITION_FAILURE (most common DSI fault)
+- **1590**: WATER_HEATER_FLAME_LOSS
+- **1591**: WATER_HEATER_OVERHEAT
+
+The full DTC reference is maintained in `docs/onecontrol_plugin_docs/DTC_REFERENCE.md`.
+
+
+#### Dimmable Light
 
 ```kotlin
 private fun handleDimmableLightStatus(data: ByteArray) {
@@ -627,6 +828,265 @@ private fun handleDimmableLightStatus(data: ByteArray) {
     mqttPublisher.publishState("$baseTopic/device/$tableId/$deviceId/brightness", brightness.toString(), true)
 }
 ```
+
+#### Tank Sensors
+
+**File:** `OneControlDevicePlugin.kt`, methods `handleTankStatus()` (V1) and `handleTankStatusV2()` (V2)
+
+OneControl supports two tank sensor event formats:
+
+**TankSensorStatus (0x0C) - V1 Format:**
+- Multiple tanks reported in a single event
+- Format: `[0x0C][tableId][deviceId1][level1][deviceId2][level2]...`
+- 2 bytes per tank: `[deviceId, level]`
+
+**TankSensorStatusV2 (0x1B) - V2 Format:**
+- Single tank per event
+- Format: `[0x1B][tableId][deviceId][level]`
+- May include extended status (8 bytes with battery, quality, accelerometer data)
+
+```kotlin
+private fun handleTankStatus(data: ByteArray) {
+    if (data.size < 5) return
+    
+    val tableId = data[1].toInt() and 0xFF
+    val deviceId = data[2].toInt() and 0xFF
+    val level = data[3].toInt() and 0xFF  // 0-100 percentage
+    
+    // Create entity instance
+    val entity = OneControlEntity.Tank(
+        tableId = tableId,
+        deviceId = deviceId,
+        level = level
+    )
+    
+    // Publish state and discovery
+    publishEntityState(
+        entityType = EntityType.TANK_SENSOR,
+        tableId = entity.tableId,
+        deviceId = entity.deviceId,
+        discoveryKey = "tank_${entity.key}",
+        state = mapOf("level" to entity.level.toString())
+    ) { friendlyName, _, prefix, baseTopic ->
+        val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
+        discoveryBuilder.buildSensor(
+            sensorName = friendlyName,
+            stateTopic = "$prefix/$stateTopic",
+            unit = "%",
+            icon = "mdi:gauge"
+        )
+    }
+}
+```
+
+**Tank Level Values:**
+
+Tank sensors send a single byte percentage value (0-100). Some tanks use discrete values for low-precision sensors:
+- `0x00` (0) → EMPTY
+- `0x21` (33) → 1/3 full
+- `0x42` (66) → 2/3 full  
+- `0x64` (100) → FULL
+
+High-precision tanks (fuel, LP) report exact percentages (0-100). Low-precision tanks (fresh/grey/black water) typically use the 4 discrete values above.
+
+**MQTT Topics:**
+- State: `onecontrol/{MAC}/device/{tableId}/{deviceId}/level`
+- Payload: Simple numeric string (e.g., "0", "33", "66", "100")
+- Discovery: Home Assistant sensor with `unit_of_measurement: "%"` and `icon: "mdi:gauge"`
+
+**Reference:** See [tank_findings.md](onecontrol_plugin_docs/tank_findings.md) for complete details on:
+- Extended status format (8-byte with battery level, measurement quality, accelerometer data)
+- Tank precision types (Low/Medium/High) from capability detection
+- Fluid types (Water vs Fuel) from capability byte
+- Official app display logic (discrete levels for low-precision, exact % for high-precision)
+
+#### Cover/Slide/Awning Sensors (State-Only)
+
+> ⚠️ **SAFETY DESIGN DECISION**: Cover control was intentionally disabled in v2.0.1 (December 2025) after testing revealed dangerous operating conditions. RV awnings and slides have **no automatic safety mechanisms**:
+> - Awning motor: **19A current draw** at full extension
+> - Slide motor: **39A current draw** at limits
+> - **No limit switches** detected
+> - **No overcurrent protection** present
+> - Motors rely entirely on **operator judgment** to prevent damage
+> 
+> Remote control could cause equipment damage or personal injury if operated without visual confirmation. Therefore, covers are published as **state-only sensors**, not controllable entities.
+
+**Event Handling:**
+
+H-bridge status events (0x0D, 0x0E - `RelayHBridgeMomentary`) are parsed by `handleHBridgeStatus()`:
+
+```kotlin
+private fun handleHBridgeStatus(data: ByteArray) {
+    if (data.size < 4) return
+    
+    val tableId = data[1].toInt() and 0xFF
+    val deviceId = data[2].toInt() and 0xFF
+    val status = data[3].toInt() and 0xFF
+    val position = if (data.size >= 5) data[4].toInt() and 0xFF else 0xFF
+    
+    // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
+    // Motors rely on operator judgment - remote control is unsafe.
+    // Exposing as state sensor only.
+    
+    val entity = OneControlEntity.Cover(
+        tableId = tableId,
+        deviceId = deviceId,
+        status = status,
+        position = position
+    )
+    
+    publishCoverState(entity)
+}
+```
+
+**Status byte mapping:**
+- `0xC0` → `stopped`
+- `0xC2` → `opening` (extending)
+- `0xC3` → `closing` (retracting)
+- Other → `unknown`
+
+**Position byte:**
+- `0xFF` if position unavailable
+- `0x00` to `0x64` (0-100%) if supported
+
+**Entity Model:**
+
+The Cover entity in [OneControlEntity.kt](OneControlEntity.kt) includes the `haState` property for Home Assistant integration:
+
+```kotlin
+/**
+ * SAFETY NOTE: Cover control is disabled. RV awnings/slides have no limit switches
+ * or overcurrent protection - motors rely on operator judgment. This entity is
+ * STATE-ONLY for safety reasons.
+ */
+data class Cover(
+    override val tableId: Int,
+    override val deviceId: Int,
+    val status: Int,
+    val position: Int = 0xFF
+) : OneControlEntity() {
+    /**
+     * Home Assistant cover state based on status byte
+     */
+    val haState: String
+        get() = when (status) {
+            0xC2 -> "opening"   // Extending
+            0xC3 -> "closing"   // Retracting
+            0xC0 -> "stopped"   // Stopped
+            else -> "unknown"
+        }
+}
+```
+
+**Publishing Cover State:**
+
+Covers are published as **sensor entities** (not cover entities):
+
+```kotlin
+private fun publishCoverState(entity: OneControlEntity.Cover) {
+    val keyHex = "%02x%02x".format(entity.tableId, entity.deviceId)
+    val baseTopic = "onecontrol/${device.address}"
+    val stateTopic = "$baseTopic/cover_state/$keyHex/state"
+    
+    // Publish state
+    mqttPublisher.publishState(stateTopic, entity.haState, true)
+    
+    // Publish discovery once
+    val discoveryKey = "cover_state_$keyHex"
+    if (haDiscoveryPublished.add(discoveryKey)) {
+        val deviceName = getFunctionName(entity.tableId, entity.deviceId) 
+            ?: "Cover ${keyHex.uppercase()}"
+        val discovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
+            gatewayMac = device.address,
+            deviceAddr = (entity.tableId shl 8) or entity.deviceId,
+            deviceName = deviceName,
+            stateTopic = stateTopic,
+            appVersion = BuildConfig.VERSION_NAME
+        )
+        
+        val discoveryTopic = "homeassistant/sensor/onecontrol_ble_${device.address.replace(":", "")}/$discoveryKey/config"
+        mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+    }
+}
+```
+
+**Key points:**
+- Published to `homeassistant/sensor/...` (not `cover`)
+- Discovery key: `cover_state_{tableId}{deviceId}`
+- State topic only - **no command topic**
+- Icon: `mdi:window-shutter`
+
+**Command Rejection:**
+
+Cover commands are explicitly rejected in `handleEntityCommand()`:
+
+```kotlin
+is OneControlEntity.Cover -> {
+    Log.w(TAG, "⚠️ Cover control is disabled for safety - use physical controls")
+    Result.failure(Exception("Cover control disabled for safety"))
+}
+```
+
+This prevents any remote operation via MQTT or other interfaces.
+
+**Discovery Configuration:**
+
+From [HomeAssistantMqttDiscovery.kt](app/src/main/java/com/blemqttbridge/plugins/onecontrol/protocol/HomeAssistantMqttDiscovery.kt):
+
+```kotlin
+/**
+ * SAFETY: Cover state sensor discovery (state-only, no control)
+ * 
+ * RV awnings and slides have no limit switches or overcurrent protection.
+ * The motors rely entirely on operator judgment to avoid damage.
+ * Therefore, we expose these as state-only sensors rather than controllable covers.
+ * 
+ * States: open, opening, closed, closing, stopped
+ */
+fun getCoverStateSensorDiscovery(
+    gatewayMac: String,
+    deviceAddr: Int,
+    deviceName: String,
+    stateTopic: String,
+    appVersion: String? = null
+): JSONObject {
+    val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_cover_state_${deviceAddr.toString(16)}"
+    val objectId = "cover_state_${deviceAddr.toString(16).padStart(4, '0')}"
+    
+    return JSONObject().apply {
+        put("unique_id", uniqueId)
+        put("name", deviceName)
+        put("default_entity_id", "sensor.$objectId")
+        put("device", getDeviceInfo(gatewayMac, appVersion))
+        
+        // State only - no commands
+        put("state_topic", stateTopic)
+        
+        // Icon shows awning/slide
+        put("icon", "mdi:window-shutter")
+    }
+}
+```
+
+**Result in Home Assistant:**
+- Entity type: `sensor.cover_state_XXXX`
+- States: `opening`, `closing`, `stopped`, `unknown`
+- No control buttons (read-only)
+- Suitable for automation triggers or display
+
+**Testing Notes (v2.0.1):**
+
+From commit 311c7b8 testing documentation:
+
+> **Awning motor:** Drew 19A continuously when fully extended with motor still engaged. No automatic cutoff.
+> 
+> **Slide motor:** Drew 39A at full extension. No automatic cutoff detected.
+> 
+> **Conclusion:** Both motors rely entirely on the operator to release the switch. Remote control without visual confirmation is unsafe and could damage equipment or cause injury.
+
+**Legacy Controllable Cover Implementation:**
+
+> ⚠️ **DEPRECATED - DO NOT USE**: A legacy controllable cover implementation existed in earlier versions but was intentionally removed in v2.0.1 for safety reasons. See commit 311c7b8 for the safety rationale and testing results. The current state-only sensor approach is the safe and correct implementation.
 
 ### Command Building
 
@@ -734,6 +1194,191 @@ fun handleCommand(commandTopic: String, payload: String): Result<Unit> {
     }
 }
 ```
+
+### Guard Checks in republishDiscoveryWithFriendlyName()
+
+**Problem:** Removing `haDiscoveryPublished.contains()` guard checks causes massive entity duplication.
+
+**Symptom:** OneControl devices show 4x expected entities in Home Assistant (e.g., 56 entities instead of 16).
+
+**Root Cause:** Without guards, the `republishDiscoveryWithFriendlyName()` function publishes ALL entity types (switch, light, cover_state, tank) for EVERY device, regardless of actual device type. A switch device gets switch+light+cover+tank discoveries published.
+
+**Solution:** Guard checks MUST remain:
+
+```kotlin
+// CORRECT: Only republish entity types that were already published
+if (haDiscoveryPublished.contains("switch_$keyHex")) {
+    // Republish switch discovery with friendly name
+}
+if (haDiscoveryPublished.contains("light_$keyHex")) {
+    // Republish light discovery with friendly name
+}
+if (haDiscoveryPublished.contains("tank_$keyHex")) {
+    // Republish tank discovery with friendly name
+}
+if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
+    // Republish cover state discovery with friendly name
+}
+```
+
+**Why Guards Are Needed:**
+- Guards determine entity type based on what was actually published from device state events
+- Only devices that published switch discovery get switch republished with friendly name
+- Prevents publishing irrelevant entity types for each device
+- Without guards, every device receives all 4 entity type discoveries
+
+**Historical Context:** 
+- Guards were temporarily removed in v2.4.7 to fix a friendly name race condition
+- This created a worse bug: 4x entity duplication
+- Restored in v2.4.8 with protective comments explaining their purpose
+- Accepts that friendly names might be delayed if metadata arrives before first state (rare edge case)
+
+**File:** `OneControlDevicePlugin.kt`, method `republishDiscoveryWithFriendlyName()` (lines ~1826-1900)
+
+### Friendly Name Race Condition
+
+**Fixed in v2.4.7:** Previously, if `GetDevicesMetadata` response (with friendly names) arrived **before** entity state events, the friendly names were never applied because `republishDiscoveryWithFriendlyName()` checked `haDiscoveryPublished.contains()` first.
+
+**Solution:** Always publish all entity types when metadata arrives, adding them to the tracking set:
+
+```kotlin
+private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, friendlyName: String) {
+    // Publish switch discovery - even if not in haDiscoveryPublished yet
+    val switchDiscovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(...)
+    mqttPublisher.publishDiscovery(switchDiscoveryTopic, switchDiscovery.toString())
+    haDiscoveryPublished.add("switch_$keyHex")
+    
+    // Publish light, cover, tank discoveries...
+    // (always publish, regardless of timing)
+}
+```
+
+**Result:** Entities now show friendly names like "Awning" instead of "cover_160a", regardless of metadata/state arrival order.
+
+### Device Metadata Retrieval (GetDevicesMetadata)
+
+OneControl devices are identified by table ID and device ID (e.g., `0x08:0x05`), which results in generic names like "Switch 0805". To provide human-readable names like "Water Pump" or "Fresh Tank", the plugin retrieves metadata using the `GetDevicesMetadata` command (0x02).
+
+**Reference:** See [METADATA_RETRIEVAL.md](onecontrol_plugin_docs/METADATA_RETRIEVAL.md) for complete protocol details.
+
+#### Command Format (6 bytes)
+
+```kotlin
+private fun encodeGetDevicesMetadataCommand(commandId: UShort, deviceTableId: Byte): ByteArray {
+    return byteArrayOf(
+        (commandId.toInt() and 0xFF).toByte(),           // Command ID LSB
+        ((commandId.toInt() shr 8) and 0xFF).toByte(),   // Command ID MSB
+        0x02.toByte(),                                    // CommandType: GetDevicesMetadata
+        deviceTableId,                                    // Device table to query
+        0x00.toByte(),                                    // Start device ID
+        0xFF.toByte()                                     // Max count (255)
+    )
+}
+```
+
+#### Response Parsing (Event Type 0x02)
+
+The gateway responds with metadata entries containing function names:
+
+```kotlin
+private fun handleGetDevicesMetadataResponse(data: ByteArray) {
+    val tableId = data[4].toInt() and 0xFF
+    val startId = data[5].toInt() and 0xFF
+    val count = data[6].toInt() and 0xFF
+    
+    var offset = 7
+    var index = 0
+    
+    while (index < count && offset + 2 < data.size) {
+        val protocol = data[offset].toInt() and 0xFF
+        val payloadSize = data[offset + 1].toInt() and 0xFF
+        
+        if (protocol == 2 && payloadSize == 17) {  // IDS CAN device
+            // CRITICAL: Function name is BIG-ENDIAN (unlike rest of protocol)
+            val funcNameHi = data[offset + 2].toInt() and 0xFF
+            val funcNameLo = data[offset + 3].toInt() and 0xFF
+            val funcName = (funcNameHi shl 8) or funcNameLo  // Big-endian!
+            val funcInstance = data[offset + 4].toInt() and 0xFF
+            
+            // Map function name ID to friendly string
+            val friendlyName = FunctionNameMapper.getFriendlyName(funcName, funcInstance)
+            
+            // Cache metadata for this device
+            val deviceId = (startId + index) and 0xFF
+            val deviceAddr = (tableId shl 8) or deviceId
+            
+            deviceMetadata[deviceAddr] = DeviceMetadata(
+                deviceTableId = tableId,
+                deviceId = deviceId,
+                functionName = funcName,
+                functionInstance = funcInstance,
+                friendlyName = friendlyName
+            )
+            
+            // Update any already-published entities with friendly name
+            republishDiscoveryWithFriendlyName(tableId, deviceId, friendlyName)
+        }
+        
+        offset += payloadSize + 2
+        index++
+    }
+    
+    // Save to persistent cache
+    saveMetadataToCache()
+}
+```
+
+#### Critical Bug: Big-Endian Function Names
+
+**The function name field uses big-endian byte order**, contrary to the little-endian convention used elsewhere in the protocol. This was discovered by analyzing the decompiled official app's `GetValueUInt16()` method, which defaults to big-endian.
+
+**Example:** Raw bytes `00 60` represent:
+- **Wrong (little-endian):** `0x6000 = 24576` → Unknown device
+- **Correct (big-endian):** `0x0060 = 96` → "Slide"
+
+#### Function Name Mapping
+
+The `FunctionNameMapper.kt` object contains 445 function name mappings from the IDS CAN protocol:
+
+```kotlin
+object FunctionNameMapper {
+    private val functionNames = mapOf(
+        3 to "Gas Water Heater",
+        5 to "Water Pump",
+        49 to "Awning Light",
+        67 to "Fresh Tank",
+        96 to "Slide",
+        105 to "Awning",
+        172 to "Interior Light",
+        // ... 438 more entries
+    )
+    
+    fun getFriendlyName(functionName: Int, functionInstance: Int): String {
+        val baseName = functionNames[functionName] ?: "Unknown Device $functionName"
+        return if (functionInstance > 0) "$baseName $functionInstance" else baseName
+    }
+}
+```
+
+**Complete reference:** [FUNCTION_NAME_IDS.md](onecontrol_plugin_docs/FUNCTION_NAME_IDS.md) lists all 445 function name IDs organized by category (water/plumbing, HVAC, lighting, slides/awnings, etc.).
+
+#### Timing & Caching
+
+**Trigger locations:**
+1. **Primary trigger:** 500ms after receiving first `GatewayInformation` event (most common)
+2. **Backup trigger:** 1500ms after all notifications subscribed (fallback if GatewayInformation doesn't fire first)
+
+The `metadataRequested` flag ensures the command is only sent once per connection, regardless of which trigger fires first.
+
+**Persistence (v2.4.9):** Metadata is cached in `SharedPreferences` at `onecontrol_cache` with key `metadata_{MAC}` (colons removed). The cache:
+- Loads automatically in plugin `init{}` block (before any connection)
+- Saves after each successful metadata retrieval
+- Survives app restarts and reconnections
+- Eliminates ~500-1500ms delay on subsequent connections
+
+**Race condition handling:** Device status events arrive immediately after authentication, but metadata takes ~500-1500ms to retrieve. Devices discovered before metadata arrives use fallback names (e.g., "Switch 0805"). Once metadata arrives, `republishDiscoveryWithFriendlyName()` updates these entities with friendly names.
+
+**File:** `OneControlDevicePlugin.kt`, methods `loadMetadataFromCache()`, `saveMetadataToCache()`, `sendGetDevicesMetadataCommand()`, `handleGetDevicesMetadataResponse()`
 
 ---
 
@@ -2012,142 +2657,15 @@ private fun controlRgbLight(tableId: Byte, deviceId: Byte, payload: String): Res
 }
 ```
 
-### Step-by-Step: Adding Cover Support (Legacy Example)
-
-1. **Add event handler in `processDecodedFrame()`:**
-
-```kotlin
-0x0D, 0x0E -> {
-    Log.i(TAG, "📦 RelayHBridgeStatus event (cover)")
-    handleHBridgeStatus(decodedFrame)
-}
-```
-
-2. **Implement the handler:**
-
-```kotlin
-private fun handleHBridgeStatus(data: ByteArray) {
-    if (data.size < 4) return
-    
-    val tableId = data[1].toInt() and 0xFF
-    val deviceId = data[2].toInt() and 0xFF
-    val status = data[3].toInt() and 0xFF
-    
-    // Map status to HA cover state
-    val haState = when (status) {
-        0xC2 -> "opening"
-        0xC3 -> "closing"
-        0xC0 -> "stopped"
-        else -> "unknown"
-    }
-    
-    // Publish state
-    val baseTopic = "onecontrol/${device.address}"
-    val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-    mqttPublisher.publishState(stateTopic, haState, true)
-    
-    // Publish discovery
-    val keyHex = "%02x%02x".format(tableId, deviceId)
-    val discoveryKey = "cover_$keyHex"
-    if (haDiscoveryPublished.add(discoveryKey)) {
-        val discovery = HomeAssistantMqttDiscovery.getCoverDiscovery(...)
-        mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
-    }
-}
-```
-
-3. **Add discovery method in `HomeAssistantMqttDiscovery.kt`:**
-
-```kotlin
-fun getCoverDiscovery(
-    gatewayMac: String,
-    deviceAddr: Int,
-    deviceName: String,
-    stateTopic: String,
-    commandTopic: String,
-    positionTopic: String,
-    appVersion: String?
-): JSONObject {
-    return JSONObject().apply {
-        put("unique_id", "onecontrol_ble_${gatewayMac}_cover_${deviceAddr.toString(16)}")
-        put("name", deviceName)
-        put("device", getDeviceInfo(gatewayMac, appVersion))
-        put("state_topic", stateTopic)
-        put("command_topic", commandTopic)
-        put("position_topic", positionTopic)
-        put("payload_open", "OPEN")
-        put("payload_close", "CLOSE")
-        put("payload_stop", "STOP")
-        put("icon", "mdi:window-shutter")
-    }
-}
-```
-
-4. **Add command builder in `MyRvLinkCommandBuilder.kt`:**
-
-```kotlin
-fun buildActionCover(
-    clientCommandId: UShort,
-    deviceTableId: Byte,
-    deviceId: Byte,
-    action: CoverAction  // OPEN, CLOSE, STOP
-): ByteArray {
-    val actionByte = when (action) {
-        CoverAction.OPEN -> 0x01.toByte()
-        CoverAction.CLOSE -> 0x02.toByte()
-        CoverAction.STOP -> 0x00.toByte()
-    }
-    
-    return byteArrayOf(
-        (clientCommandId.toInt() and 0xFF).toByte(),
-        ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),
-        0x4?.toByte(),  // CommandType: ActionCover (needs verification)
-        deviceTableId,
-        deviceId,
-        actionByte
-    )
-}
-```
-
-5. **Add command handler:**
-
-```kotlin
-// In handleCommand():
-"cover" -> controlCover(tableId.toByte(), deviceId.toByte(), payload)
-
-// New method:
-private fun controlCover(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
-    val action = when (payload.uppercase()) {
-        "OPEN" -> CoverAction.OPEN
-        "CLOSE" -> CoverAction.CLOSE
-        "STOP" -> CoverAction.STOP
-        else -> return Result.failure(Exception("Invalid cover action"))
-    }
-    
-    val commandId = getNextCommandId()
-    val command = MyRvLinkCommandBuilder.buildActionCover(commandId, tableId, deviceId, action)
-    val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
-    
-    dataWriteChar?.let { char ->
-        char.value = encoded
-        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        currentGatt?.writeCharacteristic(char)
-    }
-    
-    return Result.success(Unit)
-}
-```
-
 ---
 
-## 12. Creating New Plugins
+## 9. State Management & Status Indicators
 
-### Plugin Template
+### Per-Plugin Status Architecture (v2.3.1+)
 
-```kotlin
-class MyDevicePlugin : BleDevicePlugin {
-    override val pluginId = "my_device"
-    override val displayName = "My Device"
+Starting in v2.3.1, status indicators are tracked **per-plugin** instead of globally. This allows each plugin (EasyTouch, GoPower, OneControl) to have independent connection and health status in both the app UI and Home Assistant MQTT sensors.
+
+#### PluginStatus Data Class
     
     // UUID of the BLE service that identifies your device
     private val TARGET_SERVICE_UUID = UUID.fromString("...")
@@ -2239,9 +2757,9 @@ init {
 
 ---
 
-## 9. State Management & Status Indicators
+## 10. Creating New Plugins
 
-### Per-Plugin Status Architecture (v2.3.1+)
+### Plugin Template
 
 Starting in v2.3.1, status indicators are tracked **per-plugin** instead of globally. This allows each plugin (EasyTouch, GoPower, OneControl) to have independent connection and health status in both the app UI and Home Assistant MQTT sensors.
 
@@ -2534,7 +3052,7 @@ All system diagnostic sensors are published under the **"BLE MQTT Bridge"** devi
 
 ---
 
-## 10. Debug Logging & Performance
+## 11. Debug Logging & Performance
 
 ### Overview
 
@@ -2700,7 +3218,7 @@ Log.i(TAG, "Starting status polling loop")
 
 ---
 
-## 11. Adding New Entity Types
+## 12. Common Pitfalls & Solutions
 
 ### 1. MQTT Publish Exceptions
 
@@ -2825,46 +3343,6 @@ override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: Bluetoot
 **Trace File Location:** `/sdcard/Download/trace_YYYYMMDD_HHMMSS.log`
 
 **Example Trace Output:**
-
-### 9. OneControl: Guard Checks in republishDiscoveryWithFriendlyName()
-
-**Problem:** Removing `haDiscoveryPublished.contains()` guard checks causes massive entity duplication.
-
-**Symptom:** OneControl devices show 4x expected entities in Home Assistant (e.g., 56 entities instead of 16).
-
-**Root Cause:** Without guards, the `republishDiscoveryWithFriendlyName()` function publishes ALL entity types (switch, light, cover_state, tank) for EVERY device, regardless of actual device type. A switch device gets switch+light+cover+tank discoveries published.
-
-**Solution:** Guard checks MUST remain:
-
-```kotlin
-// CORRECT: Only republish entity types that were already published
-if (haDiscoveryPublished.contains("switch_$keyHex")) {
-    // Republish switch discovery with friendly name
-}
-if (haDiscoveryPublished.contains("light_$keyHex")) {
-    // Republish light discovery with friendly name
-}
-if (haDiscoveryPublished.contains("tank_$keyHex")) {
-    // Republish tank discovery with friendly name
-}
-if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
-    // Republish cover state discovery with friendly name
-}
-```
-
-**Why Guards Are Needed:**
-- Guards determine entity type based on what was actually published from device state events
-- Only devices that published switch discovery get switch republished with friendly name
-- Prevents publishing irrelevant entity types for each device
-- Without guards, every device receives all 4 entity type discoveries
-
-**Historical Context:** 
-- Guards were temporarily removed in v2.4.7 to fix a friendly name race condition
-- This created a worse bug: 4x entity duplication
-- Restored in v2.4.8 with protective comments explaining their purpose
-- Accepts that friendly names might be delayed if metadata arrives before first state (rare edge case)
-
-**File:** `OneControlDevicePlugin.kt`, method `republishDiscoveryWithFriendlyName()` (lines ~1826-1900)
 ```
 19:03:23.085 TRACE START ts=20260106_190323
 19:03:23.180 NOTIFY 00000034-0200-a58e-e411-afe28044e62c: 00 C5 06 08 08 80 FF 40 01 6D 00
@@ -2873,28 +3351,9 @@ if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
 19:03:26.656 WRITE 0000ee01-0000-1000-8000-00805f9b34fb: 7B 22 54 79 70 65 22 3A... (status=0)
 ```
 
-### 9. Friendly Name Race Condition
-
-**Fixed in v2.4.7:** Previously, if `GetDevicesMetadata` response (with friendly names) arrived **before** entity state events, the friendly names were never applied because `republishDiscoveryWithFriendlyName()` checked `haDiscoveryPublished.contains()` first.
-
-**Solution:** Always publish all entity types when metadata arrives, adding them to the tracking set:
-
-```kotlin
-private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, friendlyName: String) {
-    // Publish switch discovery - even if not in haDiscoveryPublished yet
-    val switchDiscovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(...)
-    mqttPublisher.publishDiscovery(switchDiscoveryTopic, switchDiscovery.toString())
-    haDiscoveryPublished.add("switch_$keyHex")
-    
-    // Publish light, cover, tank discoveries...
-    // (always publish, regardless of timing)
-}
-```
-
-**Result:** Entities now show friendly names like "Awning" instead of "cover_160a", regardless of metadata/state arrival order.
-
 ---
-##Background Operation
+
+## 13. Background Operation
 
 **The app runs as a foreground service, not a foreground app.** This means:
 - ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
