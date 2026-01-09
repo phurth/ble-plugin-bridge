@@ -522,47 +522,58 @@ DATA_READ_CHARACTERISTIC_UUID = "00000034-..."   // NOTIFY - events from gateway
 
 ### Authentication Flow
 
-**File:** `OneControlDevicePlugin.kt`, method `checkAndStartAuthentication()`
+The OneControl gateway requires **two sequential authentication steps** during connection establishment. Both use TEA (Tiny Encryption Algorithm) encryption but differ in key structure, cipher constants, and byte ordering.
 
-**CRITICAL:** The authentication sequence requires careful synchronization between `onServicesDiscovered()` and `onMtuChanged()` callbacks, as they execute on different threads and can race:
-
+**Complete Connection Flow:**
 ```
-1. onConnectionStateChange(STATE_CONNECTED)
+1. onServicesDiscovered() + onMtuChanged() synchronization
    ↓
-2. discoverServices()
+2. startAuthentication() → Data Service authentication (4-byte key)
    ↓
-3. onServicesDiscovered() → cache characteristics, set servicesDiscovered = true
-   ↓                         call checkAndStartAuthentication()
-4. requestMtu(185)
+3. enableDataNotifications() → Subscribe to all characteristics
    ↓
-5. onMtuChanged() → set mtuReady = true
-   ↓               call checkAndStartAuthentication()
-6. checkAndStartAuthentication() → only proceeds if BOTH flags true
+4. SEED notification arrives → Auth Service authentication (16-byte key)
    ↓
-7. Read UNLOCK_STATUS (00000012) 
-   ↓
-8. handleUnlockStatusRead() - receives 4-byte challenge
-   ↓
-9. calculateAuthKey(challenge) - BIG-ENDIAN TEA encryption
-   ↓
-10. Write KEY to 00000013 (WRITE_TYPE_NO_RESPONSE)
-   ↓
-11. Re-read UNLOCK_STATUS - should now return "Unlocked"
-   ↓
-12. enableDataNotifications() - subscribe to 00000034
-   ↓
-13. onAllNotificationsSubscribed() → startActiveStreamReading()
+5. onAllNotificationsSubscribed() → Start data communication
 ```
 
-**Race Condition Fix (v2.4.7):** Prior to v2.4.7, `onMtuChanged()` would directly call `startAuthentication()`, but this could fire before `onServicesDiscovered()` completed caching characteristic references, causing notifications to fail silently. The synchronization flags ensure both callbacks complete before authentication begins.
+#### Step 1: Data Service Authentication - 4-byte Key (UNLOCK_STATUS)
 
-#### TEA Encryption (Authentication Key Calculation)
+**File:** `OneControlDevicePlugin.kt`, lines 640-670, 677-688, 881-932
 
-**File:** `OneControlDevicePlugin.kt`, method `calculateAuthKey()`
+**Initiated by:** `startAuthentication()` after services discovered and MTU negotiated
 
+**Characteristics:**
+- UNLOCK_STATUS (00000012): READ - returns 4-byte challenge, then "Unlocked" string after successful auth
+- KEY (00000013): WRITE_NO_RESPONSE - sends 4-byte authentication key
+
+**CRITICAL:** The authentication sequence requires careful synchronization between `onServicesDiscovered()` and `onMtuChanged()` callbacks, as they execute on different threads and can race.
+
+**Flow:**
+```
+1. Read UNLOCK_STATUS (00000012) - initiated by startAuthentication()
+   ↓
+2. handleUnlockStatusRead() - receives 4-byte challenge
+   ↓
+3. Parse challenge as BIG-ENDIAN integer
+   ↓
+4. calculateAuthKey(challenge) - TEA encryption with hardcoded cipher
+   ↓
+5. Write 4-byte KEY to 00000013 (WRITE_TYPE_NO_RESPONSE)
+   ↓
+6. Wait 500ms, then re-read UNLOCK_STATUS
+   ↓
+7. handleUnlockStatusRead() - should receive "Unlocked" string
+   ↓
+8. enableDataNotifications() called (200ms delay)
+```
+
+**Race Condition Fix (v2.4.7):** Prior to v2.4.7, `onMtuChanged()` would directly call `startAuthentication()`, but this could fire before `onServicesDiscovered()` completed caching characteristic references, causing notifications to fail silently. The synchronization flags (`servicesDiscovered` and `mtuReady`) ensure both callbacks complete before authentication begins.
+
+**Key Calculation (4 bytes, BIG_ENDIAN):**
 ```kotlin
 private fun calculateAuthKey(seed: Long): ByteArray {
-    val cypher = 612643285L  // 0x2483FFD5 - MyRvLink constant
+    val cypher = 612643285L  // 0x2483FFD5 - hardcoded constant
     
     var cypherVar = cypher
     var seedVar = seed
@@ -582,7 +593,7 @@ private fun calculateAuthKey(seed: Long): ByteArray {
         num = num and 0xFFFFFFFFL
     }
     
-    // Return as BIG-ENDIAN bytes
+    // Return as BIG-ENDIAN bytes (4 bytes total, no PIN)
     val result = seedVar.toInt()
     return byteArrayOf(
         ((result shr 24) and 0xFF).toByte(),
@@ -590,6 +601,134 @@ private fun calculateAuthKey(seed: Long): ByteArray {
         ((result shr 8) and 0xFF).toByte(),
         ((result shr 0) and 0xFF).toByte()
     )
+}
+```
+
+#### Step 2: Auth Service Authentication - 16-byte Key (SEED)
+
+**File:** `OneControlDevicePlugin.kt`, lines 751-766, 1054-1056, 1991-2027
+
+**Initiated by:** `enableDataNotifications()` subscribes to SEED characteristic; gateway sends notification when ready
+
+**Characteristics:**
+- SEED (00000011): READ, NOTIFY - gateway sends 4-byte challenge seed when ready
+- KEY (00000013): WRITE_NO_RESPONSE - sends 16-byte authentication key (same characteristic as Step 1)
+
+**Flow:**
+```
+1. enableDataNotifications() subscribes to SEED (00000011)
+   ↓
+2. Gateway sends SEED notification (4 bytes) when ready
+   ↓
+3. handleSeedNotification() triggered by notification
+   ↓
+4. Parse seed as LITTLE_ENDIAN integer
+   ↓
+5. calculateAuthKey(seed, gatewayPin, gatewayCypher) - builds 16-byte key
+   ↓
+6. Write 16-byte key to KEY (00000013)
+   ↓
+7. Authentication complete
+```
+
+**Key Structure (16 bytes, LITTLE_ENDIAN):**
+```kotlin
+private fun calculateAuthKey(seed: ByteArray, pin: String, cypher: Long): ByteArray {
+    // Parse seed as LITTLE_ENDIAN
+    val seedValue = ByteBuffer.wrap(seed)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .int.toLong() and 0xFFFFFFFFL
+    
+    // TEA encrypt with configured cipher
+    val encryptedSeed = TeaEncryption.encrypt(cypher, seedValue)
+    
+    // Convert to LITTLE_ENDIAN bytes
+    val keyBytes = ByteBuffer.allocate(4)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putInt(encryptedSeed.toInt())
+        .array()
+    
+    // Build 16-byte key
+    val authKey = ByteArray(16)
+    System.arraycopy(keyBytes, 0, authKey, 0, 4)  // Bytes 0-3: encrypted seed
+    
+    val pinBytes = pin.toByteArray(Charsets.US_ASCII)
+    System.arraycopy(pinBytes, 0, authKey, 4, minOf(pinBytes.size, 6))  // Bytes 4-9: PIN
+    
+    // Bytes 10-15: zero padding (implicit)
+    return authKey
+}
+```
+
+**Configuration:**
+```kotlin
+// In plugin code (OneControlDevicePlugin.kt line 72-73)
+private var gatewayPin: String = "090336"  // 6-digit PIN
+private var gatewayCypher: Long = 0x8100080DL  // Hardcoded cipher constant
+```
+
+#### Authentication Comparison
+
+| Aspect | Data Service (Step 1) | Auth Service (Step 2) |
+|--------|----------------------|----------------------|
+| **Trigger** | `startAuthentication()` reads UNLOCK_STATUS | Gateway sends SEED notification |
+| **Characteristic** | UNLOCK_STATUS (00000012, READ) | SEED (00000011, NOTIFY) |
+| **Key Size** | 4 bytes | 16 bytes |
+| **Includes PIN** | No | Yes (bytes 4-9) |
+| **Cipher Constant** | Hardcoded (0x2483FFD5) | Hardcoded (0x8100080DL) |
+| **Byte Order** | BIG_ENDIAN | LITTLE_ENDIAN |
+| **Challenge Parse** | BIG_ENDIAN from 4-byte read | LITTLE_ENDIAN from 4-byte notification |
+| **Result Write** | KEY (00000013) | KEY (00000013) |
+| **Timing** | First, during `startAuthentication()` | Second, after notifications enabled |
+| **Configuration** | None | Requires `gatewayPin` |
+
+#### TEA Encryption Algorithm
+
+**File:** `TeaEncryption.kt`
+
+Both authentication steps use the same TEA (Tiny Encryption Algorithm) implementation, differing only in cipher constant and byte ordering:
+
+```kotlin
+object TeaEncryption {
+    fun encrypt(cypher: Long, seed: Long): Int {
+        var cypherVar = cypher
+        var seedVar = seed
+        var num = 2654435769L  // TEA_DELTA = 0x9E3779B9
+        
+        // 32 rounds of TEA encryption
+        for (i in 0 until 32) {
+            seedVar += ((cypherVar shl 4) + 1131376761L) xor 
+                       (cypherVar + num) xor 
+                       ((cypherVar shr 5) + 1919510376L)
+            seedVar = seedVar and 0xFFFFFFFFL
+            cypherVar += ((seedVar shl 4) + 1948272964L) xor 
+                         (seedVar + num) xor 
+                         ((seedVar shr 5) + 1400073827L)
+            cypherVar = cypherVar and 0xFFFFFFFFL
+            num += 2654435769L
+            num = num and 0xFFFFFFFFL
+        }
+        
+        return seedVar.toInt()
+    }
+}
+```
+
+### COBS Framing
+            seedVar += ((cypherVar shl 4) + 1131376761L) xor 
+                       (cypherVar + num) xor 
+                       ((cypherVar shr 5) + 1919510376L)
+            seedVar = seedVar and 0xFFFFFFFFL
+            cypherVar += ((seedVar shl 4) + 1948272964L) xor 
+                         (seedVar + num) xor 
+                         ((seedVar shr 5) + 1400073827L)
+            cypherVar = cypherVar and 0xFFFFFFFFL
+            num += 2654435769L
+            num = num and 0xFFFFFFFFL
+        }
+        
+        return seedVar.toInt()
+    }
 }
 ```
 

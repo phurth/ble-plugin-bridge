@@ -87,7 +87,7 @@ Newer Android OS versions do not show BLE devices in the Bluetooth pairing setti
      - Add the plugin
      - Expand settings under the OneControl plugin
      - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
-     - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
+     - Enter your **Gateway PIN/Password** (found on a sticker on your OneControl board. **NOTE:** This is not a bluetooth pairing code - it is used to unlock the data service.)
      - Toggle the service on
      - Plugin status indicators should turn green: Connection → Data → Paired
 
@@ -96,7 +96,7 @@ Newer Android OS versions do not show BLE devices in the Bluetooth pairing setti
      - Add the plugin
      - Expand settings under the OneControl plugin
      - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
-     - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
+     - Enter your **Gateway PIN/Password** (found on a sticker on your OneControl board. **NOTE:** This is not a bluetooth pairing code - it is used to unlock the data service.)
      - **IMPORTANT:** Put the OneControl gateway in pairing mode by pressing the 'Connect' button (the exact process may vary for different gateways, but this is the same process you do to initially connect using the LCI app)
      - Toggle the service on
      - The app should trigger pairing with your gateway. You can confirm this by checking Settings → Bluetooth. The Gateway should show as a paired device.
