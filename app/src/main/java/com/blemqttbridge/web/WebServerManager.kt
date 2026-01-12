@@ -641,13 +641,32 @@ class WebServerManager(
             runBlocking {
                 val settings = AppSettings(context)
                 settings.setMqttEnabled(enable)
-                
-                if (enable) {
-                    // Reconnect MQTT
-                    service.reconnectMqtt()
-                    Log.i(TAG, "MQTT reconnect requested via web interface")
-                } else {
-                    // Disconnect MQTT
+            }
+            
+            if (enable) {
+                // Restart service to properly initialize MQTT (like Android app does)
+                Thread {
+                    Thread.sleep(100) // Small delay to send response first
+                    
+                    // Stop service
+                    val stopIntent = android.content.Intent(context, BaseBleService::class.java).apply {
+                        action = BaseBleService.ACTION_STOP_SERVICE
+                    }
+                    context.startService(stopIntent)
+                    
+                    // Wait for service to stop
+                    Thread.sleep(500)
+                    
+                    // Start service with MQTT enabled
+                    val startIntent = android.content.Intent(context, BaseBleService::class.java).apply {
+                        action = BaseBleService.ACTION_START_SCAN
+                    }
+                    context.startForegroundService(startIntent)
+                    Log.i(TAG, "Service restart requested via web interface for MQTT enable")
+                }.start()
+            } else {
+                // Just disconnect MQTT without restarting service
+                runBlocking {
                     service.disconnectMqtt()
                     Log.i(TAG, "MQTT disconnect requested via web interface")
                 }
