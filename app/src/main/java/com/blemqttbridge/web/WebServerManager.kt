@@ -328,6 +328,9 @@ class WebServerManager(
                     let configLines = [];
                     configLines.push(`<div class="plugin-config-field">MAC Address(es): <span>${'$'}{macAddresses}</span></div>`);
                     
+                    // Build status line - show authenticated only for plugins that actually authenticate
+                    const showAuth = pluginId !== 'gopower'; // GoPower doesn't have separate auth
+                    
                     // Add plugin-specific fields
                     if (pluginId === 'onecontrol') {
                         if (status.gatewayPin) {
@@ -351,8 +354,7 @@ class WebServerManager(
                             <div class="plugin-status">
                                 <div class="plugin-status-line">
                                     Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
-                                    Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
-                                    Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
+                                    Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span>${'$'}{showAuth ? ' | Authenticated: <span class="' + (status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy') + '">' + (status.authenticated ? 'Yes' : 'No') + '</span>' : ''} | 
                                     Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
                                 </div>
                                 ${'$'}{configLines.join('')}
