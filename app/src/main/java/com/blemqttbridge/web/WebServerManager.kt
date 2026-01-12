@@ -176,14 +176,14 @@ class WebServerManager(
 
         <div class="card">
             <h2>Debug Log</h2>
-            <button onclick="loadDebugLog()">Load Debug Log</button>
+            <button onclick="loadDebugLog()">Load/Refresh Debug Log</button>
             <button onclick="downloadDebugLog()">Download Debug Log</button>
             <div id="debug-log" class="log-container" style="display:none; margin-top: 15px;"></div>
         </div>
 
         <div class="card">
             <h2>BLE Trace</h2>
-            <button onclick="loadBleTrace()">Load BLE Trace</button>
+            <button onclick="loadBleTrace()">Load/Refresh BLE Trace</button>
             <button onclick="downloadBleTrace()">Download BLE Trace</button>
             <div id="ble-trace" class="log-container" style="display:none; margin-top: 15px;"></div>
         </div>
@@ -219,10 +219,6 @@ class WebServerManager(
                             ${'$'}{data.mqttConnected ? 'Yes' : 'No'}
                         </span>
                     </div>
-                    <div class="status-row">
-                        <span class="status-label">BLE Trace Active:</span>
-                        <span class="status-value">${'$'}{data.bleTraceActive ? 'Yes' : 'No'}</span>
-                    </div>
                 ${'`'};
                 document.getElementById('service-status').innerHTML = html;
             } catch (error) {
@@ -249,6 +245,10 @@ class WebServerManager(
                         <span class="status-value">${'$'}{data.mqttUsername || 'None'}</span>
                     </div>
                     <div class="status-row">
+                        <span class="status-label">MQTT Password:</span>
+                        <span class="status-value">${'$'}{data.mqttPassword ? '•'.repeat(data.mqttPassword.length) : 'None'}</span>
+                    </div>
+                    <div class="status-row">
                         <span class="status-label">Enabled Plugins:</span>
                         <span class="status-value">${'$'}{data.enabledPlugins.join(', ') || 'None'}</span>
                     </div>
@@ -267,13 +267,23 @@ class WebServerManager(
                 let html = '';
                 for (const [pluginId, status] of Object.entries(data)) {
                     const healthy = status.connected && status.authenticated && status.dataHealthy;
+                    const macAddresses = status.macAddresses && status.macAddresses.length > 0 
+                        ? status.macAddresses.join(', ') 
+                        : 'None';
+                    const enabled = status.enabled ? 'Yes' : 'No';
                     html += ${'`'}
                         <div class="plugin-item">
                             <div class="plugin-name">${'$'}{pluginId}</div>
                             <div class="plugin-status">
-                                Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
-                                Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
-                                Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
+                                <div style="margin-bottom: 5px;">
+                                    Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
+                                    MAC Address(es): <span>${'$'}{macAddresses}</span>
+                                </div>
+                                <div>
+                                    Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
+                                    Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
+                                    Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
+                                </div>
                             </div>
                         </div>
                     ${'`'};
@@ -341,6 +351,7 @@ class WebServerManager(
             put("mqttBroker", settings.mqttBrokerHost.first())
             put("mqttPort", settings.mqttBrokerPort.first())
             put("mqttUsername", settings.mqttUsername.first())
+            put("mqttPassword", settings.mqttPassword.first())
             
             val enabledPlugins = JSONArray()
             if (settings.oneControlEnabled.first()) enabledPlugins.put("onecontrol")
@@ -367,17 +378,60 @@ class WebServerManager(
         newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
 
-    private fun servePlugins(): Response {
+    private fun servePlugins(): Response = runBlocking {
+        val settings = AppSettings(context)
         val statuses = BaseBleService.pluginStatuses.value
         val json = JSONObject()
-        statuses.forEach { (pluginId: String, status: BaseBleService.Companion.PluginStatus) ->
-            json.put(pluginId, JSONObject().apply {
+        
+        // OneControl
+        if (statuses.containsKey("onecontrol") || settings.oneControlEnabled.first()) {
+            val status = statuses["onecontrol"] ?: BaseBleService.Companion.PluginStatus("onecontrol")
+            val oneControlEnabled = settings.oneControlEnabled.first()
+            json.put("onecontrol", JSONObject().apply {
+                put("enabled", oneControlEnabled as Any)
+                put("macAddresses", JSONArray().apply {
+                    val mac = settings.oneControlGatewayMac.first()
+                    if (mac.isNotBlank()) put(mac)
+                })
                 put("connected", status.connected)
                 put("authenticated", status.authenticated)
                 put("dataHealthy", status.dataHealthy)
             })
         }
-        return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+        
+        // EasyTouch
+        if (statuses.containsKey("easytouch") || settings.easyTouchEnabled.first()) {
+            val status = statuses["easytouch"] ?: BaseBleService.Companion.PluginStatus("easytouch")
+            val easyTouchEnabled = settings.easyTouchEnabled.first()
+            json.put("easytouch", JSONObject().apply {
+                put("enabled", easyTouchEnabled as Any)
+                put("macAddresses", JSONArray().apply {
+                    val mac = settings.easyTouchThermostatMac.first()
+                    if (mac.isNotBlank()) put(mac)
+                })
+                put("connected", status.connected)
+                put("authenticated", status.authenticated)
+                put("dataHealthy", status.dataHealthy)
+            })
+        }
+        
+        // GoPower
+        if (statuses.containsKey("gopower") || settings.goPowerEnabled.first()) {
+            val status = statuses["gopower"] ?: BaseBleService.Companion.PluginStatus("gopower")
+            val goPowerEnabled = settings.goPowerEnabled.first()
+            json.put("gopower", JSONObject().apply {
+                put("enabled", goPowerEnabled as Any)
+                put("macAddresses", JSONArray().apply {
+                    val mac = settings.goPowerControllerMac.first()
+                    if (mac.isNotBlank()) put(mac)
+                })
+                put("connected", status.connected)
+                put("authenticated", status.authenticated)
+                put("dataHealthy", status.dataHealthy)
+            })
+        }
+        
+        newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
 
     private fun serveDebugLog(): Response {
