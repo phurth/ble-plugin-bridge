@@ -254,6 +254,8 @@ class WebServerManager(
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
+                const mqttStatusColor = data.mqttConnected ? '#4CAF50' : '#f44336';
+                const mqttStatusText = data.mqttConnected ? '●' : '●';
                 const html = ${'`'}
                     <div class="status-row">
                         <span class="status-label">Service Running:</span>
@@ -263,9 +265,9 @@ class WebServerManager(
                         </label>
                     </div>
                     <div class="status-row">
-                        <span class="status-label">MQTT Connected:</span>
+                        <span class="status-label">MQTT Enabled: <span style="color: ${'$'}{mqttStatusColor}">${'$'}{mqttStatusText}</span></span>
                         <label class="toggle-switch">
-                            <input type="checkbox" ${'$'}{data.mqttConnected ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
+                            <input type="checkbox" ${'$'}{data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
@@ -443,9 +445,12 @@ class WebServerManager(
     }
 
     private fun serveStatus(): Response {
+        val settings = AppSettings(context)
+        val mqttEnabled = runBlocking { settings.mqttEnabled.first() }
         val json = JSONObject().apply {
             put("running", BaseBleService.serviceRunning.value)
-            put("mqttConnected", BaseBleService.mqttConnected.value)
+            put("mqttEnabled", mqttEnabled) // Setting, not connection status
+            put("mqttConnected", BaseBleService.mqttConnected.value) // Actual connection status
             put("bleTraceActive", service?.isBleTraceActive() ?: false)
         }
         return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
