@@ -331,7 +331,7 @@ class BleScannerPlugin(
             put("icon", "mdi:magnify")
         }
         mqttPublisher.publishDiscovery(
-            "$topicPrefix/button/$deviceId/scan/config",
+            "$topicPrefix/button/${deviceId}_scan_button/config",
             buttonDiscovery.toString()
         )
         
