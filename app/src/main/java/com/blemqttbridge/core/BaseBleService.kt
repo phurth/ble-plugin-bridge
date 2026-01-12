@@ -39,6 +39,12 @@ class BaseBleService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "ble_bridge_service"
         
+        // Service instance for web server access
+        @Volatile
+        private var instance: BaseBleService? = null
+        
+        fun getInstance(): BaseBleService? = instance
+        
         const val ACTION_START_SCAN = "com.blemqttbridge.START_SCAN"
         const val ACTION_STOP_SCAN = "com.blemqttbridge.STOP_SCAN"
         const val ACTION_STOP_SERVICE = "com.blemqttbridge.STOP_SERVICE"
@@ -145,9 +151,6 @@ class BaseBleService : Service() {
     private var traceTimeout: Runnable? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     
-    // Web server for configuration/monitoring
-    private var webServer: com.blemqttbridge.web.WebServerManager? = null
-    
     // Bluetooth state receiver
     private val bluetoothStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
@@ -249,6 +252,7 @@ class BaseBleService : Service() {
     
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.i(TAG, "Service created")
         appendServiceLog("Service created")
         
@@ -301,22 +305,6 @@ class BaseBleService : Service() {
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
-        
-        // Start web server if enabled
-        serviceScope.launch {
-            val settings = AppSettings(applicationContext)
-            if (settings.webServerEnabled.first()) {
-                try {
-                    val port = settings.webServerPort.first()
-                    webServer = com.blemqttbridge.web.WebServerManager(applicationContext, this@BaseBleService, port)
-                    webServer?.startServer()
-                    appendServiceLog("Web server started on port $port")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to start web server", e)
-                    appendServiceLog("ERROR: Failed to start web server: ${e.message}")
-                }
-            }
-        }
         
         // Schedule keepalive as backup (in case onStartCommand doesn't get ACTION_START_SCAN)
         // This ensures keepalive is always active regardless of startup path
@@ -507,9 +495,8 @@ class BaseBleService : Service() {
         // Cancel keepalive alarm
         cancelKeepAlive()
         
-        // Stop web server
-        webServer?.stopServer()
-        webServer = null
+        // Clear instance reference
+        instance = null
         
         // Cleanup remote control manager
         remoteControlManager?.cleanup()

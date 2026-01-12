@@ -15,10 +15,11 @@ import java.io.File
 /**
  * Embedded web server for configuration and monitoring.
  * Provides REST API for viewing configuration, plugin status, and logs.
+ * Can run independently of BLE service.
  */
 class WebServerManager(
     private val context: Context,
-    private val service: BaseBleService,
+    private val service: BaseBleService?,
     private val port: Int = 8088
 ) : NanoHTTPD(port) {
 
@@ -445,7 +446,7 @@ class WebServerManager(
         val json = JSONObject().apply {
             put("running", BaseBleService.serviceRunning.value)
             put("mqttConnected", BaseBleService.mqttConnected.value)
-            put("bleTraceActive", service.isBleTraceActive())
+            put("bleTraceActive", service?.isBleTraceActive() ?: false)
         }
         return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
@@ -543,7 +544,7 @@ class WebServerManager(
     }
 
     private fun serveDebugLog(): Response {
-        val logText = service.exportDebugLogToString()
+        val logText = service?.exportDebugLogToString() ?: "Service not running"
         return newFixedLengthResponse(
             Response.Status.OK,
             "text/plain; charset=utf-8",
@@ -552,7 +553,7 @@ class WebServerManager(
     }
 
     private fun serveBleTrace(): Response {
-        val traceText = service.exportBleTraceToString()
+        val traceText = service?.exportBleTraceToString() ?: "Service not running"
         return newFixedLengthResponse(
             Response.Status.OK,
             "text/plain; charset=utf-8",
@@ -621,6 +622,14 @@ class WebServerManager(
             
             val json = JSONObject(body)
             val enable = json.getBoolean("enable")
+            
+            if (service == null) {
+                return newFixedLengthResponse(
+                    Response.Status.SERVICE_UNAVAILABLE,
+                    "application/json",
+                    """{"success":false,"error":"BLE service not running"}"""
+                )
+            }
             
             runBlocking {
                 if (enable) {

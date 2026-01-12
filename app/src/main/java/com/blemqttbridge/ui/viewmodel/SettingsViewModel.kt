@@ -145,6 +145,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 startService()
             }
         }
+        
+        // Auto-start web server on app launch if it should be running
+        viewModelScope.launch {
+            val shouldRunWebServer = settings.webServerEnabled.first()
+            val isWebServerRunning = com.blemqttbridge.web.WebServerService.serviceRunning.value
+            android.util.Log.i("SettingsViewModel", "Init: webServerEnabled=$shouldRunWebServer, isRunning=$isWebServerRunning")
+            if (shouldRunWebServer && !isWebServerRunning) {
+                android.util.Log.i("SettingsViewModel", "Auto-starting web server on app launch")
+                startWebServer()
+            }
+        }
     }
     
     // Update functions
@@ -366,6 +377,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         context.stopService(intent)
     }
     
+    private fun startWebServer() {
+        val intent = Intent(context, com.blemqttbridge.web.WebServerService::class.java)
+        context.startForegroundService(intent)
+        android.util.Log.i("SettingsViewModel", "Web server start initiated")
+    }
+    
+    private fun stopWebServer() {
+        val intent = Intent(context, com.blemqttbridge.web.WebServerService::class.java).apply {
+            action = com.blemqttbridge.web.WebServerService.ACTION_STOP_SERVICE
+        }
+        context.startService(intent)
+        android.util.Log.i("SettingsViewModel", "Web server stop initiated")
+    }
+    
     private suspend fun restartService() {
         android.util.Log.i("SettingsViewModel", "Restarting service...")
         stopService()
@@ -424,9 +449,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setWebServerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settings.setWebServerEnabled(enabled)
-            // Restart service to pick up web server change
-            if (serviceRunningStatus.value) {
-                restartService()
+            // Start/stop web server service independently of BLE service
+            if (enabled) {
+                startWebServer()
+            } else {
+                stopWebServer()
             }
         }
     }
