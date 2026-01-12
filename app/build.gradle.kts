@@ -114,6 +114,9 @@ dependencies {
     // JSON
     implementation("org.json:json:20240303")
     
+    // NanoHTTPD for embedded web server
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    
     // Testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.22")

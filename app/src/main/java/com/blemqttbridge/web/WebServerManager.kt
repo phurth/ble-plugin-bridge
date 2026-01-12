@@ -1,0 +1,423 @@
+package com.blemqttbridge.web
+
+import android.content.Context
+import android.util.Log
+import com.blemqttbridge.BuildConfig
+import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.data.AppSettings
+import fi.iki.elonen.NanoHTTPD
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+/**
+ * Embedded web server for configuration and monitoring.
+ * Provides REST API for viewing configuration, plugin status, and logs.
+ */
+class WebServerManager(
+    private val context: Context,
+    private val service: BaseBleService,
+    private val port: Int = 8088
+) : NanoHTTPD(port) {
+
+    companion object {
+        private const val TAG = "WebServerManager"
+    }
+
+    init {
+        Log.i(TAG, "Web server initialized on port $port")
+    }
+
+    override fun serve(session: IHTTPSession): Response {
+        val uri = session.uri
+        val method = session.method
+
+        Log.d(TAG, "$method $uri from ${session.remoteIpAddress}")
+
+        return try {
+            when {
+                uri == "/" || uri == "/index.html" -> serveIndexPage()
+                uri == "/api/status" -> serveStatus()
+                uri == "/api/config" -> serveConfig()
+                uri == "/api/plugins" -> servePlugins()
+                uri == "/api/logs/debug" -> serveDebugLog()
+                uri == "/api/logs/ble" -> serveBleTrace()
+                uri.startsWith("/api/") -> newFixedLengthResponse(
+                    Response.Status.NOT_FOUND,
+                    "application/json",
+                    """{"error":"Endpoint not found"}"""
+                )
+                else -> newFixedLengthResponse(
+                    Response.Status.NOT_FOUND,
+                    "text/html",
+                    "<html><body><h1>404 Not Found</h1></body></html>"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error serving request: $uri", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun serveIndexPage(): Response {
+        val html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLE-MQTT Plugin Bridge</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            background: #1976d2;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .header h1 { font-size: 24px; margin-bottom: 5px; }
+        .header .version { opacity: 0.8; font-size: 14px; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .card h2 {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #333;
+            border-bottom: 2px solid #1976d2;
+            padding-bottom: 8px;
+        }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .status-row:last-child { border-bottom: none; }
+        .status-label { font-weight: 500; color: #666; }
+        .status-value { color: #333; }
+        .status-online { color: #4caf50; font-weight: bold; }
+        .status-offline { color: #f44336; font-weight: bold; }
+        .plugin-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            border-left: 4px solid #1976d2;
+        }
+        .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; }
+        .plugin-status { font-size: 14px; color: #666; }
+        .plugin-healthy { color: #4caf50; }
+        .plugin-unhealthy { color: #f44336; }
+        button {
+            background: #1976d2;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover { background: #1565c0; }
+        .log-container {
+            background: #263238;
+            color: #aed581;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .loading { text-align: center; padding: 20px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>BLE-MQTT Plugin Bridge</h1>
+            <div class="version">Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})</div>
+        </div>
+
+        <div class="card">
+            <h2>Service Status</h2>
+            <div id="service-status" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>Configuration</h2>
+            <div id="config-info" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>Plugin Status</h2>
+            <div id="plugin-status" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>Debug Log</h2>
+            <button onclick="loadDebugLog()">Load Debug Log</button>
+            <button onclick="downloadDebugLog()">Download Debug Log</button>
+            <div id="debug-log" class="log-container" style="display:none; margin-top: 15px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>BLE Trace</h2>
+            <button onclick="loadBleTrace()">Load BLE Trace</button>
+            <button onclick="downloadBleTrace()">Download BLE Trace</button>
+            <div id="ble-trace" class="log-container" style="display:none; margin-top: 15px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // Load status on page load
+        window.addEventListener('load', () => {
+            loadStatus();
+            loadConfig();
+            loadPlugins();
+            // Auto-refresh status every 5 seconds
+            setInterval(() => {
+                loadStatus();
+                loadPlugins();
+            }, 5000);
+        });
+
+        async function loadStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                const html = ${'`'}
+                    <div class="status-row">
+                        <span class="status-label">Service Running:</span>
+                        <span class="status-value ${'$'}{data.running ? 'status-online' : 'status-offline'}">
+                            ${'$'}{data.running ? 'Yes' : 'No'}
+                        </span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">MQTT Connected:</span>
+                        <span class="status-value ${'$'}{data.mqttConnected ? 'status-online' : 'status-offline'}">
+                            ${'$'}{data.mqttConnected ? 'Yes' : 'No'}
+                        </span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">BLE Trace Active:</span>
+                        <span class="status-value">${'$'}{data.bleTraceActive ? 'Yes' : 'No'}</span>
+                    </div>
+                ${'`'};
+                document.getElementById('service-status').innerHTML = html;
+            } catch (error) {
+                document.getElementById('service-status').innerHTML = 
+                    '<div style="color: #f44336;">Failed to load status</div>';
+            }
+        }
+
+        async function loadConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const data = await response.json();
+                const html = ${'`'}
+                    <div class="status-row">
+                        <span class="status-label">MQTT Broker:</span>
+                        <span class="status-value">${'$'}{data.mqttBroker || 'Not configured'}</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">MQTT Port:</span>
+                        <span class="status-value">${'$'}{data.mqttPort || 'Not configured'}</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">MQTT Username:</span>
+                        <span class="status-value">${'$'}{data.mqttUsername || 'None'}</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Enabled Plugins:</span>
+                        <span class="status-value">${'$'}{data.enabledPlugins.join(', ') || 'None'}</span>
+                    </div>
+                ${'`'};
+                document.getElementById('config-info').innerHTML = html;
+            } catch (error) {
+                document.getElementById('config-info').innerHTML = 
+                    '<div style="color: #f44336;">Failed to load configuration</div>';
+            }
+        }
+
+        async function loadPlugins() {
+            try {
+                const response = await fetch('/api/plugins');
+                const data = await response.json();
+                let html = '';
+                for (const [pluginId, status] of Object.entries(data)) {
+                    const healthy = status.connected && status.authenticated && status.dataHealthy;
+                    html += ${'`'}
+                        <div class="plugin-item">
+                            <div class="plugin-name">${'$'}{pluginId}</div>
+                            <div class="plugin-status">
+                                Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
+                                Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
+                                Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
+                            </div>
+                        </div>
+                    ${'`'};
+                }
+                document.getElementById('plugin-status').innerHTML = html || '<div>No plugins loaded</div>';
+            } catch (error) {
+                document.getElementById('plugin-status').innerHTML = 
+                    '<div style="color: #f44336;">Failed to load plugin status</div>';
+            }
+        }
+
+        async function loadDebugLog() {
+            const container = document.getElementById('debug-log');
+            container.style.display = 'block';
+            container.textContent = 'Loading...';
+            try {
+                const response = await fetch('/api/logs/debug');
+                const text = await response.text();
+                container.textContent = text;
+            } catch (error) {
+                container.textContent = 'Failed to load debug log: ' + error.message;
+            }
+        }
+
+        async function loadBleTrace() {
+            const container = document.getElementById('ble-trace');
+            container.style.display = 'block';
+            container.textContent = 'Loading...';
+            try {
+                const response = await fetch('/api/logs/ble');
+                const text = await response.text();
+                container.textContent = text;
+            } catch (error) {
+                container.textContent = 'Failed to load BLE trace: ' + error.message;
+            }
+        }
+
+        function downloadDebugLog() {
+            window.open('/api/logs/debug', '_blank');
+        }
+
+        function downloadBleTrace() {
+            window.open('/api/logs/ble', '_blank');
+        }
+    </script>
+</body>
+</html>
+        """.trimIndent()
+
+        return newFixedLengthResponse(Response.Status.OK, "text/html", html)
+    }
+
+    private fun serveStatus(): Response {
+        val json = JSONObject().apply {
+            put("running", BaseBleService.serviceRunning.value)
+            put("mqttConnected", BaseBleService.mqttConnected.value)
+            put("bleTraceActive", service.isBleTraceActive())
+        }
+        return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+    }
+
+    private fun serveConfig(): Response = runBlocking {
+        val settings = AppSettings(context)
+        val json = JSONObject().apply {
+            put("mqttBroker", settings.mqttBrokerHost.first())
+            put("mqttPort", settings.mqttBrokerPort.first())
+            put("mqttUsername", settings.mqttUsername.first())
+            
+            val enabledPlugins = JSONArray()
+            if (settings.oneControlEnabled.first()) enabledPlugins.put("onecontrol")
+            if (settings.easyTouchEnabled.first()) enabledPlugins.put("easytouch")
+            if (settings.goPowerEnabled.first()) enabledPlugins.put("gopower")
+            put("enabledPlugins", enabledPlugins)
+            
+            // Add configured MAC addresses
+            val oneControlMacs = JSONArray()
+            val oneControlMac = settings.oneControlGatewayMac.first()
+            if (oneControlMac.isNotBlank()) oneControlMacs.put(oneControlMac)
+            put("oneControlMacs", oneControlMacs)
+            
+            val easyTouchMacs = JSONArray()
+            val easyTouchMac = settings.easyTouchThermostatMac.first()
+            if (easyTouchMac.isNotBlank()) easyTouchMacs.put(easyTouchMac)
+            put("easyTouchMacs", easyTouchMacs)
+            
+            val goPowerMacs = JSONArray()
+            val goPowerMac = settings.goPowerControllerMac.first()
+            if (goPowerMac.isNotBlank()) goPowerMacs.put(goPowerMac)
+            put("goPowerMacs", goPowerMacs)
+        }
+        newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+    }
+
+    private fun servePlugins(): Response {
+        val statuses = BaseBleService.pluginStatuses.value
+        val json = JSONObject()
+        statuses.forEach { (pluginId: String, status: BaseBleService.Companion.PluginStatus) ->
+            json.put(pluginId, JSONObject().apply {
+                put("connected", status.connected)
+                put("authenticated", status.authenticated)
+                put("dataHealthy", status.dataHealthy)
+            })
+        }
+        return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+    }
+
+    private fun serveDebugLog(): Response {
+        val logText = service.exportDebugLogToString()
+        return newFixedLengthResponse(
+            Response.Status.OK,
+            "text/plain; charset=utf-8",
+            logText
+        )
+    }
+
+    private fun serveBleTrace(): Response {
+        val traceText = service.exportBleTraceToString()
+        return newFixedLengthResponse(
+            Response.Status.OK,
+            "text/plain; charset=utf-8",
+            traceText
+        )
+    }
+
+    fun startServer() {
+        try {
+            start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            Log.i(TAG, "✅ Web server started on port $port")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start web server", e)
+            throw e
+        }
+    }
+
+    fun stopServer() {
+        try {
+            stop()
+            Log.i(TAG, "Web server stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping web server", e)
+        }
+    }
+
+    fun getUrl(ipAddress: String): String {
+        return "http://$ipAddress:$port"
+    }
+}

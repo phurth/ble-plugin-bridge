@@ -558,6 +558,96 @@ fun SystemSettingsScreen(
             
             Spacer(modifier = Modifier.height(16.dp))
             
+            // Web Interface Section
+            SectionHeader("Web Interface")
+            
+            val webServerEnabled by viewModel.webServerEnabled.collectAsState(initial = false)
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Enable Web Interface",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Access configuration from browser",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = webServerEnabled,
+                            onCheckedChange = { viewModel.setWebServerEnabled(it) }
+                        )
+                    }
+                    
+                    if (webServerEnabled) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Get IP address
+                        val ipAddress = remember { viewModel.getLocalIpAddress() }
+                        val webUrl = "http://$ipAddress:8088"
+                        
+                        Column {
+                            Text(
+                                text = "Web Interface URL:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = webUrl,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        val clip = ClipData.newPlainText("Web URL", webUrl)
+                                        clipboard.setPrimaryClip(clip)
+                                        Toast.makeText(context, "URL copied to clipboard", Toast.LENGTH_SHORT).show()
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.ContentCopy,
+                                        contentDescription = "Copy URL",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Open this URL in a browser on any device connected to the same network.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+            
             // Diagnostics Section
             SectionHeader("Diagnostics")
             

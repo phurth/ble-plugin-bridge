@@ -145,6 +145,9 @@ class BaseBleService : Service() {
     private var traceTimeout: Runnable? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     
+    // Web server for configuration/monitoring
+    private var webServer: com.blemqttbridge.web.WebServerManager? = null
+    
     // Bluetooth state receiver
     private val bluetoothStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
@@ -298,6 +301,22 @@ class BaseBleService : Service() {
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
+        
+        // Start web server if enabled
+        serviceScope.launch {
+            val settings = AppSettings(applicationContext)
+            if (settings.webServerEnabled.first()) {
+                try {
+                    val port = settings.webServerPort.first()
+                    webServer = com.blemqttbridge.web.WebServerManager(applicationContext, this@BaseBleService, port)
+                    webServer?.startServer()
+                    appendServiceLog("Web server started on port $port")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start web server", e)
+                    appendServiceLog("ERROR: Failed to start web server: ${e.message}")
+                }
+            }
+        }
         
         // Schedule keepalive as backup (in case onStartCommand doesn't get ACTION_START_SCAN)
         // This ensures keepalive is always active regardless of startup path
@@ -487,6 +506,10 @@ class BaseBleService : Service() {
         
         // Cancel keepalive alarm
         cancelKeepAlive()
+        
+        // Stop web server
+        webServer?.stopServer()
+        webServer = null
         
         // Cleanup remote control manager
         remoteControlManager?.cleanup()
@@ -2385,6 +2408,73 @@ class BaseBleService : Service() {
             null
         }
     }
+    
+    /**
+     * Export debug log as string (for web interface).
+     */
+    fun exportDebugLogToString(): String {
+        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        return buildString {
+            appendLine("BLE-MQTT Plugin Bridge Debug Log")
+            appendLine("================================")
+            appendLine("Timestamp: $ts")
+            appendLine("App Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            appendLine("")
+            
+            appendLine("Service Status:")
+            appendLine("  Running: ${_serviceRunning.value}")
+            appendLine("  MQTT Connected: ${_mqttConnected.value}")
+            appendLine("  BLE Trace Active: $traceEnabled")
+            traceFile?.let { appendLine("  Trace File: ${it.absolutePath}") }
+            appendLine("")
+            
+            appendLine("Plugin Statuses:")
+            _pluginStatuses.value.forEach { (pluginId, status) ->
+                appendLine("  $pluginId:")
+                appendLine("    Connected: ${status.connected}")
+                appendLine("    Authenticated: ${status.authenticated}")
+                appendLine("    Data Healthy: ${status.dataHealthy}")
+            }
+            appendLine("")
+            
+            appendLine("Active Plugins:")
+            blePlugin?.let { appendLine("  BLE: ${it.javaClass.simpleName}") }
+            outputPlugin?.let { appendLine("  Output: ${it.javaClass.simpleName}") }
+            appendLine("")
+            
+            appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
+            appendLine("=".repeat(50))
+            serviceLogBuffer.forEach { line -> appendLine(line) }
+            
+            if (serviceLogBuffer.isEmpty()) {
+                appendLine("(No service events logged yet)")
+            }
+        }
+    }
+    
+    /**
+     * Export BLE trace as string (for web interface).
+     */
+    fun exportBleTraceToString(): String {
+        return buildString {
+            appendLine("BLE-MQTT Plugin Bridge BLE Trace")
+            appendLine("================================")
+            appendLine("Timestamp: ${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())}")
+            appendLine("")
+            appendLine("Recent BLE Events (last $MAX_BLE_TRACE_LINES):")
+            appendLine("=".repeat(50))
+            bleTraceBuffer.forEach { line -> appendLine(line) }
+            
+            if (bleTraceBuffer.isEmpty()) {
+                appendLine("(No BLE events logged yet)")
+            }
+        }
+    }
+    
+    /**
+     * Check if BLE trace is active.
+     */
+    fun isBleTraceActive(): Boolean = traceEnabled
     
     /**
      * Share a file via Android share intent.

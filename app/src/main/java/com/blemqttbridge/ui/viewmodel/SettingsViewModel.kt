@@ -42,6 +42,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     val bleScannerEnabled = settings.bleScannerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     
+    val webServerEnabled = settings.webServerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val webServerPort = settings.webServerPort.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_WEB_SERVER_PORT)
+    
     // Expandable section states (collapsed by default)
     private val _mqttExpanded = MutableStateFlow(false)
     val mqttExpanded: StateFlow<Boolean> = _mqttExpanded
@@ -416,5 +419,34 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 android.util.Log.e("SettingsViewModel", "Failed to toggle BLE trace", e)
             }
         }
+    }
+    
+    fun setWebServerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setWebServerEnabled(enabled)
+            // Restart service to pick up web server change
+            if (serviceRunningStatus.value) {
+                restartService()
+            }
+        }
+    }
+    
+    fun getLocalIpAddress(): String {
+        try {
+            val networkInterface = java.net.NetworkInterface.getNetworkInterfaces()
+            while (networkInterface.hasMoreElements()) {
+                val ni = networkInterface.nextElement()
+                val addresses = ni.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val addr = addresses.nextElement()
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        return addr.hostAddress ?: "0.0.0.0"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SettingsViewModel", "Failed to get local IP", e)
+        }
+        return "0.0.0.0"
     }
 }
