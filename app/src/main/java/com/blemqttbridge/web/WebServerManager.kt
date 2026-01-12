@@ -649,6 +649,19 @@ class WebServerManager(
             })
         }
         
+        // BLE Scanner
+        if (statuses.containsKey("blescanner") || settings.bleScannerEnabled.first()) {
+            val status = statuses["blescanner"] ?: BaseBleService.Companion.PluginStatus("blescanner")
+            val bleScannerEnabled = settings.bleScannerEnabled.first()
+            json.put("blescanner", JSONObject().apply {
+                put("enabled", bleScannerEnabled as Any)
+                put("macAddresses", JSONArray())  // BLE Scanner doesn't have a configured MAC
+                put("connected", status.connected)
+                put("authenticated", status.authenticated)
+                put("dataHealthy", status.dataHealthy)
+            })
+        }
+        
         newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
 
