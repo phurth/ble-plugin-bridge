@@ -2,7 +2,7 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.4  
+> **Current Version:** v2.5.5  
 > **Last Updated:** January 12, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
@@ -14,7 +14,7 @@
    - [Common Tasks](#common-tasks)
    - [Key Files](#key-files)
    - [Recent Critical Changes](#recent-critical-changes)
-   - [v2.5.4 Breaking Changes](#v254-breaking-changes-january-2026)
+   - [v2.5.5 New Features](#v255-new-features-january-2026)
 
 1. [High-Level Architecture](#1-high-level-architecture)
    - [Overview](#overview)
@@ -163,6 +163,27 @@
 - **Service layer:** `BaseBleService.kt`
 
 ### Recent Critical Changes
+
+**v2.5.5 (January 2026):**
+- **Web Interface Phase 4:** Plugin management and MQTT configuration editing
+  - Add/remove plugins via web UI with modal dialogs
+  - MQTT broker, port, username, password editable when MQTT service stopped
+  - Real-time sync: changes in web UI immediately reflect in Android UI
+  - Dual storage consistency: Updates both AppSettings (DataStore) and ServiceStateManager (SharedPreferences)
+  - Styled configuration sections with blue left border matching plugin cards
+- **BLE Scanner Integration:** Fully integrated BLE Scanner plugin
+  - Fixed PLUGIN_ID to "blescanner" (no underscore) for consistency
+  - Fixed Home Assistant button discovery topic structure
+  - Added to web UI plugin list with proper styling
+  - Hidden health indicators and MAC address field (not device-specific)
+  - Skip logic in BaseBleService plugin registry loop (initialized separately)
+- **Web UI Enhancements:**
+  - Plugin configuration editing (MAC addresses, PINs, passwords)
+  - Edit buttons disabled when service/MQTT running
+  - Helper text: "Service must be stopped to edit plugin configurations"
+  - MQTT config helper text: "MQTT service must be stopped to edit the MQTT configuration"
+  - Confirmation dialogs for plugin removal
+  - LaunchedEffect observers for reactive UI updates
 
 **v2.5.2 (January 2026):**
 - **Multi-Plugin Boot Support:** Fixed `BootReceiver` to auto-start all enabled plugins on device boot
