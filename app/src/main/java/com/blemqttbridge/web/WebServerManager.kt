@@ -47,6 +47,7 @@ class WebServerManager(
                 uri == "/api/logs/ble" -> serveBleTrace()
                 uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
                 uri == "/api/control/mqtt" && method == Method.POST -> handleMqttControl(session)
+                uri == "/api/config/plugin" && method == Method.POST -> handlePluginConfig(session)
                 uri.startsWith("/api/") -> newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "application/json",
@@ -198,6 +199,46 @@ class WebServerManager(
             word-break: break-all;
         }
         .loading { text-align: center; padding: 20px; color: #666; }
+        .edit-btn {
+            background: #1976d2;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 8px;
+        }
+        .edit-btn:hover { background: #1565c0; }
+        .edit-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .save-btn {
+            background: #4caf50;
+        }
+        .save-btn:hover { background: #45a049; }
+        .config-input {
+            font-family: monospace;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 200px;
+        }
+        .helper-text {
+            color: #ff9800;
+            font-size: 12px;
+            margin-left: 8px;
+            font-style: italic;
+        }
+        .section-helper {
+            color: #666;
+            font-size: 13px;
+            font-style: italic;
+            margin-top: -8px;
+            margin-bottom: 12px;
+        }
     </style>
 </head>
 <body>
@@ -219,6 +260,7 @@ class WebServerManager(
 
         <div class="card">
             <h2>Plugin Status</h2>
+            <div class="section-helper">Note: Service must be stopped to edit plugin configurations</div>
             <div id="plugin-status" class="loading">Loading...</div>
         </div>
 
@@ -238,6 +280,10 @@ class WebServerManager(
     </div>
 
     <script>
+        // Global state
+        let serviceRunning = false;
+        let configChanged = {}; // Track which configs have changed
+        
         // Load status on page load
         window.addEventListener('load', () => {
             loadStatus();
@@ -254,6 +300,7 @@ class WebServerManager(
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
+                serviceRunning = data.running;
                 const mqttStatusColor = data.mqttConnected ? '#4CAF50' : '#f44336';
                 const mqttStatusText = data.mqttConnected ? '●' : '●';
                 const html = ${'`'}
@@ -321,36 +368,31 @@ class WebServerManager(
                     const healthy = status.connected && status.authenticated && status.dataHealthy;
                     const macAddresses = status.macAddresses && status.macAddresses.length > 0 
                         ? status.macAddresses.join(', ') 
-                        : 'None';
+                        : '';
                     const enabled = status.enabled ? 'Yes' : 'No';
+                    const showHelper = configChanged[pluginId] && !serviceRunning;
                     
-                    // Build configuration field lines
+                    // Build configuration field lines with edit buttons
                     let configLines = [];
-                    configLines.push(`<div class="plugin-config-field">MAC Address(es): <span>${'$'}{macAddresses}</span></div>`);
+                    const editDisabled = serviceRunning ? 'disabled' : '';
+                    
+                    // MAC Address field (always editable for all plugins)
+                    configLines.push(buildEditableField(pluginId, 'macAddress', 'MAC Address', macAddresses, editDisabled, false));
                     
                     // Build status line - show authenticated only for plugins that actually authenticate
                     const showAuth = pluginId !== 'gopower'; // GoPower doesn't have separate auth
                     
                     // Add plugin-specific fields
                     if (pluginId === 'onecontrol') {
-                        if (status.gatewayPin) {
-                            const maskedPin = '•'.repeat(status.gatewayPin.length);
-                            configLines.push(`<div class="plugin-config-field">Gateway PIN: <span>${'$'}{maskedPin}</span></div>`);
-                        }
-                        if (status.bluetoothPin) {
-                            const maskedPin = '•'.repeat(status.bluetoothPin.length);
-                            configLines.push(`<div class="plugin-config-field">Bluetooth PIN: <span>${'$'}{maskedPin}</span></div>`);
-                        }
+                        configLines.push(buildEditableField(pluginId, 'gatewayPin', 'Gateway PIN', status.gatewayPin || '', editDisabled, true));
+                        configLines.push(buildEditableField(pluginId, 'bluetoothPin', 'Bluetooth PIN', status.bluetoothPin || '', editDisabled, true));
                     } else if (pluginId === 'easytouch') {
-                        if (status.password) {
-                            const maskedPassword = '•'.repeat(status.password.length);
-                            configLines.push(`<div class="plugin-config-field">Password: <span>${'$'}{maskedPassword}</span></div>`);
-                        }
+                        configLines.push(buildEditableField(pluginId, 'password', 'Password', status.password || '', editDisabled, true));
                     }
                     
                     html += ${'`'}
                         <div class="plugin-item">
-                            <div class="plugin-name">${'$'}{pluginId}</div>
+                            <div class="plugin-name">${'$'}{pluginId}${'$'}{showHelper ? '<span class="helper-text">Changes will take effect upon restarting service</span>' : ''}</div>
                             <div class="plugin-status">
                                 <div class="plugin-status-line">
                                     Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
@@ -366,6 +408,56 @@ class WebServerManager(
             } catch (error) {
                 document.getElementById('plugin-status').innerHTML = 
                     '<div style="color: #f44336;">Failed to load plugin status</div>';
+            }
+        }
+
+        function buildEditableField(pluginId, fieldName, label, value, editDisabled, isSecret) {
+            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
+            const displayValue = value || 'None';
+            const maskedValue = isSecret && value ? '•'.repeat(value.length) : displayValue;
+            
+            return ${'`'}
+                <div class="plugin-config-field">
+                    ${'$'}{label}: 
+                    <span id="${'$'}{fieldId}_display">${'$'}{maskedValue}</span>
+                    <input type="text" id="${'$'}{fieldId}_input" class="config-input" value="${'$'}{value}" style="display:none;">
+                    <button id="${'$'}{fieldId}_edit" class="edit-btn" ${'$'}{editDisabled} onclick="editField('${'$'}{pluginId}', '${'$'}{fieldName}', ${'$'}{isSecret})">Edit</button>
+                    <button id="${'$'}{fieldId}_save" class="edit-btn save-btn" style="display:none;" onclick="saveField('${'$'}{pluginId}', '${'$'}{fieldName}')">Save</button>
+                </div>
+            ${'`'};
+        }
+
+        function editField(pluginId, fieldName, isSecret) {
+            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
+            document.getElementById(`${'$'}{fieldId}_display`).style.display = 'none';
+            document.getElementById(`${'$'}{fieldId}_input`).style.display = 'inline-block';
+            document.getElementById(`${'$'}{fieldId}_edit`).style.display = 'none';
+            document.getElementById(`${'$'}{fieldId}_save`).style.display = 'inline-block';
+        }
+
+        async function saveField(pluginId, fieldName) {
+            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
+            const value = document.getElementById(`${'$'}{fieldId}_input`).value;
+            
+            try {
+                const response = await fetch('/api/config/plugin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        pluginId: pluginId,
+                        field: fieldName,
+                        value: value
+                    })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    configChanged[pluginId] = true;
+                    loadPlugins(); // Reload to show saved value
+                } else {
+                    alert('Failed to save: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error saving configuration: ' + error.message);
             }
         }
 
@@ -414,6 +506,9 @@ class WebServerManager(
                 if (!result.success) {
                     alert('Failed to ' + (enable ? 'start' : 'stop') + ' service: ' + (result.error || 'Unknown error'));
                     loadStatus(); // Refresh to show actual state
+                } else if (enable) {
+                    // Clear config changed flags when service starts
+                    configChanged = {};
                 }
             } catch (error) {
                 alert('Error controlling service: ' + error.message);
@@ -686,6 +781,70 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error handling MQTT control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handlePluginConfig(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+            
+            val json = JSONObject(body)
+            val pluginId = json.getString("pluginId")
+            val field = json.getString("field")
+            val value = json.getString("value")
+            
+            // Verify service is not running
+            if (BaseBleService.serviceRunning.value) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped before editing configuration"}"""
+                )
+            }
+            
+            // Update settings based on plugin and field
+            runBlocking {
+                val settings = AppSettings(context)
+                when (pluginId) {
+                    "onecontrol" -> when (field) {
+                        "macAddress" -> settings.setOneControlGatewayMac(value)
+                        "gatewayPin" -> settings.setOneControlGatewayPin(value)
+                        "bluetoothPin" -> settings.setOneControlBluetoothPin(value)
+                        else -> return@runBlocking
+                    }
+                    "easytouch" -> when (field) {
+                        "macAddress" -> settings.setEasyTouchThermostatMac(value)
+                        "password" -> settings.setEasyTouchThermostatPassword(value)
+                        else -> return@runBlocking
+                    }
+                    "gopower" -> when (field) {
+                        "macAddress" -> settings.setGoPowerControllerMac(value)
+                        else -> return@runBlocking
+                    }
+                }
+            }
+            
+            Log.i(TAG, "Updated $pluginId config: $field")
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling plugin config", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",
