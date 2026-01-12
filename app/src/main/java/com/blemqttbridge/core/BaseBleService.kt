@@ -1789,7 +1789,8 @@ class BaseBleService : Service() {
     private fun disconnectAll() {
         Log.i(TAG, "Disconnecting all devices (${connectedDevices.size} connected)")
         
-        for ((_, deviceInfo) in connectedDevices) {
+        // Create a copy to avoid ConcurrentModificationException
+        for ((_, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
             try {
                 gatt.disconnect()
@@ -1800,7 +1801,8 @@ class BaseBleService : Service() {
         
         connectedDevices.clear()
         
-        for ((_, job) in pollingJobs) {
+        // Create a copy to avoid ConcurrentModificationException
+        for ((_, job) in pollingJobs.toList()) {
             job.cancel()
         }
         pollingJobs.clear()
