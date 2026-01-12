@@ -2477,6 +2477,38 @@ class BaseBleService : Service() {
     fun isBleTraceActive(): Boolean = traceEnabled
     
     /**
+     * Disconnect MQTT (for web interface control).
+     */
+    suspend fun disconnectMqtt() {
+        Log.i(TAG, "MQTT disconnect requested")
+        outputPlugin?.disconnect()
+    }
+    
+    /**
+     * Reconnect MQTT (for web interface control).
+     */
+    suspend fun reconnectMqtt() {
+        Log.i(TAG, "MQTT reconnect requested")
+        val currentPlugin = outputPlugin
+        if (currentPlugin != null) {
+            // Disconnect first
+            currentPlugin.disconnect()
+            // Small delay
+            kotlinx.coroutines.delay(500)
+            // Re-initialize with same config
+            val settings = AppSettings(applicationContext)
+            val config = mapOf(
+                "broker_url" to settings.mqttBrokerHost.first(),
+                "port" to settings.mqttBrokerPort.first().toString(),
+                "username" to settings.mqttUsername.first(),
+                "password" to settings.mqttPassword.first(),
+                "topic_prefix" to settings.mqttTopicPrefix.first()
+            )
+            currentPlugin.initialize(config)
+        }
+    }
+    
+    /**
      * Share a file via Android share intent.
      * Uses FileProvider to grant temporary read access to the file.
      */

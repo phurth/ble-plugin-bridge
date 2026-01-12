@@ -44,6 +44,8 @@ class WebServerManager(
                 uri == "/api/plugins" -> servePlugins()
                 uri == "/api/logs/debug" -> serveDebugLog()
                 uri == "/api/logs/ble" -> serveBleTrace()
+                uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
+                uri == "/api/control/mqtt" && method == Method.POST -> handleMqttControl(session)
                 uri.startsWith("/api/") -> newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "application/json",
@@ -128,6 +130,49 @@ class WebServerManager(
         .plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
         .plugin-healthy { color: #4caf50; }
         .plugin-unhealthy { color: #f44336; }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .toggle-slider {
+            background-color: #4caf50;
+        }
+        input:checked + .toggle-slider:before {
+            transform: translateX(26px);
+        }
+        input:disabled + .toggle-slider {
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
         button {
             background: #1976d2;
             color: white;
@@ -211,15 +256,17 @@ class WebServerManager(
                 const html = ${'`'}
                     <div class="status-row">
                         <span class="status-label">Service Running:</span>
-                        <span class="status-value ${'$'}{data.running ? 'status-online' : 'status-offline'}">
-                            ${'$'}{data.running ? 'Yes' : 'No'}
-                        </span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${'$'}{data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
                     </div>
                     <div class="status-row">
                         <span class="status-label">MQTT Connected:</span>
-                        <span class="status-value ${'$'}{data.mqttConnected ? 'status-online' : 'status-offline'}">
-                            ${'$'}{data.mqttConnected ? 'Yes' : 'No'}
-                        </span>
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${'$'}{data.mqttConnected ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
                     </div>
                 ${'`'};
                 document.getElementById('service-status').innerHTML = html;
@@ -350,6 +397,42 @@ class WebServerManager(
         function downloadBleTrace() {
             window.open('/api/logs/ble', '_blank');
         }
+
+        async function toggleService(enable) {
+            try {
+                const response = await fetch('/api/control/service', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable: enable })
+                });
+                const result = await response.json();
+                if (!result.success) {
+                    alert('Failed to ' + (enable ? 'start' : 'stop') + ' service: ' + (result.error || 'Unknown error'));
+                    loadStatus(); // Refresh to show actual state
+                }
+            } catch (error) {
+                alert('Error controlling service: ' + error.message);
+                loadStatus(); // Refresh to show actual state
+            }
+        }
+
+        async function toggleMqtt(enable) {
+            try {
+                const response = await fetch('/api/control/mqtt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable: enable })
+                });
+                const result = await response.json();
+                if (!result.success) {
+                    alert('Failed to ' + (enable ? 'connect' : 'disconnect') + ' MQTT: ' + (result.error || 'Unknown error'));
+                    loadStatus(); // Refresh to show actual state
+                }
+            } catch (error) {
+                alert('Error controlling MQTT: ' + error.message);
+                loadStatus(); // Refresh to show actual state
+            }
+        }
     </script>
 </body>
 </html>
@@ -475,6 +558,92 @@ class WebServerManager(
             "text/plain; charset=utf-8",
             traceText
         )
+    }
+
+    private fun handleServiceControl(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+            
+            val json = JSONObject(body)
+            val enable = json.getBoolean("enable")
+            
+            if (enable) {
+                // Start service
+                val intent = android.content.Intent(context, BaseBleService::class.java).apply {
+                    action = BaseBleService.ACTION_START_SCAN
+                }
+                context.startForegroundService(intent)
+                Log.i(TAG, "Service start requested via web interface")
+            } else {
+                // Stop service
+                val intent = android.content.Intent(context, BaseBleService::class.java).apply {
+                    action = BaseBleService.ACTION_STOP_SERVICE
+                }
+                context.startService(intent)
+                Log.i(TAG, "Service stop requested via web interface")
+            }
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling service control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handleMqttControl(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+            
+            val json = JSONObject(body)
+            val enable = json.getBoolean("enable")
+            
+            runBlocking {
+                if (enable) {
+                    // Reconnect MQTT
+                    service.reconnectMqtt()
+                    Log.i(TAG, "MQTT reconnect requested via web interface")
+                } else {
+                    // Disconnect MQTT
+                    service.disconnectMqtt()
+                    Log.i(TAG, "MQTT disconnect requested via web interface")
+                }
+            }
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling MQTT control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
     }
 
     fun startServer() {
