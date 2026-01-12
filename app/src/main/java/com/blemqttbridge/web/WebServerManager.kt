@@ -49,6 +49,7 @@ class WebServerManager(
                 uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
                 uri == "/api/control/mqtt" && method == Method.POST -> handleMqttControl(session)
                 uri == "/api/config/plugin" && method == Method.POST -> handlePluginConfig(session)
+                uri == "/api/config/mqtt" && method == Method.POST -> handleMqttConfig(session)
                 uri == "/api/plugins/add" && method == Method.POST -> handlePluginAdd(session)
                 uri == "/api/plugins/remove" && method == Method.POST -> handlePluginRemove(session)
                 uri.startsWith("/api/") -> newFixedLengthResponse(
@@ -367,7 +368,8 @@ class WebServerManager(
         </div>
 
         <div class="card">
-            <h2>Configuration</h2>
+            <h2>MQTT Configuration</h2>
+            <div class="section-helper">Note: MQTT service must be stopped to edit the MQTT configuration</div>
             <div id="config-info" class="loading">Loading...</div>
         </div>
 
@@ -492,25 +494,19 @@ class WebServerManager(
 
         async function loadConfig() {
             try {
+                const statusResponse = await fetch('/api/status');
+                const statusData = await statusResponse.json();
+                const mqttRunning = statusData.mqttEnabled; // Use MQTT enabled setting
+                
                 const response = await fetch('/api/config');
                 const data = await response.json();
+                const editDisabled = mqttRunning ? 'disabled' : '';
+                
                 const html = ${'`'}
-                    <div class="status-row">
-                        <span class="status-label">MQTT Broker:</span>
-                        <span class="status-value">${'$'}{data.mqttBroker || 'Not configured'}</span>
-                    </div>
-                    <div class="status-row">
-                        <span class="status-label">MQTT Port:</span>
-                        <span class="status-value">${'$'}{data.mqttPort || 'Not configured'}</span>
-                    </div>
-                    <div class="status-row">
-                        <span class="status-label">MQTT Username:</span>
-                        <span class="status-value">${'$'}{data.mqttUsername || 'None'}</span>
-                    </div>
-                    <div class="status-row">
-                        <span class="status-label">MQTT Password:</span>
-                        <span class="status-value">${'$'}{data.mqttPassword ? '•'.repeat(data.mqttPassword.length) : 'None'}</span>
-                    </div>
+                    ${buildEditableField('mqtt', 'broker', 'MQTT Broker', data.mqttBroker, editDisabled, false)}
+                    ${buildEditableField('mqtt', 'port', 'MQTT Port', data.mqttPort, editDisabled, false)}
+                    ${buildEditableField('mqtt', 'username', 'MQTT Username', data.mqttUsername, editDisabled, false)}
+                    ${buildEditableField('mqtt', 'password', 'MQTT Password', data.mqttPassword, editDisabled, true)}
                     <div class="status-row">
                         <span class="status-label">Enabled Plugins:</span>
                         <span class="status-value">${'$'}{data.enabledPlugins.join(', ') || 'None'}</span>
@@ -608,7 +604,9 @@ class WebServerManager(
             const value = document.getElementById(`${'$'}{fieldId}_input`).value;
             
             try {
-                const response = await fetch('/api/config/plugin', {
+                // Determine which API endpoint to use
+                const endpoint = pluginId === 'mqtt' ? '/api/config/mqtt' : '/api/config/plugin';
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
@@ -1065,6 +1063,63 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error handling MQTT control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handleMqttConfig(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = HashMap<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val json = JSONObject(body)
+            val field = json.getString("field")
+            val value = json.getString("value")
+
+            // Verify MQTT service is stopped (check mqttEnabled setting)
+            val settings = AppSettings(context)
+            val mqttEnabled = runBlocking { settings.mqttEnabled.first() }
+            if (mqttEnabled) {
+                return newFixedLengthResponse(
+                    Response.Status.FORBIDDEN,
+                    "application/json",
+                    """{"success":false,"error":"MQTT service must be stopped before editing configuration"}"""
+                )
+            }
+
+            // Update the appropriate MQTT setting
+            runBlocking {
+                when (field) {
+                    "broker" -> settings.setMqttBrokerHost(value)
+                    "port" -> settings.setMqttBrokerPort(value.toIntOrNull() ?: 1883)
+                    "username" -> settings.setMqttUsername(value)
+                    "password" -> settings.setMqttPassword(value)
+                    else -> return@runBlocking newFixedLengthResponse(
+                        Response.Status.BAD_REQUEST,
+                        "application/json",
+                        """{"success":false,"error":"Unknown field: $field"}"""
+                    )
+                }
+            }
+
+            Log.i(TAG, "MQTT config updated via web UI: $field")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating MQTT config", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",
