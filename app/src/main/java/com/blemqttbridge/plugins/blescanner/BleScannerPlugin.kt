@@ -30,7 +30,7 @@ class BleScannerPlugin(
 ) {
     companion object {
         private const val TAG = "BleScannerPlugin"
-        const val PLUGIN_ID = "ble_scanner"
+        const val PLUGIN_ID = "blescanner"  // Must match web UI and ServiceStateManager
         private const val SCAN_DURATION_MS = 60_000L // 60 seconds
         
         // HA Device Info
