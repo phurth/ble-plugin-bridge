@@ -124,6 +124,8 @@ class WebServerManager(
         }
         .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; }
         .plugin-status { font-size: 14px; color: #666; }
+        .plugin-status-line { margin-bottom: 8px; }
+        .plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
         .plugin-healthy { color: #4caf50; }
         .plugin-unhealthy { color: #f44336; }
         button {
@@ -272,25 +274,24 @@ class WebServerManager(
                         : 'None';
                     const enabled = status.enabled ? 'Yes' : 'No';
                     
-                    // Build configuration fields line
-                    let configFields = [];
-                    configFields.push(`Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span>`);
-                    configFields.push(`MAC Address(es): <span>${'$'}{macAddresses}</span>`);
+                    // Build configuration field lines
+                    let configLines = [];
+                    configLines.push(`<div class="plugin-config-field">MAC Address(es): <span>${'$'}{macAddresses}</span></div>`);
                     
                     // Add plugin-specific fields
                     if (pluginId === 'onecontrol') {
                         if (status.gatewayPin) {
                             const maskedPin = '•'.repeat(status.gatewayPin.length);
-                            configFields.push(`Gateway PIN: <span>${'$'}{maskedPin}</span>`);
+                            configLines.push(`<div class="plugin-config-field">Gateway PIN: <span>${'$'}{maskedPin}</span></div>`);
                         }
                         if (status.bluetoothPin) {
                             const maskedPin = '•'.repeat(status.bluetoothPin.length);
-                            configFields.push(`Bluetooth PIN: <span>${'$'}{maskedPin}</span>`);
+                            configLines.push(`<div class="plugin-config-field">Bluetooth PIN: <span>${'$'}{maskedPin}</span></div>`);
                         }
                     } else if (pluginId === 'easytouch') {
                         if (status.password) {
                             const maskedPassword = '•'.repeat(status.password.length);
-                            configFields.push(`Password: <span>${'$'}{maskedPassword}</span>`);
+                            configLines.push(`<div class="plugin-config-field">Password: <span>${'$'}{maskedPassword}</span></div>`);
                         }
                     }
                     
@@ -298,14 +299,13 @@ class WebServerManager(
                         <div class="plugin-item">
                             <div class="plugin-name">${'$'}{pluginId}</div>
                             <div class="plugin-status">
-                                <div style="margin-bottom: 5px;">
+                                <div class="plugin-status-line">
+                                    Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
                                     Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
                                     Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
                                     Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
                                 </div>
-                                <div>
-                                    ${'$'}{configFields.join(' | ')}
-                                </div>
+                                ${'$'}{configLines.join('')}
                             </div>
                         </div>
                     ${'`'};
