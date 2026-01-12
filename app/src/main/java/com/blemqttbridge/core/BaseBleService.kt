@@ -201,6 +201,9 @@ class BaseBleService : Service() {
             val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
             _pluginStatuses.value = _pluginStatuses.value + (pluginId to status)
             Log.d(TAG, "📊 Updated plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+            if (connected && authenticated) {
+                appendServiceLog("Plugin ready: $pluginId (connected & authenticated)")
+            }
         }
         
         override fun updateMqttStatus(connected: Boolean) {
@@ -559,9 +562,11 @@ class BaseBleService : Service() {
                 return
             } else {
                 Log.i(TAG, "Loaded device plugin: $blePluginId (new architecture - plugin-owned GATT callback)")
+                appendServiceLog("Loaded BLE plugin: $blePluginId (device plugin)")
             }
         } else {
             Log.i(TAG, "Loaded legacy plugin: $blePluginId (BlePluginInterface - forwarding callback)")
+            appendServiceLog("Loaded BLE plugin: $blePluginId (legacy plugin)")
         }
         
         Log.i(TAG, "Plugins initialized successfully")
@@ -594,8 +599,10 @@ class BaseBleService : Service() {
         if (outputPlugin == null) {
             Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
             Log.i(TAG, "Continuing without output plugin for BLE testing")
+            appendServiceLog("WARNING: Output plugin $outputPluginId not available")
             _mqttConnected.value = false
         } else {
+            appendServiceLog("Loaded output plugin: $outputPluginId")
             // Set up connection status listener for real-time UI updates
             outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                 override fun onConnectionStatusChanged(connected: Boolean) {
@@ -740,6 +747,7 @@ class BaseBleService : Service() {
                     Log.i(TAG, "🔗 Found bonded device for newly added plugin: ${device.address} -> $pluginId")
                     // Check if already connected
                     if (!connectedDevices.containsKey(device.address)) {
+                        appendServiceLog("Reconnecting to bonded device: ${device.address} (plugin: $pluginId)")
                         connectToDevice(device, pluginId)
                     } else {
                         Log.d(TAG, "Device ${device.address} already connected")
@@ -913,6 +921,7 @@ class BaseBleService : Service() {
         // If no specific targets, add a permissive filter (allows screen-off scanning)
         if (scanFilters.isEmpty()) {
             Log.w(TAG, "No target MACs configured - using unfiltered scan (may not work with screen off)")
+            appendServiceLog("WARNING: Starting BLE scan with no device filters")
         }
         
         // Check if Bluetooth is enabled before scanning
@@ -934,6 +943,7 @@ class BaseBleService : Service() {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         
+        appendServiceLog("Starting BLE scan with ${scanFilters.size} device filters")
         try {
             // Use filters if available, otherwise null (unfiltered)
             val filters = if (scanFilters.isNotEmpty()) scanFilters else null
@@ -1050,6 +1060,7 @@ class BaseBleService : Service() {
             val pluginId = pluginRegistry.findPluginForDevice(device, scanRecord, applicationContext)
             if (pluginId != null) {
                 Log.i(TAG, "✅ Found matching device: ${device.address} -> plugin: $pluginId")
+                appendServiceLog("Found device: ${device.address} (plugin: $pluginId)")
                 
                 // Stop scanning (we found a device)
                 stopScanning()
@@ -1064,6 +1075,7 @@ class BaseBleService : Service() {
                         connectToDevice(device, pluginId)
                     } else {
                         Log.e(TAG, "Failed to load plugin $pluginId for device ${device.address}")
+                        appendServiceLog("ERROR: Failed to load plugin $pluginId for device ${device.address}")
                         updateNotification("Error: Failed to load plugin $pluginId")
                         // Resume scanning
                         startScanning()
@@ -1163,6 +1175,7 @@ class BaseBleService : Service() {
             if (isConfiguredDevice && requiresBonding && device.bondState == BluetoothDevice.BOND_NONE) {
                 Log.i(TAG, "🔐 Device ${device.address} requires bonding - initiating createBond()")
                 Log.i(TAG, "   (This is a CONFIGURED device - safe to bond)")
+                appendServiceLog("Initiating bonding for device: ${device.address}")
                 
                 // Check if plugin provides a bonding PIN (legacy gateways)
                 val bondingPin = (devicePlugin as? OneControlDevicePlugin)?.getBondingPin()
