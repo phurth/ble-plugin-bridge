@@ -382,11 +382,14 @@ class WebServerManager(
                     let configLines = [];
                     const editDisabled = serviceRunning ? 'disabled' : '';
                     
-                    // MAC Address field (always editable for all plugins)
-                    configLines.push(buildEditableField(pluginId, 'macAddress', 'MAC Address', macAddresses, editDisabled, false));
+                    // MAC Address field (not shown for BLE scanner)
+                    if (pluginId !== 'blescanner') {
+                        configLines.push(buildEditableField(pluginId, 'macAddress', 'MAC Address', macAddresses, editDisabled, false));
+                    }
                     
                     // Build status line - show authenticated only for plugins that actually authenticate
-                    const showAuth = pluginId !== 'gopower'; // GoPower doesn't have separate auth
+                    const showAuth = pluginId !== 'gopower' && pluginId !== 'blescanner'; // GoPower and BLE Scanner don't have separate auth
+                    const showHealthIndicators = pluginId !== 'blescanner'; // BLE Scanner doesn't have health indicators
                     
                     // Add plugin-specific fields
                     if (pluginId === 'onecontrol') {
@@ -399,11 +402,11 @@ class WebServerManager(
                         <div class="plugin-item">
                             <div class="plugin-name">${'$'}{pluginId}${'$'}{showHelper ? '<span class="helper-text">Changes will take effect upon restarting service</span>' : ''}</div>
                             <div class="plugin-status">
-                                <div class="plugin-status-line">
+                                ${'$'}{showHealthIndicators ? ${'`'}<div class="plugin-status-line">
                                     Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
                                     Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span>${'$'}{showAuth ? ' | Authenticated: <span class="' + (status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy') + '">' + (status.authenticated ? 'Yes' : 'No') + '</span>' : ''} | 
                                     Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
-                                </div>
+                                </div>${'`'} : ''}
                                 ${'$'}{configLines.join('')}
                             </div>
                         </div>
