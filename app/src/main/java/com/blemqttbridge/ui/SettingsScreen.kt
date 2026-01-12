@@ -51,6 +51,13 @@ fun SettingsScreen(
     // Collect all state flows
     val mqttEnabled by viewModel.mqttEnabled.collectAsState()
     
+    // Collect MQTT settings as state flows (for observing changes)
+    val mqttBrokerHostFlow by viewModel.mqttBrokerHost.collectAsState()
+    val mqttBrokerPortFlow by viewModel.mqttBrokerPort.collectAsState()
+    val mqttUsernameFlow by viewModel.mqttUsername.collectAsState()
+    val mqttPasswordFlow by viewModel.mqttPassword.collectAsState()
+    val mqttTopicPrefixFlow by viewModel.mqttTopicPrefix.collectAsState()
+    
     // Use local mutable state for text fields to prevent cursor jumping
     var mqttBrokerHost by remember { mutableStateOf(viewModel.mqttBrokerHost.value) }
     var mqttBrokerPort by remember { mutableStateOf(viewModel.mqttBrokerPort.value.toString()) }
@@ -78,6 +85,12 @@ fun SettingsScreen(
     var goPowerControllerMac by remember { mutableStateOf("") }
     
     // Sync flow values to local state when they change (fixes empty fields issue)
+    LaunchedEffect(mqttBrokerHostFlow) { mqttBrokerHost = mqttBrokerHostFlow }
+    LaunchedEffect(mqttBrokerPortFlow) { mqttBrokerPort = mqttBrokerPortFlow.toString() }
+    LaunchedEffect(mqttUsernameFlow) { mqttUsername = mqttUsernameFlow }
+    LaunchedEffect(mqttPasswordFlow) { mqttPassword = mqttPasswordFlow }
+    LaunchedEffect(mqttTopicPrefixFlow) { mqttTopicPrefix = mqttTopicPrefixFlow }
+    
     LaunchedEffect(oneControlGatewayMacFlow) { oneControlGatewayMac = oneControlGatewayMacFlow }
     LaunchedEffect(oneControlGatewayPinFlow) { oneControlGatewayPin = oneControlGatewayPinFlow }
 

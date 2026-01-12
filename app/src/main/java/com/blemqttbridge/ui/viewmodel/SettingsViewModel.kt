@@ -42,6 +42,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     val bleScannerEnabled = settings.bleScannerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     
+    val webServerEnabled = settings.webServerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val webServerPort = settings.webServerPort.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_WEB_SERVER_PORT)
+    
     // Expandable section states (collapsed by default)
     private val _mqttExpanded = MutableStateFlow(false)
     val mqttExpanded: StateFlow<Boolean> = _mqttExpanded
@@ -140,6 +143,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             if (shouldRun && !isRunning) {
                 android.util.Log.i("SettingsViewModel", "Auto-starting service on app launch")
                 startService()
+            }
+        }
+        
+        // Auto-start web server on app launch if it should be running
+        viewModelScope.launch {
+            val shouldRunWebServer = settings.webServerEnabled.first()
+            val isWebServerRunning = com.blemqttbridge.web.WebServerService.serviceRunning.value
+            android.util.Log.i("SettingsViewModel", "Init: webServerEnabled=$shouldRunWebServer, isRunning=$isWebServerRunning")
+            if (shouldRunWebServer && !isWebServerRunning) {
+                android.util.Log.i("SettingsViewModel", "Auto-starting web server on app launch")
+                startWebServer()
             }
         }
     }
@@ -363,6 +377,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         context.stopService(intent)
     }
     
+    private fun startWebServer() {
+        val intent = Intent(context, com.blemqttbridge.web.WebServerService::class.java)
+        context.startForegroundService(intent)
+        android.util.Log.i("SettingsViewModel", "Web server start initiated")
+    }
+    
+    private fun stopWebServer() {
+        val intent = Intent(context, com.blemqttbridge.web.WebServerService::class.java).apply {
+            action = com.blemqttbridge.web.WebServerService.ACTION_STOP_SERVICE
+        }
+        context.startService(intent)
+        android.util.Log.i("SettingsViewModel", "Web server stop initiated")
+    }
+    
     private suspend fun restartService() {
         android.util.Log.i("SettingsViewModel", "Restarting service...")
         stopService()
@@ -416,5 +444,36 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 android.util.Log.e("SettingsViewModel", "Failed to toggle BLE trace", e)
             }
         }
+    }
+    
+    fun setWebServerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setWebServerEnabled(enabled)
+            // Start/stop web server service independently of BLE service
+            if (enabled) {
+                startWebServer()
+            } else {
+                stopWebServer()
+            }
+        }
+    }
+    
+    fun getLocalIpAddress(): String {
+        try {
+            val networkInterface = java.net.NetworkInterface.getNetworkInterfaces()
+            while (networkInterface.hasMoreElements()) {
+                val ni = networkInterface.nextElement()
+                val addresses = ni.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val addr = addresses.nextElement()
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        return addr.hostAddress ?: "0.0.0.0"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SettingsViewModel", "Failed to get local IP", e)
+        }
+        return "0.0.0.0"
     }
 }

@@ -44,6 +44,10 @@ class AppSettings(private val context: Context) {
         // BLE Scanner Plugin Settings
         val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
         
+        // Web Server Settings
+        val WEB_SERVER_ENABLED = booleanPreferencesKey("web_server_enabled")
+        val WEB_SERVER_PORT = intPreferencesKey("web_server_port")
+        
         // Default values
         const val DEFAULT_MQTT_HOST = ""
         const val DEFAULT_MQTT_PORT = 1883
@@ -52,6 +56,7 @@ class AppSettings(private val context: Context) {
         const val DEFAULT_TOPIC_PREFIX = "homeassistant"
         const val DEFAULT_GATEWAY_MAC = ""
         const val DEFAULT_GATEWAY_PIN = ""
+        const val DEFAULT_WEB_SERVER_PORT = 8088
     }
     
     // MQTT Settings Flows
@@ -82,6 +87,10 @@ class AppSettings(private val context: Context) {
     
     // BLE Scanner Plugin Flows
     val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
+    
+    // Web Server Flows
+    val webServerEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_SERVER_ENABLED] ?: false }
+    val webServerPort: Flow<Int> = context.dataStore.data.map { it[WEB_SERVER_PORT] ?: DEFAULT_WEB_SERVER_PORT }
     
     // Update functions
     suspend fun setMqttEnabled(enabled: Boolean) {
@@ -146,6 +155,14 @@ class AppSettings(private val context: Context) {
     
     suspend fun setGoPowerControllerMac(mac: String) {
         context.dataStore.edit { it[GOPOWER_CONTROLLER_MAC] = mac }
+    }
+    
+    suspend fun setWebServerEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[WEB_SERVER_ENABLED] = enabled }
+    }
+    
+    suspend fun setWebServerPort(port: Int) {
+        context.dataStore.edit { it[WEB_SERVER_PORT] = port }
     }
     
     suspend fun setBleScannerEnabled(enabled: Boolean) {

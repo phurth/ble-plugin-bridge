@@ -11,8 +11,8 @@ android {
         applicationId = "com.blemqttbridge"
         minSdk = 26  // Android 8.0
         targetSdk = 34
-        versionCode = 34
-        versionName = "2.5.4"
+        versionCode = 35
+        versionName = "2.5.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -113,6 +113,9 @@ dependencies {
     
     // JSON
     implementation("org.json:json:20240303")
+    
+    // NanoHTTPD for embedded web server
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
     
     // Testing
     testImplementation("junit:junit:4.13.2")

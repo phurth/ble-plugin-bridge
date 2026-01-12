@@ -39,6 +39,12 @@ class BaseBleService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "ble_bridge_service"
         
+        // Service instance for web server access
+        @Volatile
+        private var instance: BaseBleService? = null
+        
+        fun getInstance(): BaseBleService? = instance
+        
         const val ACTION_START_SCAN = "com.blemqttbridge.START_SCAN"
         const val ACTION_STOP_SCAN = "com.blemqttbridge.STOP_SCAN"
         const val ACTION_STOP_SERVICE = "com.blemqttbridge.STOP_SERVICE"
@@ -246,6 +252,7 @@ class BaseBleService : Service() {
     
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.i(TAG, "Service created")
         appendServiceLog("Service created")
         
@@ -488,6 +495,9 @@ class BaseBleService : Service() {
         // Cancel keepalive alarm
         cancelKeepAlive()
         
+        // Clear instance reference
+        instance = null
+        
         // Cleanup remote control manager
         remoteControlManager?.cleanup()
         remoteControlManager = null
@@ -631,9 +641,14 @@ class BaseBleService : Service() {
             }
         }
         
-        // Load ALL enabled BLE plugins
+        // Load ALL enabled BLE plugins (except blescanner which is handled separately above)
         var loadedCount = 0
         for (pluginId in enabledBlePlugins) {
+            // Skip BLE scanner - it's not a device plugin, initialized separately above
+            if (pluginId == BleScannerPlugin.PLUGIN_ID) {
+                continue
+            }
+            
             val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
             Log.i(TAG, "Loading plugin: $pluginId with config: $bleConfig")
             
@@ -1779,7 +1794,8 @@ class BaseBleService : Service() {
     private fun disconnectAll() {
         Log.i(TAG, "Disconnecting all devices (${connectedDevices.size} connected)")
         
-        for ((_, deviceInfo) in connectedDevices) {
+        // Create a copy to avoid ConcurrentModificationException
+        for ((_, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
             try {
                 gatt.disconnect()
@@ -1790,7 +1806,8 @@ class BaseBleService : Service() {
         
         connectedDevices.clear()
         
-        for ((_, job) in pollingJobs) {
+        // Create a copy to avoid ConcurrentModificationException
+        for ((_, job) in pollingJobs.toList()) {
             job.cancel()
         }
         pollingJobs.clear()
@@ -2383,6 +2400,104 @@ class BaseBleService : Service() {
             Log.e(TAG, "Failed to write debug log: ${e.message}", e)
             appendServiceLog("ERROR: Failed to export debug log: ${e.message}")
             null
+        }
+    }
+    
+    /**
+     * Export debug log as string (for web interface).
+     */
+    fun exportDebugLogToString(): String {
+        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+        return buildString {
+            appendLine("BLE-MQTT Plugin Bridge Debug Log")
+            appendLine("================================")
+            appendLine("Timestamp: $ts")
+            appendLine("App Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            appendLine("")
+            
+            appendLine("Service Status:")
+            appendLine("  Running: ${_serviceRunning.value}")
+            appendLine("  MQTT Connected: ${_mqttConnected.value}")
+            appendLine("  BLE Trace Active: $traceEnabled")
+            traceFile?.let { appendLine("  Trace File: ${it.absolutePath}") }
+            appendLine("")
+            
+            appendLine("Plugin Statuses:")
+            _pluginStatuses.value.forEach { (pluginId, status) ->
+                appendLine("  $pluginId:")
+                appendLine("    Connected: ${status.connected}")
+                appendLine("    Authenticated: ${status.authenticated}")
+                appendLine("    Data Healthy: ${status.dataHealthy}")
+            }
+            appendLine("")
+            
+            appendLine("Active Plugins:")
+            blePlugin?.let { appendLine("  BLE: ${it.javaClass.simpleName}") }
+            outputPlugin?.let { appendLine("  Output: ${it.javaClass.simpleName}") }
+            appendLine("")
+            
+            appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
+            appendLine("=".repeat(50))
+            serviceLogBuffer.forEach { line -> appendLine(line) }
+            
+            if (serviceLogBuffer.isEmpty()) {
+                appendLine("(No service events logged yet)")
+            }
+        }
+    }
+    
+    /**
+     * Export BLE trace as string (for web interface).
+     */
+    fun exportBleTraceToString(): String {
+        return buildString {
+            appendLine("BLE-MQTT Plugin Bridge BLE Trace")
+            appendLine("================================")
+            appendLine("Timestamp: ${java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())}")
+            appendLine("")
+            appendLine("Recent BLE Events (last $MAX_BLE_TRACE_LINES):")
+            appendLine("=".repeat(50))
+            bleTraceBuffer.forEach { line -> appendLine(line) }
+            
+            if (bleTraceBuffer.isEmpty()) {
+                appendLine("(No BLE events logged yet)")
+            }
+        }
+    }
+    
+    /**
+     * Check if BLE trace is active.
+     */
+    fun isBleTraceActive(): Boolean = traceEnabled
+    
+    /**
+     * Disconnect MQTT (for web interface control).
+     */
+    suspend fun disconnectMqtt() {
+        Log.i(TAG, "MQTT disconnect requested")
+        outputPlugin?.disconnect()
+    }
+    
+    /**
+     * Reconnect MQTT (for web interface control).
+     */
+    suspend fun reconnectMqtt() {
+        Log.i(TAG, "MQTT reconnect requested")
+        val currentPlugin = outputPlugin
+        if (currentPlugin != null) {
+            // Disconnect first
+            currentPlugin.disconnect()
+            // Small delay
+            kotlinx.coroutines.delay(500)
+            // Re-initialize with same config
+            val settings = AppSettings(applicationContext)
+            val config = mapOf(
+                "broker_url" to "tcp://${settings.mqttBrokerHost.first()}:${settings.mqttBrokerPort.first()}",
+                "username" to settings.mqttUsername.first(),
+                "password" to settings.mqttPassword.first(),
+                "topic_prefix" to settings.mqttTopicPrefix.first()
+            )
+            currentPlugin.initialize(config)
         }
     }
     

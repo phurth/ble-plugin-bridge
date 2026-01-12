@@ -30,7 +30,7 @@ class BleScannerPlugin(
 ) {
     companion object {
         private const val TAG = "BleScannerPlugin"
-        const val PLUGIN_ID = "ble_scanner"
+        const val PLUGIN_ID = "blescanner"  // Must match web UI and ServiceStateManager
         private const val SCAN_DURATION_MS = 60_000L // 60 seconds
         
         // HA Device Info
@@ -331,7 +331,7 @@ class BleScannerPlugin(
             put("icon", "mdi:magnify")
         }
         mqttPublisher.publishDiscovery(
-            "$topicPrefix/button/$deviceId/scan/config",
+            "$topicPrefix/button/${deviceId}_scan_button/config",
             buttonDiscovery.toString()
         )
         
