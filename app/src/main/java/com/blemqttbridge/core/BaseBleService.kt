@@ -641,9 +641,14 @@ class BaseBleService : Service() {
             }
         }
         
-        // Load ALL enabled BLE plugins
+        // Load ALL enabled BLE plugins (except blescanner which is handled separately above)
         var loadedCount = 0
         for (pluginId in enabledBlePlugins) {
+            // Skip BLE scanner - it's not a device plugin, initialized separately above
+            if (pluginId == BleScannerPlugin.PLUGIN_ID) {
+                continue
+            }
+            
             val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
             Log.i(TAG, "Loading plugin: $pluginId with config: $bleConfig")
             
