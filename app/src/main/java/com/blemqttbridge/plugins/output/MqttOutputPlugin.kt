@@ -91,6 +91,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             
             Log.i(TAG, "Initializing MQTT client: $brokerUrl (client: $clientId)")
             
+            // Guard flag to prevent double-resume of continuation
+            var continuationResumed = false
+            
             mqttClient = MqttAndroidClient(context, brokerUrl, clientId).apply {
                 setCallback(object : MqttCallbackExtended {
                     override fun connectionLost(cause: Throwable?) {
@@ -154,6 +157,11 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             
             mqttClient?.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    if (continuationResumed) {
+                        Log.w(TAG, "MQTT onSuccess called but continuation already resumed, ignoring")
+                        return
+                    }
+                    continuationResumed = true
                     Log.i(TAG, "MQTT connected successfully")
                     connectionStatusListener?.onConnectionStatusChanged(true)
                     // Publish "online" to availability topic to clear any "offline" LWT message
@@ -162,6 +170,11 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 }
                 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    if (continuationResumed) {
+                        Log.w(TAG, "MQTT onFailure called but continuation already resumed, ignoring", exception)
+                        return
+                    }
+                    continuationResumed = true
                     Log.e(TAG, "MQTT connection failed", exception)
                     connectionStatusListener?.onConnectionStatusChanged(false)
                     continuation.resumeWithException(
@@ -171,13 +184,17 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             })
             
             continuation.invokeOnCancellation {
-                disconnect()
+                if (!continuationResumed) {
+                    continuationResumed = true
+                    disconnect()
+                }
             }
             
         } catch (e: Exception) {
             Log.e(TAG, "MQTT initialization error", e)
             continuation.resumeWithException(e)
         }
+    }
     }
     
     override suspend fun publishState(topic: String, payload: String, retained: Boolean) {
