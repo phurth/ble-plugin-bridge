@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.core.PluginInstance
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
 import fi.iki.elonen.NanoHTTPD
@@ -44,6 +45,10 @@ class WebServerManager(
                 uri == "/api/status" -> serveStatus()
                 uri == "/api/config" -> serveConfig()
                 uri == "/api/plugins" -> servePlugins()
+                uri == "/api/instances" && method == Method.GET -> serveInstances()
+                uri == "/api/instances/add" && method == Method.POST -> handleInstanceAdd(session)
+                uri == "/api/instances/remove" && method == Method.POST -> handleInstanceRemove(session)
+                uri == "/api/instances/update" && method == Method.POST -> handleInstanceUpdate(session)
                 uri == "/api/logs/debug" -> serveDebugLog()
                 uri == "/api/logs/ble" -> serveBleTrace()
                 uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
@@ -1334,6 +1339,244 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error removing plugin", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Phase 5: Serve all plugin instances as JSON.
+     * Groups instances by plugin type for grouped UI display.
+     */
+    private fun serveInstances(): Response = runBlocking {
+        return@runBlocking try {
+            val allInstances = ServiceStateManager.getAllInstances(context)
+            val json = JSONObject()
+            val instancesByType = mutableMapOf<String, JSONArray>()
+            
+            // Group instances by plugin type
+            for ((instanceId, instance) in allInstances) {
+                val status = BaseBleService.pluginStatuses.value[instanceId] 
+                    ?: BaseBleService.Companion.PluginStatus(instanceId, false, false, false)
+                
+                val instanceJson = JSONObject().apply {
+                    put("instanceId", instanceId)
+                    put("pluginType", instance.pluginType)
+                    put("deviceMac", instance.deviceMac)
+                    put("displayName", instance.displayName ?: instanceId)
+                    put("enabled", instance.enabled)
+                    put("connected", status.connected)
+                    put("authenticated", status.authenticated)
+                    put("dataHealthy", status.dataHealthy)
+                    // Add config fields as JSON object
+                    put("config", JSONObject(instance.config))
+                }
+                
+                instancesByType.getOrPut(instance.pluginType) { JSONArray() }.put(instanceJson)
+            }
+            
+            // Build response object
+            for ((pluginType, instances) in instancesByType) {
+                json.put(pluginType, instances)
+            }
+            
+            newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error serving instances", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Phase 5: Add a new plugin instance.
+     * Creates a new PluginInstance and saves it to ServiceStateManager.
+     */
+    private fun handleInstanceAdd(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val pluginType = jsonObject.getString("pluginType")
+            val deviceMac = jsonObject.getString("deviceMac")
+            val displayName = jsonObject.optString("displayName", null)
+            val config = jsonObject.optJSONObject("config")?.let { 
+                val map = mutableMapOf<String, String>()
+                it.keys().forEach { key -> map[key] = it.getString(key) }
+                map
+            } ?: mutableMapOf()
+
+            // Validate service is stopped
+            val service = BaseBleService.getInstance()
+            if (service != null) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped to add instances"}"""
+                )
+            }
+
+            // Validate plugin type
+            val validTypes = setOf("onecontrol", "easytouch", "gopower")
+            if (!validTypes.contains(pluginType)) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Invalid plugin type: $pluginType"}"""
+                )
+            }
+
+            // Create instance
+            val instanceId = PluginInstance.createInstanceId(pluginType, deviceMac)
+            val instance = PluginInstance(
+                instanceId = instanceId,
+                pluginType = pluginType,
+                deviceMac = deviceMac,
+                displayName = displayName,
+                enabled = true,
+                config = config
+            )
+
+            // Save to ServiceStateManager
+            ServiceStateManager.saveInstance(context, instance)
+            Log.i(TAG, "Instance added via web UI: $instanceId (${instance.pluginType})")
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true,"instanceId":"$instanceId"}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Phase 5: Remove a plugin instance.
+     * Deletes the instance from ServiceStateManager.
+     */
+    private fun handleInstanceRemove(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+
+            // Validate service is stopped
+            val service = BaseBleService.getInstance()
+            if (service != null) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped to remove instances"}"""
+                )
+            }
+
+            // Remove from ServiceStateManager
+            ServiceStateManager.removeInstance(context, instanceId)
+            Log.i(TAG, "Instance removed via web UI: $instanceId")
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Phase 5: Update a plugin instance.
+     * Updates the config or other fields of an existing instance.
+     */
+    private fun handleInstanceUpdate(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+            val displayName = jsonObject.optString("displayName", null)
+            val config = jsonObject.optJSONObject("config")?.let { 
+                val map = mutableMapOf<String, String>()
+                it.keys().forEach { key -> map[key] = it.getString(key) }
+                map
+            }
+            val enabled = jsonObject.optBoolean("enabled", true)
+
+            // Validate service is stopped
+            val service = BaseBleService.getInstance()
+            if (service != null) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped to update instances"}"""
+                )
+            }
+
+            // Load existing instance
+            val allInstances = ServiceStateManager.getAllInstances(context)
+            val existingInstance = allInstances[instanceId] ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND,
+                "application/json",
+                """{"success":false,"error":"Instance not found: $instanceId"}"""
+            )
+
+            // Create updated instance
+            val updatedInstance = existingInstance.copy(
+                displayName = displayName ?: existingInstance.displayName,
+                config = config ?: existingInstance.config,
+                enabled = enabled
+            )
+
+            // Save updated instance
+            ServiceStateManager.saveInstance(context, updatedInstance)
+            Log.i(TAG, "Instance updated via web UI: $instanceId")
+            
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating instance", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",

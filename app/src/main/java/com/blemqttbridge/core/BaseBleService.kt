@@ -588,21 +588,29 @@ class BaseBleService : Service() {
     }
     
     /**
-     * Initialize multiple BLE plugins.
-     * Loads all enabled plugins and prepares for multi-device connections.
+     * Initialize multiple BLE plugins from instances.
+     * Phase 4: Loads plugin instances from ServiceStateManager instead of old enabled_ble_plugins format.
+     * Performs migration if needed, then creates instance-based plugins.
      */
     private suspend fun initializeMultiplePlugins(
         enabledBlePlugins: Set<String>,
         outputPluginId: String,
         outputConfig: Map<String, String>
     ) {
-        Log.i(TAG, "Initializing ${enabledBlePlugins.size} BLE plugins: $enabledBlePlugins")
+        Log.i(TAG, "🔄 Phase 4: Initializing plugins from instances...")
         
         // CRITICAL: Clear any previously loaded plugins to ensure fresh state
-        // This prevents stale plugin instances from interfering when service restarts
-        // or when plugins are added/removed dynamically
         Log.i(TAG, "Clearing previously loaded plugins before initialization...")
         pluginRegistry.cleanup()
+        
+        // Phase 4: Check if migration is needed and perform it
+        if (ServiceStateManager.needsMigration(applicationContext)) {
+            Log.i(TAG, "🔄 Migration needed: Converting old format to PluginInstance format")
+            ServiceStateManager.migrateToInstances(applicationContext)
+            appendServiceLog("Migrated legacy plugins to instance format")
+        } else {
+            Log.i(TAG, "✓ No migration needed (already using instance format)")
+        }
         
         // Load output plugin first (needed for publishing)
         outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
@@ -641,8 +649,70 @@ class BaseBleService : Service() {
             }
         }
         
-        // Load ALL enabled BLE plugins (except blescanner which is handled separately above)
+        // Phase 4: Load all plugin instances from ServiceStateManager
+        val allInstances = ServiceStateManager.getAllInstances(applicationContext)
+        Log.i(TAG, "📦 Found ${allInstances.size} plugin instance(s) to load")
+        
+        if (allInstances.isEmpty()) {
+            Log.w(TAG, "No plugin instances configured - checking for legacy enabled plugins...")
+            // Fallback: If no instances exist, try loading from old enabled_ble_plugins format
+            if (enabledBlePlugins.isNotEmpty()) {
+                Log.i(TAG, "Loading ${enabledBlePlugins.size} legacy enabled plugins...")
+                loadLegacyPlugins(enabledBlePlugins)
+            } else {
+                Log.e(TAG, "No plugins were loaded!")
+                appendServiceLog("ERROR: No plugins were loaded!")
+                updateNotification("Error: No plugins loaded")
+                return
+            }
+        } else {
+            // Load all instances via PluginRegistry
+            var loadedCount = 0
+            for ((instanceId, instance) in allInstances) {
+                try {
+                    Log.i(TAG, "Loading instance: $instanceId (type: ${instance.pluginType}, device: ${instance.deviceMac})")
+                    val plugin = pluginRegistry.createPluginInstance(instance, applicationContext)
+                    if (plugin != null) {
+                        // Update status for this instance
+                        _pluginStatuses.value = _pluginStatuses.value + (instanceId to PluginStatus(instanceId, false, false, false))
+                        appendServiceLog("✓ Loaded instance: $instanceId (${instance.pluginType})")
+                        loadedCount++
+                        // Keep reference to last one for backward compat
+                        blePlugin = plugin as? BlePluginInterface
+                    } else {
+                        Log.w(TAG, "✗ Failed to create instance: $instanceId")
+                        appendServiceLog("✗ Failed to load instance: $instanceId")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exception loading instance $instanceId", e)
+                    appendServiceLog("ERROR loading instance $instanceId: ${e.message}")
+                }
+            }
+            
+            if (loadedCount == 0) {
+                Log.e(TAG, "No instances were loaded!")
+                appendServiceLog("ERROR: No plugin instances were loaded!")
+                updateNotification("Error: No plugins loaded")
+                return
+            }
+            
+            Log.i(TAG, "✓ Loaded $loadedCount/${allInstances.size} plugin instance(s) successfully")
+        }
+        
+        memoryManager.logMemoryUsage()
+        
+        // Try to reconnect to bonded devices or scan for new ones
+        reconnectToBondedDevices()
+    }
+    
+    /**
+     * Fallback: Load legacy plugins from enabled_ble_plugins set.
+     * Used when no instances exist (pre-migration or legacy setup).
+     */
+    private suspend fun loadLegacyPlugins(enabledBlePlugins: Set<String>) {
+        Log.i(TAG, "⚠️ Loading legacy plugins (no instances found)")
         var loadedCount = 0
+        
         for (pluginId in enabledBlePlugins) {
             // Skip BLE scanner - it's not a device plugin, initialized separately above
             if (pluginId == BleScannerPlugin.PLUGIN_ID) {
@@ -650,7 +720,7 @@ class BaseBleService : Service() {
             }
             
             val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
-            Log.i(TAG, "Loading plugin: $pluginId with config: $bleConfig")
+            Log.i(TAG, "Loading legacy plugin: $pluginId with config: $bleConfig")
             
             // Try legacy interface first
             val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, bleConfig)
@@ -676,17 +746,13 @@ class BaseBleService : Service() {
         }
         
         if (loadedCount == 0) {
-            Log.e(TAG, "No plugins were loaded!")
-            appendServiceLog("ERROR: No plugins were loaded!")
+            Log.e(TAG, "No legacy plugins were loaded!")
+            appendServiceLog("ERROR: No legacy plugins were loaded!")
             updateNotification("Error: No plugins loaded")
             return
         }
         
-        Log.i(TAG, "✓ Loaded $loadedCount/${enabledBlePlugins.size} plugins successfully")
-        memoryManager.logMemoryUsage()
-        
-        // Try to reconnect to bonded devices or scan for new ones
-        reconnectToBondedDevices()
+        Log.i(TAG, "✓ Loaded $loadedCount/${enabledBlePlugins.size} legacy plugins successfully")
     }
     
     /**
@@ -790,56 +856,53 @@ class BaseBleService : Service() {
 
     /**
      * Connect to known devices - both bonded and configured.
+     * Phase 4: Updated to work with plugin instances instead of legacy format.
      * 
      * This replaces continuous scanning with direct connections:
      * 1. Bonded devices: Connect directly (they may not advertise when bonded)
-     * 2. Configured devices: Connect directly using the user-provided MAC address
+     * 2. Configured devices: Connect directly using MAC addresses from instances
      * 
      * Scanning is only needed for device discovery, not for connecting to known devices.
      */
     private fun reconnectToBondedDevices() {
-        val devicesToConnect = mutableMapOf<String, String>() // MAC -> pluginId
+        val devicesToConnect = mutableMapOf<String, String>() // MAC -> instanceId
         
-        // 1. Check bonded devices
-        try {
-            val bondedDevices = bluetoothAdapter.bondedDevices
-            Log.i(TAG, "Checking ${bondedDevices.size} bonded device(s) for plugin matches...")
-            
-            for (device in bondedDevices) {
-                val pluginId = pluginRegistry.findPluginForDevice(device, null, applicationContext)
-                if (pluginId != null) {
-                    Log.i(TAG, "🔗 Found bonded device matching plugin: ${device.address} -> $pluginId")
-                    devicesToConnect[device.address] = pluginId
-                }
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission denied for accessing bonded devices", e)
-        }
+        // Phase 4: Get all loaded instances and their configured MACs
+        val allInstances = ServiceStateManager.getAllInstances(applicationContext)
+        Log.i(TAG, "🔄 Phase 4: Reconnecting ${allInstances.size} instances to their devices...")
         
-        // 2. Check configured device MACs from ENABLED device plugins only
-        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
-        for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
-            // Skip disabled plugins
-            if (!enabledPlugins.contains(pluginId)) {
-                Log.d(TAG, "Skipping disabled plugin for device lookup: $pluginId")
+        // 1. For each instance, connect to its configured device MAC
+        for ((instanceId, instance) in allInstances) {
+            if (!instance.enabled) {
+                Log.d(TAG, "Skipping disabled instance: $instanceId")
                 continue
             }
             
-            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
-            if (devicePlugin != null) {
-                try {
-                    val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
-                    devicePlugin.initialize(applicationContext, config)
-                    val configuredMacs = devicePlugin.getConfiguredDevices()
-                    for (mac in configuredMacs) {
-                        if (!devicesToConnect.containsKey(mac.uppercase())) {
-                            Log.i(TAG, "🔗 Found configured device: $mac -> $pluginId")
-                            devicesToConnect[mac.uppercase()] = pluginId
-                        }
+            val deviceMac = instance.deviceMac.uppercase()
+            if (devicesToConnect.containsKey(deviceMac)) {
+                Log.w(TAG, "Device $deviceMac already assigned to another instance, skipping $instanceId")
+            } else {
+                Log.i(TAG, "🔗 Found instance device: $deviceMac -> $instanceId (${instance.pluginType})")
+                devicesToConnect[deviceMac] = instanceId
+            }
+        }
+        
+        // 2. If no instances, fall back to legacy bonded device matching (backward compat)
+        if (devicesToConnect.isEmpty()) {
+            Log.w(TAG, "No instances configured, falling back to legacy bonded device matching...")
+            try {
+                val bondedDevices = bluetoothAdapter.bondedDevices
+                Log.i(TAG, "Checking ${bondedDevices.size} bonded device(s) for plugin matches...")
+                
+                for (device in bondedDevices) {
+                    val pluginId = pluginRegistry.findPluginForDevice(device, null, applicationContext)
+                    if (pluginId != null) {
+                        Log.i(TAG, "🔗 Found bonded device matching plugin: ${device.address} -> $pluginId")
+                        devicesToConnect[device.address.uppercase()] = pluginId
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not get configured devices for plugin $pluginId: ${e.message}")
                 }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Permission denied for accessing bonded devices", e)
             }
         }
         
@@ -852,12 +915,13 @@ class BaseBleService : Service() {
         
         Log.i(TAG, "✓ Found ${devicesToConnect.size} device(s) to connect")
         
-        for ((mac, pluginId) in devicesToConnect) {
+        for ((mac, instanceId) in devicesToConnect) {
             serviceScope.launch {
                 try {
                     val device = bluetoothAdapter.getRemoteDevice(mac)
-                    Log.i(TAG, "🔗 Connecting directly to $mac (plugin: $pluginId)")
-                    connectToDevice(device, pluginId)
+                    Log.i(TAG, "🔗 Connecting directly to $mac (instance: $instanceId)")
+                    // For instances, connect using instanceId instead of pluginId
+                    connectToDevice(device, instanceId)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to get remote device $mac: ${e.message}")
                 }
