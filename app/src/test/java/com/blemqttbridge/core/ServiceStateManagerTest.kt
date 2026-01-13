@@ -3,9 +3,6 @@ package com.blemqttbridge.core
 import android.content.Context
 import org.junit.Before
 import org.junit.Test
-import org.mockito.Mockito.mock
-import org.mockito.Mockito.`when`
-import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -17,16 +14,10 @@ import kotlin.test.assertTrue
 class ServiceStateManagerTest {
     
     private lateinit var mockContext: Context
-    private lateinit var tempDir: File
     
     @Before
     fun setup() {
-        mockContext = mock(Context::class.java)
-        tempDir = File.createTempFile("test", "dir")
-        tempDir.delete()
-        tempDir.mkdirs()
-        
-        `when`(mockContext.filesDir).thenReturn(tempDir)
+        mockContext = TestContextHelper.createMockContext()
     }
     
     @Test

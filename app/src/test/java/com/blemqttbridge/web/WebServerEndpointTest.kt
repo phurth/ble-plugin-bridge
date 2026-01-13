@@ -3,12 +3,10 @@ package com.blemqttbridge.web
 import android.content.Context
 import com.blemqttbridge.core.PluginInstance
 import com.blemqttbridge.core.ServiceStateManager
+import com.blemqttbridge.core.TestContextHelper
 import org.json.JSONObject
 import org.junit.Before
 import org.junit.Test
-import org.mockito.Mockito.mock
-import org.mockito.Mockito.`when`
-import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -20,16 +18,10 @@ import kotlin.test.assertTrue
 class WebServerEndpointTest {
     
     private lateinit var mockContext: Context
-    private lateinit var tempDir: File
     
     @Before
     fun setup() {
-        mockContext = mock(Context::class.java)
-        tempDir = File.createTempFile("test", "dir")
-        tempDir.delete()
-        tempDir.mkdirs()
-        
-        `when`(mockContext.filesDir).thenReturn(tempDir)
+        mockContext = TestContextHelper.createMockContext()
     }
     
     @Test

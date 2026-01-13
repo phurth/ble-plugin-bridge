@@ -1,10 +1,13 @@
 package com.blemqttbridge
 
 import android.app.Application
+import android.content.Intent
+import android.os.Build
 import android.util.Log
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.PluginRegistry
 import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
@@ -75,6 +78,31 @@ class BlePluginBridgeApplication : Application() {
         
         // Schedule service watchdog (runs every 15 minutes to ensure service stays alive)
         scheduleServiceWatchdog()
+        
+        // Auto-start web service
+        startWebService()
+    }
+    
+    /**
+     * Auto-start web service when app launches.
+     * The web service runs independently and provides the management interface.
+     */
+    private fun startWebService() {
+        try {
+            val intent = Intent(this, BaseBleService::class.java).apply {
+                action = "START_WEB_SERVER"
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            
+            Log.i(TAG, "Web service auto-started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to auto-start web service", e)
+        }
     }
     
     /**

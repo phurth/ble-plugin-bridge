@@ -560,20 +560,6 @@ class BaseBleService : Service() {
             remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
             remoteControlManager?.initialize(outputPlugin!!)
             Log.i(TAG, "Remote control manager initialized")
-            
-            // Initialize BLE Scanner plugin only if enabled
-            if (ServiceStateManager.isBlePluginEnabled(applicationContext, BleScannerPlugin.PLUGIN_ID)) {
-                bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
-                if (bleScannerPlugin?.initialize() == true) {
-                    Log.i(TAG, "BLE Scanner plugin initialized")
-                } else {
-                    Log.w(TAG, "BLE Scanner plugin failed to initialize")
-                    bleScannerPlugin = null
-                }
-            } else {
-                Log.i(TAG, "BLE Scanner plugin is disabled, skipping initialization")
-                bleScannerPlugin = null
-            }
         }
         
         // Load BLE plugin - support both legacy (BlePluginInterface) and new (BleDevicePlugin) architecture
@@ -649,20 +635,6 @@ class BaseBleService : Service() {
             remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
             remoteControlManager?.initialize(outputPlugin!!)
             Log.i(TAG, "Remote control manager initialized")
-            
-            // Initialize BLE Scanner plugin only if enabled
-            if (ServiceStateManager.isBlePluginEnabled(applicationContext, BleScannerPlugin.PLUGIN_ID)) {
-                bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
-                if (bleScannerPlugin?.initialize() == true) {
-                    Log.i(TAG, "BLE Scanner plugin initialized")
-                } else {
-                    Log.w(TAG, "BLE Scanner plugin failed to initialize")
-                    bleScannerPlugin = null
-                }
-            } else {
-                Log.i(TAG, "BLE Scanner plugin is disabled, skipping initialization")
-                bleScannerPlugin = null
-            }
         }
         
         // Phase 4: Load all plugin instances from ServiceStateManager
@@ -687,6 +659,23 @@ class BaseBleService : Service() {
             for ((instanceId, instance) in allInstances) {
                 try {
                     Log.i(TAG, "Loading instance: $instanceId (type: ${instance.pluginType}, device: ${instance.deviceMac})")
+                    
+                    // Special handling for BLE Scanner (not a BleDevicePlugin)
+                    if (instance.pluginType == BleScannerPlugin.PLUGIN_ID) {
+                        bleScannerPlugin = BleScannerPlugin(applicationContext, mqttPublisher)
+                        if (bleScannerPlugin?.initialize() == true) {
+                            Log.i(TAG, "✓ BLE Scanner plugin initialized")
+                            // Add to plugin statuses (BLE Scanner is always "healthy" when running)
+                            _pluginStatuses.value = _pluginStatuses.value + (instanceId to PluginStatus(instanceId, true, true, true))
+                            appendServiceLog("✓ Loaded BLE Scanner")
+                            loadedCount++
+                        } else {
+                            Log.w(TAG, "✗ BLE Scanner plugin failed to initialize")
+                            bleScannerPlugin = null
+                        }
+                        continue
+                    }
+                    
                     val plugin = pluginRegistry.createPluginInstance(instance, applicationContext)
                     if (plugin != null) {
                         // Track instance -> plugin type mapping for connectToDevice lookup
@@ -732,11 +721,6 @@ class BaseBleService : Service() {
         var loadedCount = 0
         
         for (pluginId in enabledBlePlugins) {
-            // Skip BLE scanner - it's not a device plugin, initialized separately above
-            if (pluginId == BleScannerPlugin.PLUGIN_ID) {
-                continue
-            }
-            
             val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
             Log.i(TAG, "Loading legacy plugin: $pluginId with config: $bleConfig")
             
