@@ -208,8 +208,21 @@ class BaseBleService : Service() {
         
         override fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
             val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
-            _pluginStatuses.value = _pluginStatuses.value + (pluginId to status)
-            Log.d(TAG, "📊 Updated plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+            val newStatuses = _pluginStatuses.value.toMutableMap()
+            newStatuses[pluginId] = status
+            
+            // BACKWARD COMPAT: Also store under plugin type for single-instance plugins
+            // UI still looks up by plugin type (e.g., "onecontrol" not "onecontrol_ed1e0a")
+            val pluginType = instancePluginTypes[pluginId]
+            if (pluginType != null && pluginType != pluginId) {
+                // This is an instance ID, also store under plugin type
+                newStatuses[pluginType] = status
+                Log.d(TAG, "📊 Updated plugin status: $pluginId (also as $pluginType) - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+            } else {
+                Log.d(TAG, "📊 Updated plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+            }
+            
+            _pluginStatuses.value = newStatuses
             if (connected && authenticated) {
                 appendServiceLog("Plugin ready: $pluginId (connected & authenticated)")
             }
