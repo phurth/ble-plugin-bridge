@@ -42,6 +42,11 @@ class BlePluginBridgeApplication : Application() {
             OneControlDevicePlugin()
         }
         
+        // COMPATIBILITY: Also register as "onecontrol" for backwards compatibility with old instances
+        registry.registerBlePlugin("onecontrol") {
+            OneControlDevicePlugin()
+        }
+        
         // EasyTouch thermostat plugin
         registry.registerBlePlugin("easytouch") {
             EasyTouchDevicePlugin()

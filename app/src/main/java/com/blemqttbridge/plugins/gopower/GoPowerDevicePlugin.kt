@@ -94,7 +94,7 @@ class GoPowerDevicePlugin : BleDevicePlugin {
         onDisconnect: (BluetoothDevice, Int) -> Unit
     ): BluetoothGattCallback {
         Log.i(TAG, "Creating GATT callback for ${device.address}")
-        val callback = GoPowerGattCallback(device, context, mqttPublisher, onDisconnect)
+        val callback = GoPowerGattCallback(device, context, mqttPublisher, instanceId, onDisconnect)
         Log.i(TAG, "Created callback with hashCode=${callback.hashCode()}")
         // Keep strong reference to prevent GC
         gattCallback = callback
@@ -153,6 +153,7 @@ class GoPowerGattCallback(
     private val device: BluetoothDevice,
     private val context: Context,
     private val mqttPublisher: MqttPublisher,
+    private val instanceId: String,
     private val onDisconnect: (BluetoothDevice, Int) -> Unit
 ) : BluetoothGattCallback() {
     
@@ -865,7 +866,7 @@ class GoPowerGattCallback(
         
         // Update UI status for this plugin (no auth for GoPower)
         mqttPublisher.updatePluginStatus(
-            pluginId = "gopower",
+            pluginId = instanceId,
             connected = isConnected,
             authenticated = isConnected,  // No separate auth for GoPower
             dataHealthy = dataHealthy

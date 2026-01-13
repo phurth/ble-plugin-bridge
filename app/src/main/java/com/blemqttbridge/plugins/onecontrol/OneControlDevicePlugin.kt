@@ -157,7 +157,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
         onDisconnect: (BluetoothDevice, Int) -> Unit
     ): BluetoothGattCallback {
         Log.i(TAG, "Creating GATT callback for ${device.address}")
-        val callback = OneControlGattCallback(device, context, mqttPublisher, onDisconnect, gatewayPin, gatewayCypher)
+        val callback = OneControlGattCallback(device, context, mqttPublisher, instanceId, onDisconnect, gatewayPin, gatewayCypher)
         Log.i(TAG, "Created callback with hashCode=${callback.hashCode()}")
         // Keep strong reference to prevent GC
         gattCallback = callback
@@ -241,6 +241,7 @@ class OneControlGattCallback(
     private val device: BluetoothDevice,
     private val context: Context,
     private val mqttPublisher: MqttPublisher,
+    private val instanceId: String,
     private val onDisconnect: (BluetoothDevice, Int) -> Unit,
     private val gatewayPin: String,
     private val gatewayCypher: Long
@@ -2723,7 +2724,7 @@ class OneControlGattCallback(
         
         // Update UI status for this plugin
         mqttPublisher.updatePluginStatus(
-            pluginId = "onecontrol",
+            pluginId = instanceId,
             connected = isConnected,
             authenticated = isPaired,
             dataHealthy = dataHealthy

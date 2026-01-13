@@ -342,6 +342,7 @@ object ServiceStateManager {
     private fun extractMacForPluginType(pluginType: String, config: Map<String, String>): String? {
         return when (pluginType) {
             "easytouch" -> config["thermostat_mac"]
+            "onecontrol" -> config["gateway_mac"]  // Support old "onecontrol" type
             "onecontrol_v2" -> config["gateway_mac"]
             "gopower" -> config["controller_mac"]
             "mopeka" -> config["sensor_mac"]

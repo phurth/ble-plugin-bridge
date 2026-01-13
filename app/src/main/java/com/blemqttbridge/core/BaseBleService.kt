@@ -116,6 +116,9 @@ class BaseBleService : Service() {
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
     private val connectedDevices = mutableMapOf<String, Pair<BluetoothGatt, String>>()
     
+    // Instance to plugin type mapping: instanceId -> pluginType (e.g., "easytouch_b1241e" -> "easytouch")
+    private val instancePluginTypes = mutableMapOf<String, String>()
+    
     // Polling jobs for devices that need periodic updates
     private val pollingJobs = mutableMapOf<String, Job>()
     
@@ -673,6 +676,8 @@ class BaseBleService : Service() {
                     Log.i(TAG, "Loading instance: $instanceId (type: ${instance.pluginType}, device: ${instance.deviceMac})")
                     val plugin = pluginRegistry.createPluginInstance(instance, applicationContext)
                     if (plugin != null) {
+                        // Track instance -> plugin type mapping for connectToDevice lookup
+                        instancePluginTypes[instanceId] = instance.pluginType
                         // Update status for this instance
                         _pluginStatuses.value = _pluginStatuses.value + (instanceId to PluginStatus(instanceId, false, false, false))
                         appendServiceLog("✓ Loaded instance: $instanceId (${instance.pluginType})")
@@ -1197,15 +1202,14 @@ class BaseBleService : Service() {
 
         try {
             // Check if this is a new-style BleDevicePlugin
-            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+            // pluginId might be an instanceId (e.g., "easytouch_b1241e"), so look up the actual plugin instance
+            val devicePlugin = pluginRegistry.getPluginInstance(pluginId)
             
             val callback = if (devicePlugin != null) {
-                // NEW: Plugin provides its own callback
+                // NEW: Plugin instance provides its own callback
                 Log.i(TAG, "Using plugin-owned GATT callback for ${device.address}")
                 
-                // Initialize plugin if needed
-                val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
-                devicePlugin.initialize(applicationContext, config)
+                // Plugin was already initialized by createPluginInstance - no need to reinitialize
                 
                 val onDisconnect: (BluetoothDevice, Int) -> Unit = { dev, status ->
                     handleDeviceDisconnect(dev, status, pluginId)

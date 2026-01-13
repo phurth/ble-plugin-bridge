@@ -337,8 +337,20 @@ class PluginRegistry {
                 return null
             }
             
-            // Initialize with instance-specific configuration
-            plugin.initializeWithConfig(instance.instanceId, instance.config)
+            // Build config map with device-specific fields
+            val configWithDevice = instance.config.toMutableMap()
+            
+            // Add device MAC to config with plugin-specific key names
+            when (instance.pluginType) {
+                "easytouch" -> configWithDevice["thermostat_mac"] = instance.deviceMac
+                "onecontrol" -> configWithDevice["gateway_mac"] = instance.deviceMac
+                "onecontrol_v2" -> configWithDevice["gateway_mac"] = instance.deviceMac
+                "gopower" -> configWithDevice["controller_mac"] = instance.deviceMac
+                // Add other plugin types as needed
+            }
+            
+            // Initialize with instance-specific configuration (including device MAC)
+            plugin.initializeWithConfig(instance.instanceId, configWithDevice)
             
             // Cache the instance
             pluginInstances[instance.instanceId] = plugin

@@ -114,6 +114,7 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
             device = device,
             context = context,
             mqttPublisher = mqttPublisher,
+            instanceId = instanceId,
             onDisconnect = onDisconnect,
             password = thermostatPassword
         )
@@ -181,6 +182,7 @@ class EasyTouchGattCallback(
     private val device: BluetoothDevice,
     private val context: Context,
     private val mqttPublisher: MqttPublisher,
+    private val instanceId: String,
     private val onDisconnect: (BluetoothDevice, Int) -> Unit,
     private val password: String
 ) : BluetoothGattCallback() {
@@ -1597,7 +1599,7 @@ class EasyTouchGattCallback(
         
         // Update UI status for this plugin
         mqttPublisher.updatePluginStatus(
-            pluginId = "easytouch",
+            pluginId = instanceId,
             connected = isConnected,
             authenticated = isPaired,
             dataHealthy = dataHealthy
