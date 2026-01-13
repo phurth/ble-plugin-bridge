@@ -33,6 +33,7 @@ class PluginRegistry {
     private val mutex = Mutex()
     private val loadedBlePlugins = mutableMapOf<String, BlePluginInterface>()
     private val loadedDevicePlugins = mutableMapOf<String, BleDevicePlugin>()
+    private val pluginInstances = mutableMapOf<String, BleDevicePlugin>()  // v2.6.0+: Multi-instance support
     private var outputPlugin: OutputPluginInterface? = null
     
     // Plugin factory map: pluginId -> factory function
@@ -304,12 +305,105 @@ class PluginRegistry {
             System.gc()
         }
     }
+
+    // ============================================================================
+    // Multi-Instance Plugin Management (v2.6.0+)
+    // ============================================================================
+
+    /**
+     * Create a new plugin instance from a PluginInstance descriptor.
+     * Used for multi-instance scenarios where multiple devices of the same type
+     * are managed independently.
+     * 
+     * @param instance The PluginInstance containing device-specific config
+     * @param context Android context for initialization
+     * @return The initialized plugin instance, or null if creation failed
+     */
+    fun createPluginInstance(instance: PluginInstance, context: Context): BleDevicePlugin? {
+        val pluginType = instance.pluginType
+        val factory = blePluginFactories[pluginType]
+        
+        if (factory == null) {
+            Log.e(TAG, "No factory registered for plugin type: $pluginType")
+            return null
+        }
+        
+        return try {
+            Log.i(TAG, "Creating plugin instance: ${instance.instanceId} (type: $pluginType)")
+            val plugin = factory()
+            
+            if (plugin !is BleDevicePlugin) {
+                Log.e(TAG, "Plugin factory for $pluginType does not return BleDevicePlugin")
+                return null
+            }
+            
+            // Initialize with instance-specific configuration
+            plugin.initializeWithConfig(instance.instanceId, instance.config)
+            
+            // Cache the instance
+            pluginInstances[instance.instanceId] = plugin
+            
+            Log.i(TAG, "Plugin instance created successfully: ${instance.instanceId}")
+            plugin
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating plugin instance ${instance.instanceId}", e)
+            null
+        }
+    }
+
+    /**
+     * Get a previously created plugin instance by ID.
+     * Returns null if the instance hasn't been created yet.
+     * 
+     * @param instanceId The unique instance ID (e.g., "easytouch_b1241e")
+     * @return The plugin instance, or null if not found
+     */
+    fun getPluginInstance(instanceId: String): BleDevicePlugin? {
+        return pluginInstances[instanceId]
+    }
+
+    /**
+     * Get all created plugin instances.
+     * 
+     * @return Map of instanceId -> BleDevicePlugin
+     */
+    fun getAllPluginInstances(): Map<String, BleDevicePlugin> {
+        return pluginInstances.toMap()
+    }
+
+    /**
+     * Get plugin instances filtered by plugin type.
+     * 
+     * @param pluginType The plugin type (e.g., "easytouch")
+     * @return List of plugin instances of this type
+     */
+    fun getPluginInstancesOfType(pluginType: String): List<BleDevicePlugin> {
+        return pluginInstances.values.filter { 
+            it.pluginId == pluginType 
+        }
+    }
+
+    /**
+     * Remove and unload a plugin instance.
+     * Called when instance is being deleted/disabled.
+     * 
+     * @param instanceId The instance to remove
+     */
+    suspend fun removePluginInstance(instanceId: String) = mutex.withLock {
+        pluginInstances[instanceId]?.let { plugin ->
+            Log.i(TAG, "Removing plugin instance: $instanceId")
+            plugin.destroy()
+            pluginInstances.remove(instanceId)
+            Log.i(TAG, "Plugin instance removed: $instanceId")
+            System.gc()
+        }
+    }
     
     /**
      * Unload all plugins and cleanup resources.
      */
     suspend fun cleanup() = mutex.withLock {
-        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins, ${loadedDevicePlugins.size} device plugins)")
+        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins, ${loadedDevicePlugins.size} device plugins, ${pluginInstances.size} instances)")
         
         for ((pluginId, plugin) in loadedBlePlugins) {
             Log.i(TAG, "Cleaning up BLE plugin: $pluginId")
@@ -319,6 +413,13 @@ class PluginRegistry {
         
         // Clear device plugins
         loadedDevicePlugins.clear()
+        
+        // Clear plugin instances
+        for ((instanceId, plugin) in pluginInstances) {
+            Log.i(TAG, "Cleaning up plugin instance: $instanceId")
+            plugin.destroy()
+        }
+        pluginInstances.clear()
         
         outputPlugin?.disconnect()
         outputPlugin = null

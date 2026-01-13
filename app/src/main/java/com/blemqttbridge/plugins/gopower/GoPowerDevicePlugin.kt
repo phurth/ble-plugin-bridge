@@ -35,9 +35,11 @@ class GoPowerDevicePlugin : BleDevicePlugin {
     }
     
     override val pluginId: String = PLUGIN_ID
+    override var instanceId: String = PLUGIN_ID  // Same as pluginId by default
+    override val supportsMultipleInstances: Boolean = true
     override val displayName: String = "GoPower Solar Controller"
     
-    private lateinit var context: Context
+    private var context: Context? = null
     private var config: PluginConfig? = null
     
     // Configuration from settings
@@ -49,7 +51,16 @@ class GoPowerDevicePlugin : BleDevicePlugin {
     // Current callback instance for command handling
     private var currentCallback: GoPowerGattCallback? = null
     
-    override fun initialize(context: Context, config: PluginConfig) {
+    override fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
+        this.instanceId = instanceId
+        
+        // Extract device-specific configuration
+        controllerMac = config["controller_mac"] ?: ""
+        
+        Log.i(TAG, "Initializing GoPower instance: $instanceId (MAC: $controllerMac)")
+    }
+    
+    override fun initialize(context: Context?, config: PluginConfig) {
         Log.i(TAG, "Initializing GoPower Device Plugin v$PLUGIN_VERSION")
         this.context = context
         this.config = config
