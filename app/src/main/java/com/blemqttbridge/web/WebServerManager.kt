@@ -540,7 +540,6 @@ class WebServerManager(
                     const macAddresses = status.macAddresses && status.macAddresses.length > 0 
                         ? status.macAddresses.join(', ') 
                         : '';
-                    const enabled = status.enabled ? 'Yes' : 'No';
                     const showHelper = configChanged[pluginId] && !serviceRunning;
                     
                     // Build configuration field lines with edit buttons
@@ -1367,7 +1366,6 @@ class WebServerManager(
                     put("pluginType", instance.pluginType)
                     put("deviceMac", instance.deviceMac)
                     put("displayName", instance.displayName ?: instanceId)
-                    put("enabled", instance.enabled)
                     put("connected", status.connected)
                     put("authenticated", status.authenticated)
                     put("dataHealthy", status.dataHealthy)
@@ -1446,7 +1444,6 @@ class WebServerManager(
                 pluginType = pluginType,
                 deviceMac = deviceMac,
                 displayName = displayName,
-                enabled = true,
                 config = config
             )
 
@@ -1539,7 +1536,6 @@ class WebServerManager(
                 it.keys().forEach { key -> map[key] = it.getString(key) }
                 map
             }
-            val enabled = jsonObject.optBoolean("enabled", true)
 
             // Validate service is stopped
             val service = BaseBleService.getInstance()
@@ -1562,8 +1558,7 @@ class WebServerManager(
             // Create updated instance
             val updatedInstance = existingInstance.copy(
                 displayName = displayName ?: existingInstance.displayName,
-                config = config ?: existingInstance.config,
-                enabled = enabled
+                config = config ?: existingInstance.config
             )
 
             // Save updated instance

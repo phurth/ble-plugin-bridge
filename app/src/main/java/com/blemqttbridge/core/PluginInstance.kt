@@ -21,7 +21,6 @@ data class PluginInstance(
     val pluginType: String,       // Plugin type: "easytouch", "onecontrol_v2", "gopower", "mopeka", etc.
     val deviceMac: String,        // BLE MAC address (uppercase with colons) e.g., "EC:C9:FF:B1:24:1E"
     val displayName: String?,     // User-friendly name: "Master Bedroom", "Fresh Water Tank", null for default
-    val enabled: Boolean,         // Whether this instance is active/enabled
     val config: Map<String, String>  // Plugin-specific config (password, PIN, sensor type, etc.)
 ) {
     companion object {
@@ -46,7 +45,6 @@ data class PluginInstance(
             json.put("pluginType", instance.pluginType)
             json.put("deviceMac", instance.deviceMac)
             json.put("displayName", instance.displayName)
-            json.put("enabled", instance.enabled)
             
             // Serialize config map
             val configJson = JSONObject()
@@ -81,7 +79,6 @@ data class PluginInstance(
                     pluginType = json.getString("pluginType"),
                     deviceMac = json.getString("deviceMac"),
                     displayName = json.optString("displayName", null).takeIf { it.isNotEmpty() },
-                    enabled = json.getBoolean("enabled"),
                     config = config
                 )
             } catch (e: Exception) {

@@ -878,11 +878,6 @@ class BaseBleService : Service() {
         
         // 1. For each instance, connect to its configured device MAC
         for ((instanceId, instance) in allInstances) {
-            if (!instance.enabled) {
-                Log.d(TAG, "Skipping disabled instance: $instanceId")
-                continue
-            }
-            
             val deviceMac = instance.deviceMac.uppercase()
             if (devicesToConnect.containsKey(deviceMac)) {
                 Log.w(TAG, "Device $deviceMac already assigned to another instance, skipping $instanceId")

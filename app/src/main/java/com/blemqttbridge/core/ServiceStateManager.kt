@@ -315,7 +315,6 @@ object ServiceStateManager {
                         pluginType = pluginType,
                         deviceMac = mac,
                         displayName = null,  // No friendly names in old format
-                        enabled = true,
                         config = config
                     )
                     saveInstance(context, instance)
