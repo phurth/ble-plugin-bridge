@@ -2,8 +2,8 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.5  
-> **Last Updated:** January 12, 2026  
+> **Current Version:** v2.5.6  
+> **Last Updated:** January 13, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -14,25 +14,33 @@
    - [Common Tasks](#common-tasks)
    - [Key Files](#key-files)
    - [Recent Critical Changes](#recent-critical-changes)
-   - [v2.5.5 New Features](#v255-new-features-january-2026)
+   - [v2.5.6 Testing & Multi-Instance](#v256-testing--multi-instance-january-2026)
+   - [v2.5.5 Web Interface](#v255-web-interface-january-2026)
 
-1. [High-Level Architecture](#1-high-level-architecture)
+1. [Multi-Instance Plugin Architecture](#1-multi-instance-plugin-architecture-v260)
+   - [Overview](#overview-multi-instance)
+   - [PluginInstance Data Model](#plugininstance-data-model)
+   - [Instance Registry](#instance-registry)
+   - [Instance Lifecycle](#instance-lifecycle)
+   - [Status Tracking](#status-tracking-per-instance)
+
+2. [High-Level Architecture](#2-high-level-architecture)
    - [Overview](#overview)
    - [Key Principles](#key-principles)
 
-2. [Service Layer](#2-service-layer)
+3. [Service Layer](#3-service-layer)
    - [BaseBleService](#basebleservice)
    - [StateFlow Companion Objects](#stateflow-companion-objects)
    - [MqttPublisher Implementation](#mqttpublisher-implementation)
    - [Connection Flow](#connection-flow)
 
-3. [Plugin System](#3-plugin-system)
+4. [Plugin System](#4-plugin-system)
    - [Plugin Interfaces](#plugin-interfaces)
    - [BleDevicePlugin (New Architecture)](#bledeviceplugin-new-architecture)
    - [MqttPublisher Interface](#mqttpublisher-interface)
    - [PluginRegistry](#pluginregistry)
 
-4. [OneControl Protocol Deep Dive](#4-onecontrol-protocol-deep-dive)
+5. [OneControl Protocol Deep Dive](#5-onecontrol-protocol-deep-dive)
    - [Overview](#overview-1)
    - [File Structure](#file-structure)
    - [BLE Service UUIDs](#ble-service-uuids)
@@ -52,7 +60,7 @@
    - [Friendly Name Race Condition](#friendly-name-race-condition)
    - [Device Metadata Retrieval](#device-metadata-retrieval-getdevicesmetadata)
 
-5. [EasyTouch Thermostat Protocol](#5-easytouch-thermostat-protocol)
+6. [EasyTouch Thermostat Protocol](#6-easytouch-thermostat-protocol)
    - [Overview](#overview-2)
    - [File Structure](#file-structure-1)
    - [BLE Service UUIDs](#ble-service-uuids-1)
@@ -67,7 +75,7 @@
    - [Command Handling](#command-handling-1)
    - [Key Differences from OneControl](#key-differences-from-onecontrol)
 
-6. [GoPower Solar Controller Protocol](#6-gopower-solar-controller-protocol)
+7. [GoPower Solar Controller Protocol](#7-gopower-solar-controller-protocol)
    - [Overview](#overview-3)
    - [Protocol Characteristics](#protocol-characteristics)
    - [Notification Data Format](#notification-data-format)
@@ -80,11 +88,24 @@
    - [Troubleshooting](#troubleshooting)
    - [Known Limitations](#known-limitations)
 
-7. [MQTT Integration](#7-mqtt-integration)
+7. [GoPower Solar Controller Protocol](#7-gopower-solar-controller-protocol)
+   - [Overview](#overview-3)
+   - [Protocol Characteristics](#protocol-characteristics)
+   - [Notification Data Format](#notification-data-format)
+   - [Key Implementation Details](#key-implementation-details)
+   - [Home Assistant Entities](#home-assistant-entities)
+   - [Plugin Structure](#plugin-structure)
+   - [Configuration Requirements](#configuration-requirements)
+   - [Reboot Command](#reboot-command)
+   - [Diagnostic Sensors](#diagnostic-sensors)
+   - [Troubleshooting](#troubleshooting)
+   - [Known Limitations](#known-limitations)
+
+8. [MQTT Integration](#8-mqtt-integration)
    - [MqttOutputPlugin](#mqttoutputplugin)
    - [Topic Structure](#topic-structure-v248)
    - [Graceful Error Handling](#graceful-error-handling)
-   - [Multi-Gateway Support](#75-multi-gateway-support-v248)
+   - [Multi-Gateway Support](#8-multi-gateway-support-v248)
      - [Overview](#overview-4)
      - [Device Identification Strategy](#device-identification-strategy)
      - [Implementation](#implementation)
@@ -92,7 +113,7 @@
      - [Deployment Example](#multi-gateway-deployment-example)
      - [Migration Notes](#migration-notes)
 
-8. [Home Assistant Discovery](#8-home-assistant-discovery)
+9. [Home Assistant Discovery](#9-home-assistant-discovery)
    - [Discovery Payload Format](#discovery-payload-format)
    - [Device Info (Grouping)](#device-info-grouping)
    - [Discovery Topic Pattern](#discovery-topic-pattern)
@@ -101,20 +122,27 @@
    - [Command Handling with Entity Models](#command-handling-with-entity-models)
    - [Step-by-Step: Adding a New Entity Type](#step-by-step-adding-a-new-entity-type-example-rgb-light)
 
-9. [State Management & Status Indicators](#9-state-management--status-indicators)
-   - [Per-Plugin Status Architecture](#per-plugin-status-architecture-v231)
-   - [MQTT Diagnostic Sensors](#mqtt-diagnostic-sensors-per-plugin)
-   - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status-v232)
-   - [SettingsScreen Indicators](#settingsscreen-per-plugin-indicators)
-   - [BLE Scanner Conditional Initialization](#ble-scanner-conditional-initialization)
-   - [System Diagnostic Sensors](#system-diagnostic-sensors)
-   - [Settings Screen](#settings-screen)
+10. [State Management & Status Indicators](#10-state-management--status-indicators)
+    - [Per-Plugin Status Architecture](#per-plugin-status-architecture-v231)
+    - [MQTT Diagnostic Sensors](#mqtt-diagnostic-sensors-per-plugin)
+    - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status-v232)
+    - [SettingsScreen Indicators](#settingsscreen-per-plugin-indicators)
+    - [BLE Scanner Conditional Initialization](#ble-scanner-conditional-initialization)
+    - [System Diagnostic Sensors](#system-diagnostic-sensors)
+    - [Settings Screen](#settings-screen)
 
-10. [Creating New Plugins](#10-creating-new-plugins)
+11. [Testing Infrastructure](#11-testing-infrastructure-v256)
+    - [Overview](#testing-overview)
+    - [Test Framework](#test-framework)
+    - [TestContextHelper](#testcontexthelper)
+    - [Unit Tests](#unit-tests)
+    - [Adding New Tests](#adding-new-tests)
+
+12. [Creating New Plugins](#12-creating-new-plugins)
     - [Plugin Template](#plugin-template)
     - [Register the Plugin](#register-the-plugin)
 
-11. [Debug Logging & Performance](#11-debug-logging--performance)
+13. [Debug Logging & Performance](#13-debug-logging--performance)
     - [Overview](#overview-5)
     - [DebugLog Utility](#debuglog-utility)
     - [Usage Guidelines](#usage-guidelines)
@@ -123,7 +151,7 @@
     - [Emoji Removal](#emoji-removal)
     - [Best Practices](#best-practices)
 
-12. [Common Pitfalls & Solutions](#12-common-pitfalls--solutions)
+14. [Common Pitfalls & Solutions](#14-common-pitfalls--solutions)
     - [MQTT Publish Exceptions](#1-mqtt-publish-exceptions)
     - [Stale Status Indicators](#2-stale-status-indicators)
     - [BLE GATT Error 133](#3-ble-gatt-error-133)
@@ -133,7 +161,7 @@
     - [Dimmable Bouncing](#7-dimmable-bouncing)
     - [BLE Trace Logging](#8-ble-trace-logging)
 
-13. [Background Operation](#13-background-operation)
+15. [Background Operation](#15-background-operation)
     - [Battery Optimization & Background Execution](#battery-optimization--background-execution)
     - [Defense Layers](#defense-layers)
     - [Recommended Settings](#recommended-settings)
@@ -163,6 +191,28 @@
 - **Service layer:** `BaseBleService.kt`
 
 ### Recent Critical Changes
+
+**v2.5.6 (January 2026):**
+- **Complete Multi-Instance Plugin Support:** Full implementation of v2.6.0 multi-instance architecture
+  - Multiple instances of same plugin type can now coexist independently
+  - `PluginInstance` data model with unique instanceId (format: `{pluginType}_{macSuffix}`)
+  - Instance-based storage in `ServiceStateManager` (SharedPreferences)
+  - All plugins load from instances on service startup
+  - Web API endpoints: `/api/instances`, `/api/instances/add`, `/api/instances/remove`, `/api/instances/update`
+  - Web UI displays instances grouped by plugin type with instance-level controls
+  - Per-instance status tracking in `BaseBleService._pluginStatuses`
+  - EasyTouch plugin fully supports multi-instance mode
+  - All other plugins prepared for multi-instance (supportsMultipleInstances = false by default)
+- **Comprehensive Testing Infrastructure:** Full unit test suite with 43 tests, 0 failures
+  - `TestContextHelper` utility: In-memory SharedPreferences mock for test isolation
+  - `ServiceStateManagerTest`: 6 tests for instance persistence (CRUD, serialization)
+  - `DeviceStatusParserTest`: 4 tests for protocol message parsing
+  - `WebServerEndpointTest`: 6 tests for HTTP API payload validation
+  - `PluginRegistryTest`: 7 tests for plugin lifecycle
+  - `MultiInstanceWebApiTest`: 9 tests for multi-instance API operations
+  - Additional tests for MQTT, GoPower, and mock battery plugins
+  - Tests validated after each change to catch regressions early
+  - Foundation for continued test expansion
 
 **v2.5.5 (January 2026):**
 - **Web Interface Phase 4:** Plugin management and MQTT configuration editing
@@ -266,7 +316,129 @@ homeassistant/sensor/ble_mqtt_bridge_0c9919/...
 
 ---
 
-## 1. High-Level Architecture
+## 1. Multi-Instance Plugin Architecture (v2.6.0)
+
+### Overview: Multi-Instance Architecture
+
+**Location:** `app/src/main/java/com/blemqttbridge/core/`
+
+The multi-instance architecture enables multiple plugins of the same type to run independently, each managing its own BLE device. This is critical for RV installations where you might have:
+- Two EasyTouch thermostats (master bedroom + guest room)
+- Multiple Mopeka tank sensors (fresh water + gray water + propane)
+- Multiple OneControl gateways (main RV + towed vehicle)
+
+Each instance is completely independent with:
+- Unique instance ID
+- Own BLE device connection
+- Own configuration (password, PIN, etc.)
+- Own status tracking (connected, healthy, etc.)
+
+### PluginInstance Data Model
+
+**File:** `app/src/main/java/com/blemqttbridge/core/PluginInstance.kt`
+
+```kotlin
+data class PluginInstance(
+    val instanceId: String,              // Unique: "{pluginType}_{macSuffix}" e.g., "easytouch_b1241e"
+    val pluginType: String,              // "easytouch", "mopeka", "onecontrol_v2", etc.
+    val deviceMac: String,               // BLE MAC address (uppercase with colons)
+    val displayName: String?,            // User-friendly name or null for default
+    val config: Map<String, String>      // Plugin-specific settings (password, PIN, etc.)
+)
+```
+
+**Instance ID Format:**
+- Combines plugin type and last 6 characters of MAC address (lowercase, no colons)
+- Examples:
+  - `easytouch_b1241e` - EasyTouch thermostat EC:C9:FF:B1:24:1E
+  - `onecontrol_v2_1e0a` - OneControl gateway 24:DC:C3:ED:1E:0A
+  - `mopeka_c4f892` - Mopeka sensor AA:BB:CC:C4:F8:92
+
+**Storage:**
+- Stored in SharedPreferences under key `plugin_instances`
+- Format: JSON object with instanceId as key
+- All instances loaded on service startup via `ServiceStateManager.getAllInstances()`
+
+### Instance Registry
+
+**File:** `app/src/main/java/com/blemqttbridge/core/PluginRegistry.kt`
+
+The registry manages instance creation and lifecycle:
+
+```kotlin
+// Create a new plugin instance
+fun createPluginInstance(instance: PluginInstance, context: Context): BleDevicePlugin?
+
+// Get specific instance
+fun getPluginInstance(instanceId: String): BleDevicePlugin?
+
+// Get all instances of a specific type
+fun getPluginInstancesOfType(pluginType: String): List<BleDevicePlugin>
+
+// Clean up instance
+fun removePluginInstance(instanceId: String)
+```
+
+**Factory Logic:**
+- Instantiates plugin class based on `pluginType`
+- Calls `plugin.initializeWithConfig(instanceId, config)` for configuration
+- Stores plugin in `pluginInstances` map keyed by instanceId
+- Returns plugin ready for GATT callback handling
+
+### Instance Lifecycle
+
+**Startup (BaseBleService.onServiceStarted):**
+1. Load all instances: `ServiceStateManager.getAllInstances(applicationContext)`
+2. For each enabled instance:
+   - Create via `pluginRegistry.createPluginInstance(instance, context)`
+   - Track in `instancePluginTypes` map for reverse lookup
+   - Initialize status in `_pluginStatuses`
+3. Instance is ready to scan and connect to its configured device
+
+**Runtime:**
+- Each instance maintains independent GATT connection
+- BLE scan matches all configured MAC addresses across all instances
+- Each plugin receives its own GATT callbacks and notification events
+- No cross-instance interference
+
+**Status Updates:**
+- `updatePluginStatus(instanceId, connected, dataHealthy)` tracks each instance
+- UI reflects per-instance status via `_pluginStatuses: Map<String, PluginStatus>`
+- MQTT publishes per-instance diagnostics using instanceId
+
+### Status Tracking Per-Instance
+
+**File:** `app/src/main/java/com/blemqttbridge/core/BaseBleService.kt`
+
+```kotlin
+private val _pluginStatuses = MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
+
+// Update individual instance status
+fun updatePluginStatus(instanceId: String, connected: Boolean, dataHealthy: Boolean) {
+    val currentStatuses = _pluginStatuses.value
+    _pluginStatuses.value = currentStatuses + (instanceId to PluginStatus(
+        instanceId = instanceId,
+        connected = connected,
+        dataHealthy = dataHealthy,
+        paired = isPaired
+    ))
+}
+```
+
+**Web API:**
+- GET `/api/instances` - Lists all instances grouped by plugin type
+- POST `/api/instances/add` - Create new instance
+- POST `/api/instances/remove` - Delete instance
+- POST `/api/instances/update` - Modify instance config
+
+**UI Display:**
+- Web interface shows instances organized by plugin type
+- Each instance has its own status indicators, controls, edit button
+- Instance-level add/remove without affecting other instances
+
+---
+
+## 2. High-Level Architecture
 
 ### Overview
 
@@ -329,7 +501,7 @@ homeassistant/sensor/ble_mqtt_bridge_0c9919/...
 
 ---
 
-## 2. Service Layer
+## 3. Service Layer
 
 ### BaseBleService
 
@@ -437,7 +609,7 @@ private suspend fun connectToDevice(device: BluetoothDevice, pluginId: String) {
 
 ---
 
-## 3. Plugin System
+## 4. Plugin System
 
 ### Plugin Interfaces
 
@@ -3656,7 +3828,191 @@ All system diagnostic sensors are published under the **"BLE MQTT Bridge"** devi
 
 ---
 
-## 11. Debug Logging & Performance
+## 11. Testing Infrastructure (v2.5.6)
+
+### Testing Overview
+
+The application includes comprehensive automated unit tests covering critical paths:
+
+- **43 total tests passing** (0 failures)
+- **TestContextHelper** - Reusable mock utility for all tests
+- **Pure JVM unit tests** - No Android instrumentation needed, fast execution
+- Test files located in: `app/src/test/java/com/blemqttbridge/`
+
+**Test Coverage Areas:**
+- Instance management: Creation, persistence, serialization
+- Protocol parsing: OneControl message formats and edge cases
+- HTTP API: Web server endpoints and payload validation
+- Plugin lifecycle: Registry, creation, cleanup
+- MQTT operations: Publishing, subscriptions
+- Configuration management: Storage and retrieval
+
+### Test Framework
+
+- **JUnit 4** - Primary test runner
+- **Kotlin Test** - Assertion library with readable syntax
+- **Mockito** (limited use) - Mock external dependencies
+- **Custom TestContextHelper** - In-memory SharedPreferences implementation
+
+**Build and Run:**
+```bash
+# Run all tests
+./gradlew testDebugUnitTest
+
+# Run specific test class
+./gradlew testDebugUnitTest --tests "com.blemqttbridge.core.ServiceStateManagerTest"
+
+# Run with output
+./gradlew testDebugUnitTest --info
+```
+
+### TestContextHelper
+
+**Location:** `app/src/test/java/com/blemqttbridge/core/TestContextHelper.kt`
+
+Provides a functional mock Android Context with in-memory SharedPreferences:
+
+```kotlin
+object TestContextHelper {
+    /**
+     * Create a mock Android Context with working SharedPreferences.
+     * Used by all unit tests to avoid null exceptions.
+     */
+    fun createMockContext(): Context {
+        val mockContext = mock<Context>()
+        val mockSharedPrefs = InMemorySharedPreferences()
+        
+        Mockito.`when`(mockContext.getSharedPreferences(ArgumentMatchers.anyString(), ArgumentMatchers.anyInt()))
+            .thenReturn(mockSharedPrefs)
+        
+        return mockContext
+    }
+}
+```
+
+**InMemorySharedPreferences Implementation:**
+- Full `SharedPreferences` interface: getString, getInt, getBoolean, getFloat, getLong
+- Full `SharedPreferences.Editor` interface: put*, remove, clear, apply, commit
+- Backed by mutable map for complete data storage
+- Supports concurrent access patterns
+- No disk I/O required
+
+**Why This Matters:**
+- Tests run in pure JVM without Android framework
+- No need for Android emulator or instrumented tests
+- Tests complete in ~2 seconds (vs 30+ seconds for instrumented tests)
+- Consistent, isolated test environment across machines
+
+### Unit Tests
+
+**1. ServiceStateManagerTest** (6 tests)
+- **Purpose:** Validate plugin instance persistence layer
+- **Location:** `app/src/test/java/com/blemqttbridge/core/ServiceStateManagerTest.kt`
+- **Tests:**
+  - `testSaveAndLoadInstance` - Store and retrieve single instance
+  - `testSaveMultipleInstances` - Handle multiple concurrent instances
+  - `testUpdateInstance` - Modify existing instance
+  - `testRemoveInstance` - Delete instance
+  - `testGetAllInstancesEmpty` - Handle empty state
+  - `testInstanceSerialization` - JSON round-trip conversion
+
+**2. DeviceStatusParserTest** (4 tests)
+- **Purpose:** Validate OneControl protocol message parsing
+- **Location:** `app/src/test/java/com/blemqttbridge/plugins/onecontrol/protocol/DeviceStatusParserTest.kt`
+- **Tests:**
+  - `testParseRelayBasicLatchingStatusType1` - Standard relay status parsing
+  - `testParseRelayBasicLatchingStatusType1_TooShort` - Handle insufficient data
+  - `testParseRelayBasicLatchingStatusType1_SingleDevice` - Parse single device in message
+  - `testParseRelayBasicLatchingStatusType1_NoDevices` - Handle empty device list
+
+**3. WebServerEndpointTest** (6 tests)
+- **Purpose:** Validate HTTP API payload structure and contract
+- **Location:** `app/src/test/java/com/blemqttbridge/web/WebServerEndpointTest.kt`
+- **Tests:**
+  - `testAddInstancePayloadParsing` - Validate instance creation request format
+  - `testInstanceListingSerialization` - Multiple instances to JSON array
+  - `testMqttConfigPayloadStructure` - MQTT settings payload validation
+  - `testPortConfigurationPayload` - Port update request format
+  - `testInstanceDeletionPayload` - Instance removal request format
+  - `testWebAuthPayloadValidation` - Authentication settings validation
+
+**4. MultiInstanceWebApiTest** (9 tests)
+- **Purpose:** Test multi-instance management endpoints
+- **Location:** `app/src/test/java/com/blemqttbridge/web/MultiInstanceWebApiTest.kt`
+- **Tests:**
+  - Instance CRUD operations
+  - Instance serialization/deserialization
+  - Multiple instances of same type handling
+  - Instance filtering by type
+  - Configuration persistence
+
+**5. PluginRegistryTest** (7 tests)
+- **Purpose:** Validate plugin lifecycle and discovery
+- **Location:** `app/src/test/java/com/blemqttbridge/core/PluginRegistryTest.kt`
+- **Tests:**
+  - Plugin creation and registration
+  - Plugin instance management
+  - Plugin cleanup
+
+**6. Additional Plugin Tests**
+- **MqttOutputPluginTest** (3 tests) - MQTT publishing
+- **MockBatteryPluginTest** (8 tests) - Battery status plugin
+
+### Adding New Tests
+
+**Template for New Test Class:**
+
+```kotlin
+import android.content.Context
+import com.blemqttbridge.core.TestContextHelper
+import org.junit.Before
+import org.junit.Test
+import kotlin.test.assertEquals
+
+class MyNewTest {
+    private lateinit var mockContext: Context
+    
+    @Before
+    fun setUp() {
+        mockContext = TestContextHelper.createMockContext()
+    }
+    
+    @Test
+    fun testSomething() {
+        // Arrange
+        val testData = "test value"
+        
+        // Act
+        val result = performAction(testData)
+        
+        // Assert
+        assertEquals(expected, result)
+    }
+}
+```
+
+**Best Practices:**
+1. One test class per feature/class
+2. Use TestContextHelper.createMockContext() for any Context-dependent code
+3. Follow AAA pattern: Arrange, Act, Assert
+4. Name tests descriptively: testWhatYouAreTesting_GivenCondition_ExpectResult
+5. Keep tests isolated - no cross-test dependencies
+6. Run tests frequently during development to catch regressions
+7. Add tests when fixing bugs (regression test)
+
+**Running Tests During Development:**
+```bash
+# Watch mode - rerun on file changes (requires gradle-watch plugin)
+./gradlew testDebugUnitTest --continuous
+
+# Generate test report
+./gradlew testDebugUnitTest --info
+# Report location: app/build/reports/tests/testDebugUnitTest/index.html
+```
+
+---
+
+## 12. Debug Logging & Performance
 
 ### Overview
 
@@ -4076,6 +4432,5 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 
 ---
 
-*Document version: 2.5.2*  
-*Last updated: January 9, 2026 - Multi-plugin boot support and OneControl configuration fixes*  
-*See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete version history*
+*Document version: 2.5.6*  
+*Last updated: January 13, 2026 - Multi-instance plugin support and comprehensive testing infrastructure*  
