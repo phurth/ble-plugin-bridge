@@ -1,6 +1,7 @@
 package com.blemqttbridge.web
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
@@ -13,6 +14,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * Embedded web server for configuration and monitoring.
@@ -28,9 +30,66 @@ class WebServerManager(
     companion object {
         private const val TAG = "WebServerManager"
     }
+    
+    private val appSettings = AppSettings(context)
 
     init {
         Log.i(TAG, "Web server initialized on port $port")
+    }
+    
+    /**
+     * Check HTTP Basic Authentication.
+     * Returns true if authentication is disabled or credentials are valid.
+     */
+    private fun requireAuth(session: IHTTPSession): Boolean {
+        val authEnabled = runBlocking { appSettings.webAuthEnabled.first() }
+        if (!authEnabled) return true
+        
+        val authHeader = session.headers["authorization"]
+        if (authHeader == null || !authHeader.startsWith("Basic ")) {
+            return false
+        }
+        
+        try {
+            val base64Credentials = authHeader.substring(6)
+            val credentials = String(Base64.decode(base64Credentials, Base64.DEFAULT))
+            val parts = credentials.split(":", limit = 2)
+            if (parts.size != 2) return false
+            
+            val (username, password) = parts
+            val storedUsername = runBlocking { appSettings.webAuthUsername.first() }
+            val storedPasswordHash = runBlocking { appSettings.webAuthPassword.first() }
+            
+            // Simple hash comparison (in production, use BCrypt or similar)
+            val providedPasswordHash = hashPassword(password)
+            
+            return username == storedUsername && providedPasswordHash == storedPasswordHash
+        } catch (e: Exception) {
+            Log.e(TAG, "Auth error", e)
+            return false
+        }
+    }
+    
+    /**
+     * Send 401 Unauthorized response
+     */
+    private fun sendUnauthorized(): Response {
+        val response = newFixedLengthResponse(
+            Response.Status.UNAUTHORIZED,
+            "application/json",
+            """{"error":"Authentication required"}"""
+        )
+        response.addHeader("WWW-Authenticate", "Basic realm=\"BLE MQTT Bridge\"")
+        return response
+    }
+    
+    /**
+     * Hash password using SHA-256 (basic implementation)
+     * In production, use BCrypt or similar
+     */
+    private fun hashPassword(password: String): String {
+        val bytes = MessageDigest.getInstance("SHA-256").digest(password.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -38,6 +97,11 @@ class WebServerManager(
         val method = session.method
 
         Log.d(TAG, "$method $uri from ${session.remoteIpAddress}")
+        
+        // Check authentication for all endpoints
+        if (!requireAuth(session)) {
+            return sendUnauthorized()
+        }
 
         return try {
             when {
@@ -142,7 +206,12 @@ class WebServerManager(
             margin-bottom: 10px;
             background: #f9f9f9;
             border-radius: 4px;
-            border-left: 4px solid #1976d2;
+        }
+        .mqtt-config-item.mqtt-connected {
+            border-left: 4px solid #4caf50;
+        }
+        .mqtt-config-item.mqtt-disconnected {
+            border-left: 4px solid #f44336;
         }
         .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; text-align: left; }
         .plugin-status { font-size: 14px; color: #666; text-align: left; }
@@ -258,21 +327,108 @@ class WebServerManager(
             margin-top: -8px;
             margin-bottom: 12px;
         }
-        .add-plugin-btn {
+        .plugin-type-section {
+            margin-bottom: 20px;
+            transition: transform 0.2s ease;
+        }
+        .plugin-type-section.dragging {
+            opacity: 0.5;
+        }
+        .plugin-type-section.drag-over {
+            transform: translateY(-5px);
+        }
+        .plugin-type-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            cursor: move;
+            user-select: none;
+        }
+        .plugin-type-header:hover {
+            background: #e8e8e8;
+        }
+        .plugin-type-title {
+            font-weight: 600;
+            font-size: 16px;
+            color: #333;
+        }
+        .add-instance-btn {
             background: #4caf50;
             color: white;
             border: none;
-            padding: 10px 20px;
+            padding: 6px 12px;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
-            margin-bottom: 15px;
+            font-size: 13px;
         }
-        .add-plugin-btn:hover { background: #45a049; }
-        .add-plugin-btn:disabled {
+        .add-instance-btn:hover { background: #45a049; }
+        .add-instance-btn:disabled {
             background: #ccc;
             cursor: not-allowed;
         }
+        .instance-card {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 12px;
+            margin-bottom: 8px;
+            margin-left: 20px;
+            position: relative;
+        }
+        .instance-card.instance-healthy {
+            border-left: 4px solid #4caf50;
+        }
+        .instance-card.instance-unhealthy {
+            border-left: 4px solid #f44336;
+        }
+        .instance-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .instance-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+        }
+        .instance-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .instance-edit-btn, .instance-remove-btn {
+            padding: 4px 8px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .instance-edit-btn {
+            background: #2196f3;
+            color: white;
+        }
+        .instance-edit-btn:hover { background: #1976d2; }
+        .instance-remove-btn {
+            background: #f44336;
+            color: white;
+        }
+        .instance-remove-btn:hover { background: #d32f2f; }
+        .instance-edit-btn:disabled, .instance-remove-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .instance-details {
+            font-size: 13px;
+            color: #666;
+        }
+        .instance-detail-line {
+            margin: 4px 0;
+        }
+
         .remove-btn {
             position: absolute;
             top: 8px;
@@ -387,36 +543,63 @@ class WebServerManager(
         </div>
 
         <div class="card">
-            <h2>Plugin Status</h2>
-            <div class="section-helper">Note: Service must be stopped to edit plugin configurations</div>
-            <button id="add-plugin-btn" class="add-plugin-btn" onclick="showAddPluginDialog()" disabled>Add Plugin</button>
+            <h2>Plugin Instances</h2>
+            <div class="section-helper">Note: Service must be stopped to add/remove/edit plugin instances</div>
+            <button id="add-instance-btn" class="add-instance-btn" onclick="showAddInstanceDialog()" disabled style="margin-bottom: 15px;">+ Add Plugin Instance</button>
             <div id="plugin-status" class="loading">Loading...</div>
         </div>
 
-        <!-- Add Plugin Modal -->
-        <div id="addPluginModal" class="modal">
+        <!-- Add Instance Modal -->
+        <div id="addInstanceModal" class="modal">
             <div class="modal-content">
-                <h3>Add Plugin</h3>
-                <div class="plugin-list">
-                    <div class="plugin-option" id="add-onecontrol" onclick="selectPluginToAdd('onecontrol')">
-                        <strong>OneControl</strong><br>
-                        <span style="font-size: 12px; color: #666;">LCI RV control system gateway</span>
-                    </div>
-                    <div class="plugin-option" id="add-easytouch" onclick="selectPluginToAdd('easytouch')">
-                        <strong>EasyTouch</strong><br>
-                        <span style="font-size: 12px; color: #666;">Micro-Air EasyTouch RV thermostat</span>
-                    </div>
-                    <div class="plugin-option" id="add-gopower" onclick="selectPluginToAdd('gopower')">
-                        <strong>GoPower</strong><br>
-                        <span style="font-size: 12px; color: #666;">Solar controller</span>
-                    </div>
-                    <div class="plugin-option" id="add-blescanner" onclick="selectPluginToAdd('blescanner')">
-                        <strong>BLE Scanner</strong><br>
-                        <span style="font-size: 12px; color: #666;">Generic BLE device scanner</span>
+                <h3>Add Plugin Instance</h3>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Plugin Type:</label>
+                    <select id="new-plugin-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">-- Select Plugin Type --</option>
+                        <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
+                        <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
+                        <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
+                        <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
+                    </select>
+                    <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
+                        ⚠️ This plugin type already exists and does not support multiple instances.
                     </div>
                 </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                    <input type="text" id="new-display-name" placeholder="e.g., Living Room Thermostat" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="new-mac-container" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                    <input type="text" id="new-device-mac" placeholder="e.g., AA:BB:CC:DD:EE:FF" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="plugin-specific-fields"></div>
                 <div class="modal-buttons">
-                    <button class="modal-btn modal-btn-secondary" onclick="closeAddPluginDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-secondary" onclick="closeAddInstanceDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-primary" onclick="confirmAddInstance()">Add Instance</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edit Instance Modal -->
+        <div id="editInstanceModal" class="modal">
+            <div class="modal-content">
+                <h3>Edit Instance</h3>
+                <input type="hidden" id="edit-instance-id">
+                <input type="hidden" id="edit-plugin-type">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                    <input type="text" id="edit-display-name" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="edit-mac-container" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                    <input type="text" id="edit-device-mac" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="edit-plugin-specific-fields"></div>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeEditInstanceDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-primary" onclick="confirmEditInstance()">Save Changes</button>
                 </div>
             </div>
         </div>
@@ -424,8 +607,8 @@ class WebServerManager(
         <!-- Confirm Remove Modal -->
         <div id="confirmRemoveModal" class="modal">
             <div class="modal-content">
-                <h3>Remove Plugin</h3>
-                <p id="remove-message">Are you sure you want to remove this plugin?</p>
+                <h3>Remove Instance</h3>
+                <p id="remove-message">Are you sure you want to remove this instance?</p>
                 <div class="modal-buttons">
                     <button class="modal-btn modal-btn-secondary" onclick="closeRemoveDialog()">Cancel</button>
                     <button class="modal-btn modal-btn-danger" onclick="confirmRemove()">Remove</button>
@@ -446,6 +629,62 @@ class WebServerManager(
             <button onclick="downloadBleTrace()">Download BLE Trace</button>
             <div id="ble-trace" class="log-container" style="display:none; margin-top: 15px;"></div>
         </div>
+
+        <!-- Android TV Power Fix Section -->
+        <div class="card">
+            <div style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" onclick="toggleTvFixSection()">
+                <h2 style="margin: 0;">Android TV Power Fix</h2>
+                <span id="tv-fix-toggle" style="font-size: 20px; transition: transform 0.3s;">▶</span>
+            </div>
+            <div id="tv-fix-content" style="display: none; margin-top: 20px;">
+                <h3 style="margin-top: 0; margin-bottom: 10px;">HDMI-CEC Auto Device Off</h3>
+                
+                <p style="line-height: 1.6; margin-bottom: 15px;">
+                    When enabled, the TV can put this device to sleep via HDMI-CEC, which kills the service. 
+                    Disable this to keep the service running when the TV powers off.
+                </p>
+                
+                <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 15px; border-radius: 4px;">
+                    <div style="font-weight: 500; color: #856404; margin-bottom: 5px;">
+                        ⚠️ CEC Auto-Off Enabled
+                    </div>
+                    <div style="color: #856404; font-size: 14px;">
+                        Service will be killed when TV sleeps
+                    </div>
+                </div>
+                
+                <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 20px; border-radius: 4px;">
+                    <div style="font-weight: 500; color: #856404; margin-bottom: 10px;">
+                        ⚠️ Permission Required
+                    </div>
+                    <div style="color: #856404; font-size: 14px; line-height: 1.6;">
+                        To enable automatic CEC control, grant WRITE_SECURE_SETTINGS via ADB (one-time setup):
+                    </div>
+                </div>
+                
+                <div style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; position: relative; margin-bottom: 15px; overflow-x: auto;">
+                    <button onclick="copyToClipboard('adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS')" 
+                            style="position: absolute; right: 10px; top: 10px; background: #007acc; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                        Copy
+                    </button>
+                    <div style="padding-right: 70px; word-wrap: break-word;">adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS</div>
+                </div>
+                
+                <p style="line-height: 1.6; margin-bottom: 10px; font-size: 14px; color: #666;">
+                    After granting permission, restart the app. The service will automatically disable CEC auto-off on startup.
+                </p>
+                
+                <h4 style="margin-top: 25px; margin-bottom: 10px;">Alternative: Disable CEC directly via ADB:</h4>
+                
+                <div style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; position: relative; overflow-x: auto;">
+                    <button onclick="copyToClipboard('adb shell settings put global hdmi_control_auto_device_off_enabled 0')" 
+                            style="position: absolute; right: 10px; top: 10px; background: #007acc; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                        Copy
+                    </button>
+                    <div style="padding-right: 70px; word-wrap: break-word;">adb shell settings put global hdmi_control_auto_device_off_enabled 0</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -453,18 +692,28 @@ class WebServerManager(
         let serviceRunning = false;
         let configChanged = {}; // Track which configs have changed
         let editingFields = {}; // Track which fields are currently being edited
+        let instanceToRemove = null;
+        
+        const PLUGIN_TYPE_NAMES = {
+            'onecontrol': 'OneControl',
+            'easytouch': 'EasyTouch',
+            'gopower': 'GoPower',
+            'blescanner': 'BLE Scanner'
+        };
+        
+        const MULTI_INSTANCE_PLUGINS = ['easytouch']; // Only EasyTouch supports multiple instances
         
         // Load status on page load
         window.addEventListener('load', () => {
             loadStatus();
             loadConfig();
-            loadPlugins();
+            loadInstances();
             // Auto-refresh status every 5 seconds
             setInterval(() => {
                 loadStatus();
-                // Only refresh plugins if not currently editing
+                // Only refresh instances if not currently editing
                 if (Object.keys(editingFields).length === 0) {
-                    loadPlugins();
+                    loadInstances();
                 }
             }, 5000);
         });
@@ -474,18 +723,16 @@ class WebServerManager(
                 const response = await fetch('/api/status');
                 const data = await response.json();
                 serviceRunning = data.running;
-                const mqttStatusColor = data.mqttConnected ? '#4CAF50' : '#f44336';
-                const mqttStatusText = data.mqttConnected ? '●' : '●';
                 const html = ${'`'}
                     <div class="status-row">
-                        <span class="status-label">Service Running:</span>
+                        <span class="status-label">BLE Bridge Service:</span>
                         <label class="toggle-switch">
                             <input type="checkbox" ${'$'}{data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
                     <div class="status-row">
-                        <span class="status-label">MQTT Enabled: <span style="color: ${'$'}{mqttStatusColor}">${'$'}{mqttStatusText}</span></span>
+                        <span class="status-label">MQTT Output Service:</span>
                         <label class="toggle-switch">
                             <input type="checkbox" ${'$'}{data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
                             <span class="toggle-slider"></span>
@@ -494,10 +741,10 @@ class WebServerManager(
                 ${'`'};
                 document.getElementById('service-status').innerHTML = html;
                 
-                // Enable/disable Add Plugin button based on service state
-                const addPluginBtn = document.getElementById('add-plugin-btn');
-                if (addPluginBtn) {
-                    addPluginBtn.disabled = serviceRunning;
+                // Update add instance button state
+                const addInstanceBtn = document.getElementById('add-instance-btn');
+                if (addInstanceBtn) {
+                    addInstanceBtn.disabled = serviceRunning;
                 }
             } catch (error) {
                 document.getElementById('service-status').innerHTML = 
@@ -515,8 +762,11 @@ class WebServerManager(
                 const data = await response.json();
                 const editDisabled = mqttRunning ? 'disabled' : '';
                 
+                // Fix: Check both mqttEnabled AND mqttConnected for health indicator
+                const mqttConnected = statusData.mqttEnabled && statusData.mqttConnected;
+                const mqttClass = mqttConnected ? 'mqtt-connected' : 'mqtt-disconnected';
                 const html = ${'`'}
-                    <div class="mqtt-config-item">
+                    <div class="mqtt-config-item ${'$'}{mqttClass}">
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'broker', 'MQTT Broker', data.mqttBroker, editDisabled, false)}</div>
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'port', 'MQTT Port', data.mqttPort, editDisabled, false)}</div>
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'username', 'MQTT Username', data.mqttUsername, editDisabled, false)}</div>
@@ -530,62 +780,484 @@ class WebServerManager(
             }
         }
 
-        async function loadPlugins() {
+        async function loadInstances() {
             try {
-                const response = await fetch('/api/plugins');
-                const data = await response.json();
+                const [instancesResponse, statusResponse] = await Promise.all([
+                    fetch('/api/instances'),
+                    fetch('/api/status')
+                ]);
+                const instances = await instancesResponse.json();
+                const statusData = await statusResponse.json();
+                
+                // Check if service is running
+                const serviceRunning = statusData.running || false;
+                
+                // Get plugin statuses
+                const pluginStatuses = {};
+                for (const instance of instances) {
+                    const status = statusData.pluginStatuses?.[instance.instanceId] || 
+                                   statusData.pluginStatuses?.[instance.pluginType] || {};
+                    pluginStatuses[instance.instanceId] = status;
+                }
+                
+                // Group instances by plugin type
+                const grouped = {};
+                for (const instance of instances) {
+                    if (!grouped[instance.pluginType]) {
+                        grouped[instance.pluginType] = [];
+                    }
+                    grouped[instance.pluginType].push(instance);
+                }
+                
                 let html = '';
-                for (const [pluginId, status] of Object.entries(data)) {
-                    const healthy = status.connected && status.authenticated && status.dataHealthy;
-                    const macAddresses = status.macAddresses && status.macAddresses.length > 0 
-                        ? status.macAddresses.join(', ') 
-                        : '';
-                    const showHelper = configChanged[pluginId] && !serviceRunning;
-                    
-                    // Build configuration field lines with edit buttons
-                    let configLines = [];
-                    const editDisabled = serviceRunning ? 'disabled' : '';
-                    
-                    // MAC Address field (not shown for BLE scanner)
-                    if (pluginId !== 'blescanner') {
-                        configLines.push(buildEditableField(pluginId, 'macAddress', 'MAC Address', macAddresses, editDisabled, false));
-                    }
-                    
-                    // Build status line - show authenticated only for plugins that actually authenticate
-                    const showAuth = pluginId !== 'gopower' && pluginId !== 'blescanner'; // GoPower and BLE Scanner don't have separate auth
-                    const showHealthIndicators = pluginId !== 'blescanner'; // BLE Scanner doesn't have health indicators
-                    
-                    // Add plugin-specific fields
-                    if (pluginId === 'onecontrol') {
-                        configLines.push(buildEditableField(pluginId, 'gatewayPin', 'Gateway PIN', status.gatewayPin || '', editDisabled, true));
-                    } else if (pluginId === 'easytouch') {
-                        configLines.push(buildEditableField(pluginId, 'password', 'Password', status.password || '', editDisabled, true));
-                    }
+                
+                // Get saved plugin order from localStorage (or use default alphabetical)
+                const savedOrder = JSON.parse(localStorage.getItem('pluginOrder') || '[]');
+                const pluginTypes = Object.keys(grouped);
+                
+                // Sort by saved order, then alphabetically for new plugins
+                const sortedTypes = pluginTypes.sort((a, b) => {
+                    const aIndex = savedOrder.indexOf(a);
+                    const bIndex = savedOrder.indexOf(b);
+                    if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
+                    if (aIndex !== -1) return -1;
+                    if (bIndex !== -1) return 1;
+                    return a.localeCompare(b);
+                });
+                
+                // Render each plugin type section
+                for (const pluginType of sortedTypes) {
+                    const typeInstances = grouped[pluginType];
+                    const typeName = PLUGIN_TYPE_NAMES[pluginType] || pluginType;
                     
                     html += ${'`'}
-                        <div class="plugin-item" style="position: relative;">
-                            <button class="remove-btn" onclick="showRemoveDialog('${'$'}{pluginId}')" ${'$'}{serviceRunning ? 'disabled' : ''}>×</button>
-                            <div class="plugin-name">${'$'}{pluginId}${'$'}{showHelper ? '<span class="helper-text">Changes will take effect upon restarting service</span>' : ''}</div>
-                            <div class="plugin-status">
-                                ${'$'}{showHealthIndicators ? ${'`'}<div class="plugin-status-line">
-                                    Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
-                                    Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span>${'$'}{showAuth ? ' | Authenticated: <span class="' + (status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy') + '">' + (status.authenticated ? 'Yes' : 'No') + '</span>' : ''} | 
-                                    Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
-                                </div>${'`'} : ''}
-                                ${'$'}{configLines.join('')}
+                        <div class="plugin-type-section" draggable="true" data-plugin-type="${'$'}{pluginType}">
+                            <div class="plugin-type-header">
+                                <span class="plugin-type-title">⋮⋮ ${'$'}{typeName}</span>
                             </div>
-                        </div>
                     ${'`'};
+                    
+                    // Render each instance
+                    for (const instance of typeInstances) {
+                        const status = pluginStatuses[instance.instanceId] || {};
+                        const connected = status.connected || false;
+                        const authenticated = status.authenticated || false;
+                        const dataHealthy = status.dataHealthy || false;
+                        
+                        // If service is stopped, all instances are unhealthy
+                        const healthy = serviceRunning ? (connected && authenticated && dataHealthy) : false;
+                        
+                        const healthClass = healthy ? 'instance-healthy' : 'instance-unhealthy';
+                        const displayName = instance.displayName || instance.instanceId;
+                        
+                        // Get plugin-specific config
+                        let configDetails = '';
+                        if (pluginType === 'onecontrol') {
+                            const pin = instance.config?.gateway_pin || 'Not set';
+                            configDetails = ${'`'}<div class="instance-detail-line">PIN: ${'$'}{pin}</div>${'`'};
+                        } else if (pluginType === 'easytouch') {
+                            const hasPassword = instance.config?.password ? 'Set' : 'Not set';
+                            configDetails = ${'`'}<div class="instance-detail-line">Password: ${'$'}{hasPassword}</div>${'`'};
+                        }
+                        
+                        html += ${'`'}
+                            <div class="instance-card ${'$'}{healthClass}">
+                                <div class="instance-header">
+                                    <div>
+                                        <span class="instance-name">${'$'}{displayName}</span>
+                                    </div>
+                                    <div class="instance-actions">
+                                        <button class="instance-edit-btn" onclick="showEditInstanceDialog('${'$'}{instance.instanceId}')" ${'$'}{serviceRunning ? 'disabled' : ''}>
+                                            Edit
+                                        </button>
+                                        <button class="instance-remove-btn" onclick="showRemoveInstanceDialog('${'$'}{instance.instanceId}', '${'$'}{displayName}')" ${'$'}{serviceRunning ? 'disabled' : ''}>
+                                            Remove
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="instance-details">
+                                    <div class="instance-detail-line">ID: ${'$'}{instance.instanceId}</div>
+                                    ${'$'}{pluginType !== 'blescanner' ? `<div class="instance-detail-line">MAC: ${'$'}{instance.deviceMac}</div>` : ''}
+                                    ${'$'}{configDetails}
+                                    ${'$'}{pluginType !== 'blescanner' ? `<div class="instance-detail-line">
+                                        Connected: <span class="${'$'}{connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{connected ? 'Yes' : 'No'}</span>
+                                        | Authenticated: <span class="${'$'}{authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{authenticated ? 'Yes' : 'No'}</span>
+                                        | Data: <span class="${'$'}{dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{dataHealthy ? 'Healthy' : 'Unhealthy'}</span>
+                                    </div>` : ''}
+                                </div>
+                            </div>
+                        ${'`'};
+                    }
+                    
+                    html += '</div>';
                 }
-                document.getElementById('plugin-status').innerHTML = html || '<div>No plugins loaded</div>';
+                
+                if (html === '') {
+                    html = '<div style="padding: 20px; text-align: center; color: #666;">No plugin instances configured.<br><br><button class="add-instance-btn" onclick="showAddInstanceDialog()" ' + (serviceRunning ? 'disabled' : '') + '>Add First Instance</button></div>';
+                }
+                
+                document.getElementById('plugin-status').innerHTML = html;
+                
+                // Setup drag-and-drop for plugin sections
+                setupDragAndDrop();
             } catch (error) {
+                console.error('Failed to load instances:', error);
                 document.getElementById('plugin-status').innerHTML = 
-                    '<div style="color: #f44336;">Failed to load plugin status</div>';
+                    '<div style="color: #f44336;">Failed to load plugin instances. Ensure the app and web service are running.</div>';
+            }
+        }
+        
+        function setupDragAndDrop() {
+            const sections = document.querySelectorAll('.plugin-type-section');
+            let draggedElement = null;
+            
+            sections.forEach(section => {
+                section.addEventListener('dragstart', (e) => {
+                    draggedElement = section;
+                    section.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                
+                section.addEventListener('dragend', (e) => {
+                    section.classList.remove('dragging');
+                    sections.forEach(s => s.classList.remove('drag-over'));
+                    
+                    // Save new order to localStorage
+                    const newOrder = Array.from(document.querySelectorAll('.plugin-type-section'))
+                        .map(s => s.dataset.pluginType);
+                    localStorage.setItem('pluginOrder', JSON.stringify(newOrder));
+                });
+                
+                section.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    
+                    if (draggedElement && draggedElement !== section) {
+                        section.classList.add('drag-over');
+                        
+                        const container = section.parentNode;
+                        const afterElement = getDragAfterElement(container, e.clientY);
+                        
+                        if (afterElement == null) {
+                            container.appendChild(draggedElement);
+                        } else {
+                            container.insertBefore(draggedElement, afterElement);
+                        }
+                    }
+                });
+                
+                section.addEventListener('dragleave', (e) => {
+                    section.classList.remove('drag-over');
+                });
+                
+                section.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    section.classList.remove('drag-over');
+                });
+            });
+        }
+        
+        function getDragAfterElement(container, y) {
+            const draggableElements = [...container.querySelectorAll('.plugin-type-section:not(.dragging)')];
+            
+            return draggableElements.reduce((closest, child) => {
+                const box = child.getBoundingClientRect();
+                const offset = y - box.top - box.height / 2;
+                
+                if (offset < 0 && offset > closest.offset) {
+                    return { offset: offset, element: child };
+                } else {
+                    return closest;
+                }
+            }, { offset: Number.NEGATIVE_INFINITY }).element;
+        }
+
+        async function showAddInstanceDialog(pluginType = '') {
+            // Reset form
+            document.getElementById('new-plugin-type').value = pluginType;
+            document.getElementById('new-display-name').value = '';
+            document.getElementById('new-device-mac').value = '';
+            document.getElementById('multi-instance-warning').style.display = 'none';
+            updatePluginSpecificFields();
+            
+            // Fetch current instances to check which plugin types exist
+            try {
+                const response = await fetch('/api/instances');
+                const instances = await response.json();
+                const existingTypes = [...new Set(instances.map(i => i.pluginType))];
+                
+                // Update select options based on existing instances
+                const select = document.getElementById('new-plugin-type');
+                for (const option of select.options) {
+                    if (option.value) {
+                        const isMulti = option.getAttribute('data-multi') === 'true';
+                        const alreadyExists = existingTypes.includes(option.value);
+                        
+                        // Disable if it already exists and doesn't support multiple instances
+                        if (alreadyExists && !isMulti) {
+                            option.disabled = true;
+                            option.text = option.text.replace(' - Supports multiple', '') + ' (Already configured)';
+                        } else {
+                            option.disabled = false;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to load instances:', error);
+            }
+            
+            document.getElementById('addInstanceModal').style.display = 'block';
+        }
+
+        function closeAddInstanceDialog() {
+            document.getElementById('addInstanceModal').style.display = 'none';
+        }
+
+        async function confirmAddInstance() {
+            const pluginType = document.getElementById('new-plugin-type').value;
+            const displayName = document.getElementById('new-display-name').value.trim();
+            const deviceMac = document.getElementById('new-device-mac').value.trim().toUpperCase();
+            
+            if (!pluginType) {
+                alert('Please select a plugin type');
+                return;
+            }
+            
+            // Check if this plugin type already exists and doesn't support multiple instances
+            const response = await fetch('/api/instances');
+            const instances = await response.json();
+            const existingTypes = instances.map(i => i.pluginType);
+            const supportsMultiple = MULTI_INSTANCE_PLUGINS.includes(pluginType);
+            
+            if (existingTypes.includes(pluginType) && !supportsMultiple) {
+                alert('This plugin type already exists and does not support multiple instances. Please edit the existing instance instead.');
+                return;
+            }
+            
+            if (!displayName) {
+                alert('Please enter a display name');
+                return;
+            }
+            if (!deviceMac && pluginType !== 'blescanner') {
+                alert('Please enter a device MAC address');
+                return;
+            }
+            
+            // Collect plugin-specific config
+            const config = {};
+            if (pluginType === 'onecontrol') {
+                const pin = document.getElementById('new-gateway-pin')?.value.trim();
+                if (pin) config.gateway_pin = pin;
+            } else if (pluginType === 'easytouch') {
+                const password = document.getElementById('new-password')?.value.trim();
+                if (password) config.password = password;
+            }
+            
+            try {
+                const response = await fetch('/api/instances/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pluginType: pluginType,
+                        displayName: displayName,
+                        deviceMac: deviceMac || '',
+                        config: config
+                    })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    closeAddInstanceDialog();
+                    loadInstances();
+                } else {
+                    alert('Failed to add instance: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error adding instance: ' + error.message);
+            }
+        }
+
+        async function showEditInstanceDialog(instanceId) {
+            try {
+                const response = await fetch('/api/instances');
+                const instances = await response.json();
+                const instance = instances.find(i => i.instanceId === instanceId);
+                
+                if (!instance) {
+                    alert('Instance not found');
+                    return;
+                }
+                
+                document.getElementById('edit-instance-id').value = instanceId;
+                document.getElementById('edit-plugin-type').value = instance.pluginType;
+                document.getElementById('edit-display-name').value = instance.displayName || '';
+                document.getElementById('edit-device-mac').value = instance.deviceMac || '';
+                
+                // Hide MAC field for BLE Scanner
+                const macContainer = document.getElementById('edit-mac-container');
+                if (macContainer) {
+                    macContainer.style.display = (instance.pluginType === 'blescanner') ? 'none' : 'block';
+                }
+                
+                // Populate plugin-specific fields
+                updateEditPluginSpecificFields(instance.pluginType, instance.config);
+                
+                document.getElementById('editInstanceModal').style.display = 'block';
+            } catch (error) {
+                alert('Error loading instance: ' + error.message);
+            }
+        }
+
+        function closeEditInstanceDialog() {
+            document.getElementById('editInstanceModal').style.display = 'none';
+        }
+
+        async function confirmEditInstance() {
+            const instanceId = document.getElementById('edit-instance-id').value;
+            const pluginType = document.getElementById('edit-plugin-type').value;
+            const displayName = document.getElementById('edit-display-name').value.trim();
+            const deviceMac = document.getElementById('edit-device-mac').value.trim().toUpperCase();
+            
+            if (!displayName) {
+                alert('Please enter a display name');
+                return;
+            }
+            if (!deviceMac && pluginType !== 'blescanner') {
+                alert('Please enter a device MAC address');
+                return;
+            }
+            
+            // Collect plugin-specific config
+            const config = {};
+            const pinField = document.getElementById('edit-gateway-pin');
+            const passwordField = document.getElementById('edit-password');
+            
+            if (pinField) {
+                const pin = pinField.value.trim();
+                if (pin) config.gateway_pin = pin;
+            }
+            if (passwordField) {
+                const password = passwordField.value.trim();
+                if (password) config.password = password;
+            }
+            
+            try {
+                const response = await fetch('/api/instances/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        instanceId: instanceId,
+                        displayName: displayName,
+                        deviceMac: deviceMac,
+                        config: config
+                    })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    closeEditInstanceDialog();
+                    loadInstances();
+                } else {
+                    alert('Failed to update instance: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error updating instance: ' + error.message);
+            }
+        }
+
+        function showRemoveInstanceDialog(instanceId, displayName) {
+            instanceToRemove = instanceId;
+            document.getElementById('remove-message').textContent = 
+                ${'`'}Are you sure you want to remove "${'$'}{displayName}"?${'`'};
+            document.getElementById('confirmRemoveModal').style.display = 'block';
+        }
+
+        function closeRemoveDialog() {
+            instanceToRemove = null;
+            document.getElementById('confirmRemoveModal').style.display = 'none';
+        }
+
+        async function confirmRemove() {
+            if (!instanceToRemove) return;
+            
+            try {
+                const response = await fetch('/api/instances/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ instanceId: instanceToRemove })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    closeRemoveDialog();
+                    loadInstances();
+                } else {
+                    alert('Failed to remove instance: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error removing instance: ' + error.message);
+            }
+        }
+
+        // Update plugin-specific fields in add dialog
+        document.getElementById('new-plugin-type')?.addEventListener('change', updatePluginSpecificFields);
+        
+        function updatePluginSpecificFields() {
+            const pluginType = document.getElementById('new-plugin-type').value;
+            const container = document.getElementById('plugin-specific-fields');
+            const macContainer = document.getElementById('new-mac-container');
+            
+            if (!container) return;
+            
+            // Hide MAC address field for BLE Scanner
+            if (macContainer) {
+                macContainer.style.display = (pluginType === 'blescanner') ? 'none' : 'block';
+            }
+            
+            if (pluginType === 'onecontrol') {
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Gateway PIN:</label>
+                        <input type="text" id="new-gateway-pin" placeholder="e.g., 1234" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else if (pluginType === 'easytouch') {
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
+                        <input type="password" id="new-password" placeholder="Device password" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else {
+                container.innerHTML = '';
+            }
+        }
+
+        function updateEditPluginSpecificFields(pluginType, config) {
+            const container = document.getElementById('edit-plugin-specific-fields');
+            
+            if (!container) return;
+            
+            if (pluginType === 'onecontrol') {
+                const pin = config?.gateway_pin || '';
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Gateway PIN:</label>
+                        <input type="text" id="edit-gateway-pin" value="${'$'}{pin}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else if (pluginType === 'easytouch') {
+                const password = config?.password || '';
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
+                        <input type="password" id="edit-password" value="${'$'}{password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else {
+                container.innerHTML = '';
             }
         }
 
         function buildEditableField(pluginId, fieldName, label, value, editDisabled, isSecret) {
-            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
+            const fieldId = ${'`'}${'$'}{pluginId}_${'$'}{fieldName}${'`'};
             const displayValue = value || 'None';
             const maskedValue = isSecret && value ? '•'.repeat(value.length) : displayValue;
             
@@ -601,20 +1273,19 @@ class WebServerManager(
         }
 
         function editField(pluginId, fieldName, isSecret) {
-            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
-            editingFields[fieldId] = true; // Track that this field is being edited
-            document.getElementById(`${'$'}{fieldId}_display`).style.display = 'none';
-            document.getElementById(`${'$'}{fieldId}_input`).style.display = 'inline-block';
-            document.getElementById(`${'$'}{fieldId}_edit`).style.display = 'none';
-            document.getElementById(`${'$'}{fieldId}_save`).style.display = 'inline-block';
+            const fieldId = ${'`'}${'$'}{pluginId}_${'$'}{fieldName}${'`'};
+            editingFields[fieldId] = true;
+            document.getElementById(${'`'}${'$'}{fieldId}_display${'`'}).style.display = 'none';
+            document.getElementById(${'`'}${'$'}{fieldId}_input${'`'}).style.display = 'inline-block';
+            document.getElementById(${'`'}${'$'}{fieldId}_edit${'`'}).style.display = 'none';
+            document.getElementById(${'`'}${'$'}{fieldId}_save${'`'}).style.display = 'inline-block';
         }
 
         async function saveField(pluginId, fieldName) {
-            const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
-            const value = document.getElementById(`${'$'}{fieldId}_input`).value;
+            const fieldId = ${'`'}${'$'}{pluginId}_${'$'}{fieldName}${'`'};
+            const value = document.getElementById(${'`'}${'$'}{fieldId}_input${'`'}).value;
             
             try {
-                // Determine which API endpoint to use
                 const endpoint = pluginId === 'mqtt' ? '/api/config/mqtt' : '/api/config/plugin';
                 const response = await fetch(endpoint, {
                     method: 'POST',
@@ -628,12 +1299,11 @@ class WebServerManager(
                 const result = await response.json();
                 if (result.success) {
                     configChanged[pluginId] = true;
-                    delete editingFields[fieldId]; // Clear edit state
-                    // Reload appropriate section based on what was edited
+                    delete editingFields[fieldId];
                     if (pluginId === 'mqtt') {
-                        loadConfig(); // Reload MQTT config section
+                        loadConfig();
                     } else {
-                        loadPlugins(); // Reload plugin section
+                        loadInstances();
                     }
                 } else {
                     alert('Failed to save: ' + (result.error || 'Unknown error'));
@@ -677,103 +1347,15 @@ class WebServerManager(
             window.open('/api/logs/ble', '_blank');
         }
 
-        // Plugin add/remove functions
-        let pluginToRemove = null;
-        let enabledPlugins = [];
-
-        async function showAddPluginDialog() {
-            // Fetch current plugins to disable already-added ones
-            try {
-                const response = await fetch('/api/plugins');
-                const data = await response.json();
-                enabledPlugins = Object.keys(data);
-                
-                // Update plugin options
-                ['onecontrol', 'easytouch', 'gopower', 'blescanner'].forEach(pluginId => {
-                    const option = document.getElementById(`add-${'$'}{pluginId}`);
-                    if (enabledPlugins.includes(pluginId)) {
-                        option.classList.add('disabled');
-                        option.onclick = null;
-                    } else {
-                        option.classList.remove('disabled');
-                        option.onclick = () => selectPluginToAdd(pluginId);
-                    }
-                });
-                
-                document.getElementById('addPluginModal').style.display = 'block';
-            } catch (error) {
-                alert('Failed to load plugin list: ' + error.message);
-            }
-        }
-
-        function closeAddPluginDialog() {
-            document.getElementById('addPluginModal').style.display = 'none';
-        }
-
-        async function selectPluginToAdd(pluginId) {
-            if (enabledPlugins.includes(pluginId)) {
-                return; // Already enabled
-            }
-            
-            try {
-                const response = await fetch('/api/plugins/add', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plugin: pluginId })
-                });
-                const result = await response.json();
-                if (result.success) {
-                    closeAddPluginDialog();
-                    loadPlugins();
-                    loadConfig();
-                } else {
-                    alert('Failed to add plugin: ' + (result.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error adding plugin: ' + error.message);
-            }
-        }
-
-        function showRemoveDialog(pluginId) {
-            pluginToRemove = pluginId;
-            document.getElementById('remove-message').textContent = 
-                `Are you sure you want to remove the ${'$'}{pluginId} plugin?`;
-            document.getElementById('confirmRemoveModal').style.display = 'block';
-        }
-
-        function closeRemoveDialog() {
-            pluginToRemove = null;
-            document.getElementById('confirmRemoveModal').style.display = 'none';
-        }
-
-        async function confirmRemove() {
-            if (!pluginToRemove) return;
-            
-            try {
-                const response = await fetch('/api/plugins/remove', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plugin: pluginToRemove })
-                });
-                const result = await response.json();
-                if (result.success) {
-                    closeRemoveDialog();
-                    loadPlugins();
-                    loadConfig();
-                } else {
-                    alert('Failed to remove plugin: ' + (result.error || 'Unknown error'));
-                }
-            } catch (error) {
-                alert('Error removing plugin: ' + error.message);
-            }
-        }
-
         // Close modals when clicking outside
         window.onclick = function(event) {
-            const addModal = document.getElementById('addPluginModal');
+            const addModal = document.getElementById('addInstanceModal');
+            const editModal = document.getElementById('editInstanceModal');
             const removeModal = document.getElementById('confirmRemoveModal');
             if (event.target === addModal) {
-                closeAddPluginDialog();
+                closeAddInstanceDialog();
+            } else if (event.target === editModal) {
+                closeEditInstanceDialog();
             } else if (event.target === removeModal) {
                 closeRemoveDialog();
             }
@@ -789,14 +1371,13 @@ class WebServerManager(
                 const result = await response.json();
                 if (!result.success) {
                     alert('Failed to ' + (enable ? 'start' : 'stop') + ' service: ' + (result.error || 'Unknown error'));
-                    loadStatus(); // Refresh to show actual state
+                    loadStatus();
                 } else if (enable) {
-                    // Clear config changed flags when service starts
                     configChanged = {};
                 }
             } catch (error) {
                 alert('Error controlling service: ' + error.message);
-                loadStatus(); // Refresh to show actual state
+                loadStatus();
             }
         }
 
@@ -810,16 +1391,55 @@ class WebServerManager(
                 const result = await response.json();
                 if (!result.success) {
                     alert('Failed to ' + (enable ? 'connect' : 'disconnect') + ' MQTT: ' + (result.error || 'Unknown error'));
-                    loadStatus(); // Refresh to show actual state
-                    loadConfig(); // Update edit button states
+                    loadStatus();
+                    loadConfig();
                 } else {
-                    loadConfig(); // Update edit button states
+                    loadConfig();
                 }
             } catch (error) {
                 alert('Error controlling MQTT: ' + error.message);
-                loadStatus(); // Refresh to show actual state
-                loadConfig(); // Update edit button states
+                loadStatus();
+                loadConfig();
             }
+        }
+        
+        // Android TV Power Fix section toggle
+        function toggleTvFixSection() {
+            const content = document.getElementById('tv-fix-content');
+            const toggle = document.getElementById('tv-fix-toggle');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▼';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▶';
+            }
+        }
+        
+        // Copy text to clipboard
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                // Show brief success feedback
+                const event = new Event('copied');
+                event.text = text;
+                window.dispatchEvent(event);
+                
+                // Simple visual feedback
+                const allButtons = document.querySelectorAll('button');
+                allButtons.forEach(btn => {
+                    if (btn.textContent === 'Copy' && btn.onclick && btn.onclick.toString().includes(text.substring(0, 20))) {
+                        const originalText = btn.textContent;
+                        btn.textContent = 'Copied!';
+                        btn.style.background = '#4CAF50';
+                        setTimeout(() => {
+                            btn.textContent = originalText;
+                            btn.style.background = '#007acc';
+                        }, 2000);
+                    }
+                });
+            }).catch(err => {
+                alert('Failed to copy: ' + err);
+            });
         }
     </script>
 </body>
@@ -837,6 +1457,18 @@ class WebServerManager(
             put("mqttEnabled", mqttEnabled) // Setting, not connection status
             put("mqttConnected", BaseBleService.mqttConnected.value) // Actual connection status
             put("bleTraceActive", service?.isBleTraceActive() ?: false)
+            
+            // Include plugin statuses for the UI
+            val statuses = BaseBleService.pluginStatuses.value
+            val statusesJson = JSONObject()
+            for ((pluginId, status) in statuses) {
+                statusesJson.put(pluginId, JSONObject().apply {
+                    put("connected", status.connected)
+                    put("authenticated", status.authenticated)
+                    put("dataHealthy", status.dataHealthy)
+                })
+            }
+            put("pluginStatuses", statusesJson)
         }
         return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
@@ -1353,10 +1985,9 @@ class WebServerManager(
     private fun serveInstances(): Response = runBlocking {
         return@runBlocking try {
             val allInstances = ServiceStateManager.getAllInstances(context)
-            val json = JSONObject()
-            val instancesByType = mutableMapOf<String, JSONArray>()
+            val jsonArray = JSONArray()
             
-            // Group instances by plugin type
+            // Build flat array of all instances
             for ((instanceId, instance) in allInstances) {
                 val status = BaseBleService.pluginStatuses.value[instanceId] 
                     ?: BaseBleService.Companion.PluginStatus(instanceId, false, false, false)
@@ -1373,15 +2004,10 @@ class WebServerManager(
                     put("config", JSONObject(instance.config))
                 }
                 
-                instancesByType.getOrPut(instance.pluginType) { JSONArray() }.put(instanceJson)
+                jsonArray.put(instanceJson)
             }
             
-            // Build response object
-            for ((pluginType, instances) in instancesByType) {
-                json.put(pluginType, instances)
-            }
-            
-            newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+            newFixedLengthResponse(Response.Status.OK, "application/json", jsonArray.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Error serving instances", e)
             newFixedLengthResponse(
@@ -1428,7 +2054,7 @@ class WebServerManager(
             }
 
             // Validate plugin type
-            val validTypes = setOf("onecontrol", "easytouch", "gopower")
+            val validTypes = setOf("onecontrol", "easytouch", "gopower", "blescanner")
             if (!validTypes.contains(pluginType)) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
@@ -1531,6 +2157,7 @@ class WebServerManager(
             val jsonObject = JSONObject(body)
             val instanceId = jsonObject.getString("instanceId")
             val displayName = jsonObject.optString("displayName", null)
+            val deviceMac = jsonObject.optString("deviceMac", null)
             val config = jsonObject.optJSONObject("config")?.let { 
                 val map = mutableMapOf<String, String>()
                 it.keys().forEach { key -> map[key] = it.getString(key) }
@@ -1555,20 +2182,34 @@ class WebServerManager(
                 """{"success":false,"error":"Instance not found: $instanceId"}"""
             )
 
+            // Check if MAC address changed
+            val newMac = deviceMac ?: existingInstance.deviceMac
+            val macChanged = newMac != existingInstance.deviceMac
+            
+            // If MAC changed, generate new instanceId and remove old instance
+            val newInstanceId = if (macChanged) {
+                ServiceStateManager.removeInstance(context, instanceId)
+                PluginInstance.createInstanceId(existingInstance.pluginType, newMac)
+            } else {
+                instanceId
+            }
+
             // Create updated instance
             val updatedInstance = existingInstance.copy(
+                instanceId = newInstanceId,
                 displayName = displayName ?: existingInstance.displayName,
+                deviceMac = newMac,
                 config = config ?: existingInstance.config
             )
 
             // Save updated instance
             ServiceStateManager.saveInstance(context, updatedInstance)
-            Log.i(TAG, "Instance updated via web UI: $instanceId")
+            Log.i(TAG, "Instance updated via web UI: $instanceId -> $newInstanceId")
             
             newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
-                """{"success":true}"""
+                """{"success":true,"instanceId":"$newInstanceId"}"""
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error updating instance", e)
