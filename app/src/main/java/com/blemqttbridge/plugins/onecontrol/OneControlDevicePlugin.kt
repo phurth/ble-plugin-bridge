@@ -70,7 +70,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     override val pluginId: String = PLUGIN_ID
     override var instanceId: String = PLUGIN_ID  // Same as pluginId by default
-    override val supportsMultipleInstances: Boolean = true
+    override val supportsMultipleInstances: Boolean = false
     override val displayName: String = "OneControl Gateway (v2)"
     
     /**
@@ -104,19 +104,6 @@ class OneControlDevicePlugin : BleDevicePlugin {
         } catch (e: Exception) {
             "unknown"
         }
-    
-    override fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
-        this.instanceId = instanceId
-        
-        // Extract device-specific configuration
-        gatewayMac = normalizeMac(config["gateway_mac"]) ?: gatewayMac
-        gatewayPin = config["gateway_pin"] ?: gatewayPin
-        // gatewayCypher is hardcoded constant - same for all OneControl gateways
-        
-        Log.i(TAG, "Initializing OneControl instance: $instanceId")
-        Log.i(TAG, "  Gateway MAC: $gatewayMac")
-        Log.i(TAG, "  PIN: ${gatewayPin.take(2)}****")
-    }
     
     override fun initialize(context: Context?, config: PluginConfig) {
         Log.i(TAG, "Initializing OneControl Device Plugin v$PLUGIN_VERSION")
