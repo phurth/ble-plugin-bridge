@@ -195,7 +195,6 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             continuation.resumeWithException(e)
         }
     }
-    }
     
     override suspend fun publishState(topic: String, payload: String, retained: Boolean) {
         val fullTopic = "$_topicPrefix/$topic"
