@@ -123,7 +123,7 @@ class PluginRegistryTest {
                 override fun getDeviceId(device: BluetoothDevice) = device.address
                 override suspend fun onDeviceConnected(device: BluetoothDevice) = Result.success(Unit)
                 override suspend fun onDeviceDisconnected(device: BluetoothDevice) {}
-                override suspend fun onCharacteristicNotification(device: BluetoothDevice, characteristicUuid: String, value: ByteArray) = emptyMap<String, String>()
+                override fun onCharacteristicNotification(device: BluetoothDevice, characteristicUuid: String, value: ByteArray) = emptyMap<String, String>()
                 override suspend fun handleCommand(device: BluetoothDevice, commandTopic: String, payload: String) = Result.success(Unit)
                 override suspend fun getDiscoveryPayloads(device: BluetoothDevice) = emptyMap<String, String>()
                 override suspend fun cleanup() {}
@@ -179,7 +179,7 @@ class PluginRegistryTest {
             override fun getDeviceId(device: BluetoothDevice) = device.address
             override suspend fun onDeviceConnected(device: BluetoothDevice) = Result.success(Unit)
             override suspend fun onDeviceDisconnected(device: BluetoothDevice) {}
-            override suspend fun onCharacteristicNotification(device: BluetoothDevice, characteristicUuid: String, value: ByteArray) = emptyMap<String, String>()
+            override fun onCharacteristicNotification(device: BluetoothDevice, characteristicUuid: String, value: ByteArray) = emptyMap<String, String>()
             override suspend fun handleCommand(device: BluetoothDevice, commandTopic: String, payload: String) = Result.success(Unit)
             override suspend fun getDiscoveryPayloads(device: BluetoothDevice) = emptyMap<String, String>()
             override suspend fun cleanup() {}
@@ -191,6 +191,7 @@ class PluginRegistryTest {
         return object : OutputPluginInterface {
             override fun getOutputId() = "test_output"
             override fun getOutputName() = "Test Output"
+            override fun getTopicPrefix() = "test"
             override suspend fun initialize(config: Map<String, String>) = Result.success(Unit)
             override suspend fun publishState(topic: String, payload: String, retained: Boolean) {}
             override suspend fun publishDiscovery(topic: String, payload: String) {}
@@ -199,6 +200,7 @@ class PluginRegistryTest {
             override fun disconnect() {}
             override fun isConnected() = false
             override fun getConnectionStatus() = "Disconnected"
+            override fun setConnectionStatusListener(listener: OutputPluginInterface.ConnectionStatusListener?) {}
         }
     }
 }

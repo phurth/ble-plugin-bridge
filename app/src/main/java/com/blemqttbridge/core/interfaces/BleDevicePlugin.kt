@@ -21,10 +21,30 @@ interface BleDevicePlugin {
     // ===== IDENTIFICATION =====
     
     /**
-     * Unique plugin identifier (e.g., "onecontrol", "victron").
-     * Used for routing and configuration.
+     * Unique plugin type identifier (e.g., "onecontrol", "victron").
+     * Used for plugin factory and configuration lookup.
+     * This is stable across instances of the same plugin type.
      */
     val pluginId: String
+    
+    /**
+     * Unique instance identifier for this plugin instance.
+     * For multi-instance plugins, this distinguishes between multiple devices.
+     * Format: "{pluginType}_{macSuffix}" e.g., "easytouch_b1241e"
+     * 
+     * For single-instance plugins, this is the same as pluginId.
+     * 
+     * v2.6.0+: Can be different from pluginId for multi-instance scenarios
+     */
+    var instanceId: String
+    
+    /**
+     * Whether this plugin supports multiple simultaneous instances.
+     * If true, multiple devices of this type can be managed independently.
+     * Default is false (backwards compatible with single-instance plugins).
+     */
+    val supportsMultipleInstances: Boolean
+        get() = false
     
     /**
      * Human-readable display name for this device type.
@@ -32,7 +52,7 @@ interface BleDevicePlugin {
      */
     val displayName: String
     
-    // ===== DEVICE MATCHING =====
+    // ===== DEVICE MATCHING ======
     
     /**
      * Check if this plugin can handle the given BLE device.
@@ -167,13 +187,32 @@ interface BleDevicePlugin {
     // ===== LIFECYCLE =====
     
     /**
+     * Initialize the plugin with instance-specific configuration.
+     * Called for multi-instance plugins to set up device-specific config.
+     * 
+     * v2.6.0+: New initialization path for multi-instance plugins.
+     * Plugins should extract all device-specific settings from the config map.
+     * 
+     * @param instanceId Unique identifier for this instance (e.g., "easytouch_b1241e")
+     * @param config Map of configuration parameters (e.g., MAC, password, PIN)
+     */
+    fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
+        // Default implementation: set instanceId and convert map to PluginConfig
+        this.instanceId = instanceId
+        initialize(null, PluginConfig(config))
+    }
+    
+    /**
      * Initialize the plugin.
      * Called once when the plugin is loaded at service startup.
+     * 
+     * Legacy path: For backwards compatibility with single-instance plugins.
+     * Multi-instance plugins should override initializeWithConfig() instead.
      * 
      * @param context Android application context
      * @param config Plugin-specific configuration
      */
-    fun initialize(context: Context, config: PluginConfig)
+    fun initialize(context: Context?, config: PluginConfig)
     
     /**
      * Called when a device disconnects.

@@ -35,9 +35,11 @@ class GoPowerDevicePlugin : BleDevicePlugin {
     }
     
     override val pluginId: String = PLUGIN_ID
+    override var instanceId: String = PLUGIN_ID  // Same as pluginId by default
+    override val supportsMultipleInstances: Boolean = false
     override val displayName: String = "GoPower Solar Controller"
     
-    private lateinit var context: Context
+    private var context: Context? = null
     private var config: PluginConfig? = null
     
     // Configuration from settings
@@ -49,7 +51,7 @@ class GoPowerDevicePlugin : BleDevicePlugin {
     // Current callback instance for command handling
     private var currentCallback: GoPowerGattCallback? = null
     
-    override fun initialize(context: Context, config: PluginConfig) {
+    override fun initialize(context: Context?, config: PluginConfig) {
         Log.i(TAG, "Initializing GoPower Device Plugin v$PLUGIN_VERSION")
         this.context = context
         this.config = config
@@ -92,7 +94,7 @@ class GoPowerDevicePlugin : BleDevicePlugin {
         onDisconnect: (BluetoothDevice, Int) -> Unit
     ): BluetoothGattCallback {
         Log.i(TAG, "Creating GATT callback for ${device.address}")
-        val callback = GoPowerGattCallback(device, context, mqttPublisher, onDisconnect)
+        val callback = GoPowerGattCallback(device, context, mqttPublisher, instanceId, onDisconnect)
         Log.i(TAG, "Created callback with hashCode=${callback.hashCode()}")
         // Keep strong reference to prevent GC
         gattCallback = callback
@@ -151,6 +153,7 @@ class GoPowerGattCallback(
     private val device: BluetoothDevice,
     private val context: Context,
     private val mqttPublisher: MqttPublisher,
+    private val instanceId: String,
     private val onDisconnect: (BluetoothDevice, Int) -> Unit
 ) : BluetoothGattCallback() {
     
@@ -863,7 +866,7 @@ class GoPowerGattCallback(
         
         // Update UI status for this plugin (no auth for GoPower)
         mqttPublisher.updatePluginStatus(
-            pluginId = "gopower",
+            pluginId = instanceId,
             connected = isConnected,
             authenticated = isConnected,  // No separate auth for GoPower
             dataHealthy = dataHealthy

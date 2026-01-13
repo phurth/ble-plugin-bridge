@@ -47,6 +47,9 @@ class AppSettings(private val context: Context) {
         // Web Server Settings
         val WEB_SERVER_ENABLED = booleanPreferencesKey("web_server_enabled")
         val WEB_SERVER_PORT = intPreferencesKey("web_server_port")
+        val WEB_AUTH_ENABLED = booleanPreferencesKey("web_auth_enabled")
+        val WEB_AUTH_USERNAME = stringPreferencesKey("web_auth_username")
+        val WEB_AUTH_PASSWORD = stringPreferencesKey("web_auth_password")
         
         // Default values
         const val DEFAULT_MQTT_HOST = ""
@@ -91,6 +94,9 @@ class AppSettings(private val context: Context) {
     // Web Server Flows
     val webServerEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_SERVER_ENABLED] ?: false }
     val webServerPort: Flow<Int> = context.dataStore.data.map { it[WEB_SERVER_PORT] ?: DEFAULT_WEB_SERVER_PORT }
+    val webAuthEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_AUTH_ENABLED] ?: false }
+    val webAuthUsername: Flow<String> = context.dataStore.data.map { it[WEB_AUTH_USERNAME] ?: "" }
+    val webAuthPassword: Flow<String> = context.dataStore.data.map { it[WEB_AUTH_PASSWORD] ?: "" }
     
     // Update functions
     suspend fun setMqttEnabled(enabled: Boolean) {
@@ -167,5 +173,17 @@ class AppSettings(private val context: Context) {
     
     suspend fun setBleScannerEnabled(enabled: Boolean) {
         context.dataStore.edit { it[BLE_SCANNER_ENABLED] = enabled }
+    }
+    
+    suspend fun setWebAuthEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[WEB_AUTH_ENABLED] = enabled }
+    }
+    
+    suspend fun setWebAuthUsername(username: String) {
+        context.dataStore.edit { it[WEB_AUTH_USERNAME] = username }
+    }
+    
+    suspend fun setWebAuthPassword(password: String) {
+        context.dataStore.edit { it[WEB_AUTH_PASSWORD] = password }
     }
 }

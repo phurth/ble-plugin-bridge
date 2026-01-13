@@ -1,43 +1,36 @@
 package com.blemqttbridge.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
-import com.blemqttbridge.core.BaseBleService
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.ui.components.ExpandableSection
 import com.blemqttbridge.ui.viewmodel.SettingsViewModel
 import com.blemqttbridge.utils.BatteryOptimizationHelper
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,76 +40,35 @@ fun SettingsScreen(
 ) {
     val scrollState = rememberScrollState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     
-    // Collect all state flows
+    // Collect state flows
     val mqttEnabled by viewModel.mqttEnabled.collectAsState()
-    
-    // Collect MQTT settings as state flows (for observing changes)
-    val mqttBrokerHostFlow by viewModel.mqttBrokerHost.collectAsState()
-    val mqttBrokerPortFlow by viewModel.mqttBrokerPort.collectAsState()
-    val mqttUsernameFlow by viewModel.mqttUsername.collectAsState()
-    val mqttPasswordFlow by viewModel.mqttPassword.collectAsState()
-    val mqttTopicPrefixFlow by viewModel.mqttTopicPrefix.collectAsState()
-    
-    // Use local mutable state for text fields to prevent cursor jumping
-    var mqttBrokerHost by remember { mutableStateOf(viewModel.mqttBrokerHost.value) }
-    var mqttBrokerPort by remember { mutableStateOf(viewModel.mqttBrokerPort.value.toString()) }
-    var mqttUsername by remember { mutableStateOf(viewModel.mqttUsername.value) }
-    var mqttPassword by remember { mutableStateOf(viewModel.mqttPassword.value) }
-    var mqttTopicPrefix by remember { mutableStateOf(viewModel.mqttTopicPrefix.value) }
-    
     val serviceEnabled by viewModel.serviceEnabled.collectAsState()
+    val webServerPort by viewModel.webServerPort.collectAsState()
+    val webAuthEnabled by viewModel.webAuthEnabled.collectAsState()
+    val webAuthUsername by viewModel.webAuthUsername.collectAsState()
+    val webAuthPassword by viewModel.webAuthPassword.collectAsState()
     
-    val oneControlEnabled by viewModel.oneControlEnabled.collectAsState()
-    val oneControlGatewayMacFlow by viewModel.oneControlGatewayMac.collectAsState()
-    val oneControlGatewayPinFlow by viewModel.oneControlGatewayPin.collectAsState()
-
-    var oneControlGatewayMac by remember { mutableStateOf("") }
-    var oneControlGatewayPin by remember { mutableStateOf("") }
-    
-    val easyTouchEnabled by viewModel.easyTouchEnabled.collectAsState()
-    val easyTouchThermostatMacFlow by viewModel.easyTouchThermostatMac.collectAsState()
-    val easyTouchThermostatPasswordFlow by viewModel.easyTouchThermostatPassword.collectAsState()
-    var easyTouchThermostatMac by remember { mutableStateOf("") }
-    var easyTouchThermostatPassword by remember { mutableStateOf("") }
-    
-    val goPowerEnabled by viewModel.goPowerEnabled.collectAsState()
-    val goPowerControllerMacFlow by viewModel.goPowerControllerMac.collectAsState()
-    var goPowerControllerMac by remember { mutableStateOf("") }
-    
-    // Sync flow values to local state when they change (fixes empty fields issue)
-    LaunchedEffect(mqttBrokerHostFlow) { mqttBrokerHost = mqttBrokerHostFlow }
-    LaunchedEffect(mqttBrokerPortFlow) { mqttBrokerPort = mqttBrokerPortFlow.toString() }
-    LaunchedEffect(mqttUsernameFlow) { mqttUsername = mqttUsernameFlow }
-    LaunchedEffect(mqttPasswordFlow) { mqttPassword = mqttPasswordFlow }
-    LaunchedEffect(mqttTopicPrefixFlow) { mqttTopicPrefix = mqttTopicPrefixFlow }
-    
-    LaunchedEffect(oneControlGatewayMacFlow) { oneControlGatewayMac = oneControlGatewayMacFlow }
-    LaunchedEffect(oneControlGatewayPinFlow) { oneControlGatewayPin = oneControlGatewayPinFlow }
-
-    LaunchedEffect(easyTouchThermostatMacFlow) { easyTouchThermostatMac = easyTouchThermostatMacFlow }
-    LaunchedEffect(easyTouchThermostatPasswordFlow) { easyTouchThermostatPassword = easyTouchThermostatPasswordFlow }
-    LaunchedEffect(goPowerControllerMacFlow) { goPowerControllerMac = goPowerControllerMacFlow }
-    
-    val bleScannerEnabled by viewModel.bleScannerEnabled.collectAsState()
-    
-    val mqttExpanded by viewModel.mqttExpanded.collectAsState()
-    val oneControlExpanded by viewModel.oneControlExpanded.collectAsState()
-    val easyTouchExpanded by viewModel.easyTouchExpanded.collectAsState()
-    val goPowerExpanded by viewModel.goPowerExpanded.collectAsState()
-    val bleScannerExpanded by viewModel.bleScannerExpanded.collectAsState()
-    val showPluginPicker by viewModel.showPluginPicker.collectAsState()
-    
-    // Status flows - per-plugin status map
-    val pluginStatuses by viewModel.pluginStatuses.collectAsState()
+    // MQTT status
     val mqttConnected by viewModel.mqttConnectedStatus.collectAsState()
+    val mqttBrokerHost by viewModel.mqttBrokerHost.collectAsState()
+    val mqttBrokerPort by viewModel.mqttBrokerPort.collectAsState()
     
-    // Helper function to get plugin status
-    fun getPluginStatus(pluginId: String): BaseBleService.Companion.PluginStatus? = pluginStatuses[pluginId]
+    // Plugin instances
+    val pluginStatuses by viewModel.pluginStatuses.collectAsState()
     
-    // Confirmation dialog state
-    var showRemoveConfirmation by remember { mutableStateOf(false) }
-    var pluginToRemove by remember { mutableStateOf<String?>(null) }
+    // Local state for text fields
+    var portText by remember { mutableStateOf(webServerPort.toString()) }
+    var portEditMode by remember { mutableStateOf(false) }
+    var authUsernameText by remember { mutableStateOf(webAuthUsername) }
+    var authPasswordText by remember { mutableStateOf(webAuthPassword) }
+    var showAuthPasswordHashDialog by remember { mutableStateOf(false) }
+    
+    // Sync port field when flow changes
+    LaunchedEffect(webServerPort) { portText = webServerPort.toString() }
+    LaunchedEffect(webAuthUsername) { authUsernameText = webAuthUsername }
+    LaunchedEffect(webAuthPassword) { authPasswordText = webAuthPassword }
     
     // Get app version
     val appVersion = remember {
@@ -124,6 +76,25 @@ fun SettingsScreen(
             context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
         } catch (e: Exception) {
             "?"
+        }
+    }
+    
+    // Get device IP for web interface URL
+    val webInterfaceUrl by remember {
+        derivedStateOf {
+            val ip = try {
+                java.net.NetworkInterface.getNetworkInterfaces().toList()
+                    .flatMap { it.inetAddresses.toList() }
+                    .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                    ?.hostAddress
+            } catch (e: Exception) {
+                null
+            }
+            if (ip != null) {
+                "http://$ip:$webServerPort"
+            } else {
+                "http://[device-ip]:$webServerPort"
+            }
         }
     }
     
@@ -160,71 +131,260 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .verticalScroll(scrollState)
-                .padding(bottom = 4.dp)
+                .padding(bottom = 16.dp)
         ) {
-            // Bridge Service Section
-            SectionHeader("Bridge Service")
+            //============================================
+            // WEB INTERFACE SECTION (TOP)
+            //============================================
+            SectionHeader("Web Interface")
             
-            // Bridge Service Toggle
             ElevatedCard(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "BLE Service",
-                            style = MaterialTheme.typography.bodyMedium
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Web URL and Actions
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Configure the bridge by visiting this web page",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = webInterfaceUrl,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable {
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(webInterfaceUrl))
+                                    context.startActivity(intent)
+                                }
+                            )
+                        }
+                        IconButton(onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(webInterfaceUrl))
+                            context.startActivity(intent)
+                        }) {
+                            Icon(
+                                imageVector = Icons.Filled.OpenInBrowser,
+                                contentDescription = "Open in browser"
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // Port Configuration
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        OutlinedTextField(
+                            value = portText,
+                            onValueChange = { portText = it },
+                            label = { Text("Port") },
+                            supportingText = { Text(if (portEditMode) "Enter 1024-65535" else "Requires app restart to apply") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            readOnly = !portEditMode,
+                            modifier = Modifier.weight(1f)
                         )
-                        Text(
-                            text = if (serviceEnabled) "Running" else "Stopped",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (!portEditMode) {
+                            Button(
+                                onClick = { portEditMode = true },
+                                modifier = Modifier.padding(top = 8.dp)
+                            ) {
+                                Text("Edit")
+                            }
+                        } else {
+                            Column(modifier = Modifier.padding(top = 8.dp)) {
+                                Button(
+                                    onClick = {
+                                        portText.toIntOrNull()?.let { port ->
+                                            if (port in 1024..65535) {
+                                                scope.launch {
+                                                    viewModel.setWebServerPort(port)
+                                                    portEditMode = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text("Save")
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedButton(
+                                    onClick = {
+                                        portText = webServerPort.toString()
+                                        portEditMode = false
+                                    }
+                                ) {
+                                    Text("Cancel")
+                                }
+                            }
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    // HTTP Basic Authentication
+                    Text(
+                        text = "🔒 HTTP Basic Authentication",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Enable Authentication")
+                        Switch(
+                            checked = webAuthEnabled,
+                            onCheckedChange = { 
+                                scope.launch {
+                                    viewModel.setWebAuthEnabled(it)
+                                }
+                            }
                         )
                     }
-                    Switch(
-                        checked = serviceEnabled,
-                        onCheckedChange = { viewModel.setServiceEnabled(it) }
+                    
+                    if (webAuthEnabled) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        OutlinedTextField(
+                            value = authUsernameText,
+                            onValueChange = { authUsernameText = it },
+                            label = { Text("Username") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        OutlinedTextField(
+                            value = authPasswordText,
+                            onValueChange = { authPasswordText = it },
+                            label = { Text("Password") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    // Hash password before saving
+                                    val hashedPassword = hashPassword(authPasswordText)
+                                    viewModel.setWebAuthUsername(authUsernameText)
+                                    viewModel.setWebAuthPassword(hashedPassword)
+                                    showAuthPasswordHashDialog = true
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Save Credentials")
+                        }
+                        
+                        Text(
+                            text = "Applies to all endpoints when enabled",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                    
+                    Text(
+                        text = "Auto-starts with app",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
                     )
                 }
             }
             
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             
-            // Output Section
-            SectionHeader("Output")
+            //============================================
+            // BLE SERVICE SECTION
+            //============================================
+            SectionHeader("BLE Bridge Service")
             
-            // MQTT Card (with toggle and expandable settings)
             ElevatedCard(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                Column {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(6.dp),
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
                             Text(
-                                text = "MQTT",
+                                text = "Service Status",
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Text(
-                                text = if (mqttEnabled) "Enabled" else "Disabled",
+                                text = if (serviceEnabled) "� Running" else "⚫ Stopped",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                        Switch(
+                            checked = serviceEnabled,
+                            onCheckedChange = { viewModel.setServiceEnabled(it) }
+                        )
+                    }
+                    
+                    Text(
+                        text = "Auto-starts with app",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            //============================================
+            // MQTT SECTION (SIMPLIFIED)
+            //============================================
+            SectionHeader("MQTT Output Service")
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = if (mqttConnected) "● Connected" else "○ Disconnected",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (mqttConnected) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (mqttConnected && mqttBrokerHost.isNotEmpty()) {
+                                Text(
+                                    text = "$mqttBrokerHost:$mqttBrokerPort",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                         Switch(
                             checked = mqttEnabled,
@@ -232,706 +392,159 @@ fun SettingsScreen(
                         )
                     }
                     
-                    // MQTT Settings (always visible, locked when enabled)
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(12.dp))
                     
-                    // MQTT Status Indicator (only show when enabled)
-                    if (mqttEnabled) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            StatusIndicator(
-                                label = "Connection",
-                                isActive = mqttConnected
-                            )
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    }
+                    Text(
+                        text = "Configure MQTT settings in web interface",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     
-                    ExpandableSection(
-                        title = "Broker Settings",
-                        expanded = mqttExpanded,
-                        onToggle = { viewModel.toggleMqttExpanded() },
-                        modifier = Modifier.padding(top = 2.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = mqttBrokerHost,
-                            onValueChange = { 
-                                mqttBrokerHost = it
-                                viewModel.setMqttBrokerHost(it)
-                            },
-                            label = { Text("Host", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !mqttEnabled
-                        )
-                        
-                        OutlinedTextField(
-                            value = mqttBrokerPort,
-                            onValueChange = { 
-                                mqttBrokerPort = it
-                                it.toIntOrNull()?.let { port -> viewModel.setMqttBrokerPort(port) }
-                            },
-                            label = { Text("Port", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !mqttEnabled
-                        )
-                        
-                        OutlinedTextField(
-                            value = mqttUsername,
-                            onValueChange = { 
-                                mqttUsername = it
-                                viewModel.setMqttUsername(it)
-                            },
-                            label = { Text("Username", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !mqttEnabled
-                        )
-                        
-                        OutlinedTextField(
-                            value = mqttPassword,
-                            onValueChange = { 
-                                mqttPassword = it
-                                viewModel.setMqttPassword(it)
-                            },
-                            label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !mqttEnabled
-                        )
-                        
-                        OutlinedTextField(
-                            value = mqttTopicPrefix,
-                            onValueChange = { 
-                                mqttTopicPrefix = it
-                                viewModel.setMqttTopicPrefix(it)
-                            },
-                            label = { Text("Topic Prefix", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !mqttEnabled
-                        )
-                    }
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(4.dp))
-            
-            // Plugins Section
-            SectionHeader("Plugins")
-            
-            // Add Plugin Button (disabled when service is running)
-            OutlinedButton(
-                onClick = { viewModel.showPluginPicker() },
-                enabled = !serviceEnabled,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(32.dp)
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = "Add Plugin",
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = if (serviceEnabled) "Stop service to add plugins" else "Add Plugin",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            
-            // Plugin Picker Dialog
-            if (showPluginPicker) {
-                PluginPickerDialog(
-                    onDismiss = { viewModel.hidePluginPicker() },
-                    onPluginSelected = { viewModel.addPlugin(it) },
-                    enabledPlugins = listOf(
-                        if (oneControlEnabled) "onecontrol" else null,
-                        if (easyTouchEnabled) "easytouch" else null,
-                        if (goPowerEnabled) "gopower" else null,
-                        if (bleScannerEnabled) "ble_scanner" else null
-                    ).filterNotNull()
-                )
-            }
-            
-            // Remove Plugin Confirmation Dialog
-            if (showRemoveConfirmation && pluginToRemove != null) {
-                AlertDialog(
-                    onDismissRequest = { 
-                        showRemoveConfirmation = false
-                        pluginToRemove = null
-                    },
-                    title = { Text("Remove Plugin") },
-                    text = { 
-                        Text("Are you sure you want to remove this plugin?\n\nThe app will close to complete the removal.")
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                pluginToRemove?.let { viewModel.removePlugin(it) }
-                                showRemoveConfirmation = false
-                                pluginToRemove = null
-                            }
-                        ) {
-                            Text("Remove", color = MaterialTheme.colorScheme.error)
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                showRemoveConfirmation = false
-                                pluginToRemove = null
-                            }
-                        ) {
-                            Text("Cancel")
-                        }
-                    }
-                )
-            }
-            
-            // OneControl Plugin (only show if enabled)
-            if (oneControlEnabled) {
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "OneControl",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "LCI/Lippert RV Gateway",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = { 
-                                        pluginToRemove = "onecontrol"
-                                        showRemoveConfirmation = true
-                                    },
-                                    enabled = !serviceEnabled,
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove plugin",
-                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    
-                    // Status Indicators (always visible for OneControl) - per-plugin status
-                    Row(
+                    OutlinedButton(
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(webInterfaceUrl))
+                            context.startActivity(intent)
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly
+                            .padding(top = 8.dp)
                     ) {
-                        val oneControlStatus = getPluginStatus("onecontrol")
-                        StatusIndicator(
-                            label = "Connected",
-                            isActive = oneControlStatus?.connected == true
+                        Text("Open Web Interface")
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            //============================================
+            // PLUGIN INSTANCES SECTION
+            //============================================
+            SectionHeader("Plugin Instances")
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Load all instances and display them - reload when pluginStatuses changes
+                    val instances = remember(pluginStatuses) { ServiceStateManager.getAllInstances(context) }
+                    
+                    if (instances.isEmpty()) {
+                        Text(
+                            text = "No plugin instances configured",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        StatusIndicator(
-                            label = "Data",
-                            isActive = oneControlStatus?.dataHealthy == true
-                        )
-                        StatusIndicator(
-                            label = "Authenticated",
-                            isActive = oneControlStatus?.authenticated == true
-                        )
+                    } else {
+                        Column {
+                            instances.values.forEachIndexed { index, instance ->
+                                if (index > 0) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    HorizontalDivider()
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
+                                
+                                val status = pluginStatuses[instance.instanceId]
+                                val isHealthy = status?.let { 
+                                    it.connected && it.authenticated && it.dataHealthy 
+                                } ?: false
+                                
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            if (!isHealthy) {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(webInterfaceUrl))
+                                                context.startActivity(intent)
+                                            }
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (isHealthy) "🟢" else "🔴",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        modifier = Modifier.padding(end = 12.dp)
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = instance.displayName ?: instance.instanceId,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                        Text(
+                                            text = "${instance.pluginType.uppercase()} - ${instance.deviceMac}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                     
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(12.dp))
                     
-                    ExpandableSection(
-                        title = "Settings",
-                        expanded = oneControlExpanded,
-                        onToggle = { viewModel.toggleOneControlExpanded() },
-                        leadingIcon = Icons.Filled.Settings,
-                        modifier = Modifier.padding(top = 2.dp)
+                    Text(
+                        text = "Manage instances in web interface",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    OutlinedButton(
+                        onClick = {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(webInterfaceUrl))
+                            context.startActivity(intent)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
                     ) {
-                        Text(
-                            text = "Enter MAC and PIN, then toggle service ON with gateway in pairing mode (hold button until LED blinks).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        )
-                        
-                        OutlinedTextField(
-                            value = oneControlGatewayMac,
-                            onValueChange = { 
-                                oneControlGatewayMac = it
-                                viewModel.setOneControlGatewayMac(it)
-                            },
-                            label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !serviceEnabled
-                        )
-                        
-                        OutlinedTextField(
-                            value = oneControlGatewayPin,
-                            onValueChange = { 
-                                oneControlGatewayPin = it
-                                viewModel.setOneControlGatewayPin(it)
-                            },
-                            label = { Text("PIN", style = MaterialTheme.typography.bodySmall) },
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !serviceEnabled
-                        )
-                        
-                        Text(
-                            text = "Found on a sticker on the OneControl board",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
+                        Text("Open Web Interface")
                     }
-                }
-            }
-            }
-            
-            // EasyTouch Plugin (only show if enabled)
-            if (easyTouchEnabled) {
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "EasyTouch",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "Micro-Air RV thermostat",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = { 
-                                        pluginToRemove = "easytouch"
-                                        showRemoveConfirmation = true
-                                    },
-                                    enabled = !serviceEnabled,
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove plugin",
-                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // Health Status Indicators - per-plugin status for EasyTouch
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 6.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            val easyTouchStatus = getPluginStatus("easytouch")
-                            StatusIndicator(
-                                label = "Connected",
-                                isActive = easyTouchStatus?.connected == true
-                            )
-                            StatusIndicator(
-                                label = "Data",
-                                isActive = easyTouchStatus?.dataHealthy == true
-                            )
-                            StatusIndicator(
-                                label = "Authenticated",
-                                isActive = easyTouchStatus?.authenticated == true
-                            )
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // Thermostat Settings
-                        ExpandableSection(
-                            title = "Settings",
-                            expanded = easyTouchExpanded,
-                            onToggle = { viewModel.toggleEasyTouchExpanded() },
-                            leadingIcon = Icons.Filled.Settings,
-                            modifier = Modifier.padding(top = 2.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = easyTouchThermostatMac,
-                                onValueChange = { 
-                                    easyTouchThermostatMac = it
-                                    viewModel.setEasyTouchThermostatMac(it)
-                                },
-                                label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = !serviceEnabled
-                            )
-                            
-                            OutlinedTextField(
-                                value = easyTouchThermostatPassword,
-                                onValueChange = { 
-                                    easyTouchThermostatPassword = it
-                                    viewModel.setEasyTouchThermostatPassword(it)
-                                },
-                                label = { Text("Password", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                visualTransformation = PasswordVisualTransformation(),
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = !serviceEnabled
-                            )
-                            
-                            Text(
-                                text = "Enter the thermostat MAC address and password from the EasyTouch app.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-            }
-            
-            // GoPower Plugin (only show if enabled)
-            if (goPowerEnabled) {
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "GoPower Solar",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "PWM Solar Charge Controller",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = { 
-                                        pluginToRemove = "gopower"
-                                        showRemoveConfirmation = true
-                                    },
-                                    enabled = !serviceEnabled,
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove plugin",
-                                        tint = if (serviceEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // Health Status Indicators (only show when MAC is configured)
-                        // Per-plugin status for GoPower
-                        if (goPowerControllerMac.isNotBlank()) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly
-                            ) {
-                                val goPowerStatus = getPluginStatus("gopower")
-                                StatusIndicator(
-                                    label = "Connected",
-                                    isActive = goPowerStatus?.connected == true
-                                )
-                                StatusIndicator(
-                                    label = "Data",
-                                    isActive = goPowerStatus?.dataHealthy == true
-                                )
-                            }
-                            
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        }
-                        
-                        // Controller Settings
-                        ExpandableSection(
-                            title = "Settings",
-                            expanded = goPowerExpanded,
-                            onToggle = { viewModel.toggleGoPowerExpanded() },
-                            leadingIcon = Icons.Filled.Settings,
-                            modifier = Modifier.padding(top = 2.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = goPowerControllerMac,
-                                onValueChange = { 
-                                    goPowerControllerMac = it
-                                    viewModel.setGoPowerControllerMac(it)
-                                },
-                                label = { Text("MAC Address", style = MaterialTheme.typography.bodySmall) },
-                                textStyle = MaterialTheme.typography.bodyMedium,
-                                placeholder = { Text("AA:BB:CC:DD:EE:FF", style = MaterialTheme.typography.bodySmall) },
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = !serviceEnabled
-                            )
-                            
-                            Text(
-                                text = "Enter the solar controller MAC address. No password required.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-            }
-            
-            // BLE Scanner Plugin (only show if enabled)
-            if (bleScannerEnabled) {
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "BLE Scanner",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "Scan for nearby BLE devices",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = { 
-                                        pluginToRemove = "ble_scanner"
-                                        showRemoveConfirmation = true
-                                    },
-                                    modifier = Modifier.size(32.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove plugin",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                }
-                            }
-                        }
-                        
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        
-                        // Info section
-                        ExpandableSection(
-                            title = "Info",
-                            expanded = bleScannerExpanded,
-                            onToggle = { viewModel.toggleBleScannerExpanded() },
-                            modifier = Modifier.padding(top = 2.dp)
-                        ) {
-                            Text(
-                                text = "Press the 'Start Scan' button in Home Assistant to scan for 60 seconds. Results will appear in the 'Devices Found' sensor attributes.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                        }
-                    }
+                    
+                    Text(
+                        text = "🔴 = Unhealthy (tap for details in web UI)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
                 }
             }
         }
     }
-}
-
-@Composable
-private fun PluginPickerDialog(
-    onDismiss: () -> Unit,
-    onPluginSelected: (String) -> Unit,
-    enabledPlugins: List<String>
-) {
-    // Available plugins
-    val availablePlugins = listOf(
-        PluginInfo("onecontrol", "OneControl", "LCI/Lippert RV Gateway"),
-        PluginInfo("easytouch", "EasyTouch", "Micro-Air RV thermostat"),
-        PluginInfo("gopower", "GoPower Solar", "PWM Solar Charge Controller"),
-        PluginInfo("ble_scanner", "BLE Scanner", "Scan for nearby BLE devices")
-    )
     
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Add Plugin") },
-        text = {
-            Column {
-                availablePlugins.forEach { plugin ->
-                    val isEnabled = enabledPlugins.contains(plugin.id)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !isEnabled) { 
-                                if (!isEnabled) onPluginSelected(plugin.id) 
-                            }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = plugin.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (isEnabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = if (isEnabled) "Already added" else plugin.description,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    if (plugin != availablePlugins.last()) {
-                        HorizontalDivider()
-                    }
+    // Password saved confirmation dialog
+    if (showAuthPasswordHashDialog) {
+        AlertDialog(
+            onDismissRequest = { showAuthPasswordHashDialog = false },
+            title = { Text("Credentials Saved") },
+            text = { Text("Authentication credentials have been saved successfully.") },
+            confirmButton = {
+                TextButton(onClick = { showAuthPasswordHashDialog = false }) {
+                    Text("OK")
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
+        )
+    }
 }
-
-private data class PluginInfo(
-    val id: String,
-    val name: String,
-    val description: String
-)
 
 @Composable
 private fun SectionHeader(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelLarge,
+        style = MaterialTheme.typography.titleMedium,
         color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
     )
 }
 
-@Composable
-private fun PermissionSwitch(
-    title: String,
-    description: String,
-    isGranted: Boolean,
-    onToggle: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Switch(
-            checked = isGranted,
-            onCheckedChange = { if (!isGranted) onToggle() }
-        )
-    }
-}
-
-@Composable
-private fun StatusIndicator(
-    label: String,
-    isActive: Boolean
-) {
-    val activeColor = androidx.compose.ui.graphics.Color(0xFF4CAF50) // Green
-    val inactiveColor = androidx.compose.ui.graphics.Color(0xFFF44336) // Red
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        androidx.compose.foundation.Canvas(
-            modifier = Modifier.size(8.dp)
-        ) {
-            drawCircle(
-                color = if (isActive) activeColor else inactiveColor
-            )
-        }
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (isActive) activeColor else inactiveColor
-        )
-    }
+/**
+ * Simple SHA-256 hash for password storage
+ * In production, this should use BCrypt or similar
+ */
+private fun hashPassword(password: String): String {
+    val bytes = java.security.MessageDigest.getInstance("SHA-256").digest(password.toByteArray())
+    return bytes.joinToString("") { "%02x".format(it) }
 }

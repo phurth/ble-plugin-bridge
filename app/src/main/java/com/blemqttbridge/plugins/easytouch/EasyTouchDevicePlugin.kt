@@ -34,9 +34,11 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
     }
     
     override val pluginId: String = PLUGIN_ID
+    override var instanceId: String = PLUGIN_ID  // Same as pluginId by default
+    override val supportsMultipleInstances: Boolean = true
     override val displayName: String = "EasyTouch Thermostat"
     
-    private lateinit var context: Context
+    private var context: Context? = null
     private var config: PluginConfig? = null
     
     // Configuration from settings
@@ -49,12 +51,22 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
     // Current callback instance for command handling
     private var currentCallback: EasyTouchGattCallback? = null
     
-    override fun initialize(context: Context, config: PluginConfig) {
+    override fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
+        this.instanceId = instanceId
+        
+        // Extract device-specific configuration
+        thermostatMac = config["thermostat_mac"] ?: ""
+        thermostatPassword = config["thermostat_password"] ?: ""
+        
+        Log.i(TAG, "Initializing EasyTouch instance: $instanceId (MAC: $thermostatMac)")
+    }
+    
+    override fun initialize(context: Context?, config: PluginConfig) {
         Log.i(TAG, "Initializing EasyTouch Device Plugin v$PLUGIN_VERSION")
         this.context = context
         this.config = config
         
-        // Load configuration
+        // Load configuration (legacy path - from DataStore)
         thermostatMac = config.getString("thermostat_mac", "")
         thermostatPassword = config.getString("thermostat_password", "")
         
@@ -102,6 +114,7 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
             device = device,
             context = context,
             mqttPublisher = mqttPublisher,
+            instanceId = instanceId,
             onDisconnect = onDisconnect,
             password = thermostatPassword
         )
@@ -169,6 +182,7 @@ class EasyTouchGattCallback(
     private val device: BluetoothDevice,
     private val context: Context,
     private val mqttPublisher: MqttPublisher,
+    private val instanceId: String,
     private val onDisconnect: (BluetoothDevice, Int) -> Unit,
     private val password: String
 ) : BluetoothGattCallback() {
@@ -1585,7 +1599,7 @@ class EasyTouchGattCallback(
         
         // Update UI status for this plugin
         mqttPublisher.updatePluginStatus(
-            pluginId = "easytouch",
+            pluginId = instanceId,
             connected = isConnected,
             authenticated = isPaired,
             dataHealthy = dataHealthy

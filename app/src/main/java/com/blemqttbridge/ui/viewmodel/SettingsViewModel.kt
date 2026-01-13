@@ -44,6 +44,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     val webServerEnabled = settings.webServerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val webServerPort = settings.webServerPort.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_WEB_SERVER_PORT)
+    val webAuthEnabled = settings.webAuthEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val webAuthUsername = settings.webAuthUsername.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val webAuthPassword = settings.webAuthPassword.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     
     // Expandable section states (collapsed by default)
     private val _mqttExpanded = MutableStateFlow(false)
@@ -284,6 +287,22 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             // Don't restart service for BLE Scanner - it can be dynamically loaded
             // The service will pick up the new setting on next start
         }
+    }
+    
+    fun setWebServerPort(port: Int) {
+        viewModelScope.launch { settings.setWebServerPort(port) }
+    }
+    
+    fun setWebAuthEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setWebAuthEnabled(enabled) }
+    }
+    
+    fun setWebAuthUsername(username: String) {
+        viewModelScope.launch { settings.setWebAuthUsername(username) }
+    }
+    
+    fun setWebAuthPassword(password: String) {
+        viewModelScope.launch { settings.setWebAuthPassword(password) }
     }
     
     fun showPluginPicker() {
