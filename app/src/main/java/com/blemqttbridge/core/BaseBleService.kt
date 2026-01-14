@@ -1050,10 +1050,16 @@ class BaseBleService : Service() {
         }
         
         // For multi-instance plugins, process each enabled instance
+        var hasMopekaInstances = false
         for ((instanceId, instance) in allInstances) {
             if (!enabledInstanceIds.contains(instanceId)) {
                 Log.d(TAG, "Skipping disabled instance for scan filters: $instanceId")
                 continue
+            }
+            
+            // Track if we have any Mopeka instances
+            if (instance.pluginType == "mopeka") {
+                hasMopekaInstances = true
             }
             
             val devicePlugin = pluginRegistry.getDevicePlugin(instance.pluginType, applicationContext)
@@ -1079,7 +1085,7 @@ class BaseBleService : Service() {
                     // For passive scan plugins (getConfiguredDevices() is empty), add instance MAC
                     if (configuredMacs.isEmpty()) {
                         val mac = instance.deviceMac
-                        if (addedMacs.add(mac.uppercase())) {
+                        if (mac.isNotEmpty() && addedMacs.add(mac.uppercase())) {
                             Log.d(TAG, "Adding scan filter for MAC: $mac (passive instance: $instanceId)")
                             scanFilters.add(
                                 ScanFilter.Builder()
@@ -1092,6 +1098,18 @@ class BaseBleService : Service() {
                     Log.w(TAG, "Could not get configured devices for instance $instanceId: ${e.message}")
                 }
             }
+        }
+        
+        // Add manufacturer data filter for Mopeka sensors (0x0059)
+        // This allows detecting ANY Mopeka sensor, enabling background scanning
+        // The individual MAC matching happens in matchesDevice() after detection
+        if (hasMopekaInstances) {
+            Log.d(TAG, "Adding manufacturer data filter for Mopeka (0x0059)")
+            scanFilters.add(
+                ScanFilter.Builder()
+                    .setManufacturerData(0x0059, byteArrayOf())  // Match any Mopeka device
+                    .build()
+            )
         }
         
         // If no specific targets, add a permissive filter (allows screen-off scanning)
@@ -1121,12 +1139,18 @@ class BaseBleService : Service() {
         
         appendServiceLog("Starting BLE scan with ${scanFilters.size} device filters")
         try {
-            // TEMPORARY: Use unfiltered scan to debug Mopeka sensor reception
-            Log.w(TAG, "⚠️ USING UNFILTERED SCAN FOR DEBUGGING - configured ${scanFilters.size} filters but not applying them")
-            scanner.startScan(null, scanSettings, scanCallback)
+            // Use scan filters for known devices - required for background scanning on Android 8.1+
+            // Filters allow scanning to continue when screen is off (Doze mode)
+            if (scanFilters.isNotEmpty()) {
+                Log.i(TAG, "📡 Starting filtered BLE scan with ${scanFilters.size} filter(s)")
+                scanner.startScan(scanFilters, scanSettings, scanCallback)
+            } else {
+                Log.w(TAG, "⚠️ No scan filters configured - using unfiltered scan (may stop when screen off)")
+                scanner.startScan(null, scanSettings, scanCallback)
+            }
             isScanning = true
             updateNotification("Scanning for devices...")
-            Log.i(TAG, "BLE scan started with UNFILTERED mode (debug)")
+            Log.i(TAG, "BLE scan started")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE scan", e)
             updateNotification("Error: BLE permission denied")
@@ -1150,6 +1174,33 @@ class BaseBleService : Service() {
             Log.i(TAG, "BLE scan stopped")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for stopping scan", e)
+        }
+    }
+    
+    /**
+     * Check if any passive scan plugins (like Mopeka) are enabled.
+     * Passive plugins don't use GATT connections - they read BLE advertisements directly.
+     */
+    private fun hasPassivePluginsEnabled(): Boolean {
+        val allInstances = ServiceStateManager.getAllInstances(applicationContext)
+        return allInstances.values.any { instance ->
+            val devicePlugin = pluginRegistry.getPluginInstance(instance.instanceId)
+            devicePlugin?.getConfiguredDevices()?.isEmpty() == true
+        }
+    }
+    
+    /**
+     * Resume scanning if passive plugins need it.
+     * Called after GATT connections are established to ensure passive plugins
+     * (like Mopeka) continue receiving BLE advertisements.
+     */
+    private fun resumeScanningForPassivePlugins() {
+        if (hasPassivePluginsEnabled() && !isScanning) {
+            serviceScope.launch {
+                delay(500)  // Brief delay to avoid BLE stack contention
+                Log.i(TAG, "📊 Resuming scan for passive plugins (Mopeka, etc.)")
+                startScanning()
+            }
         }
     }
     
@@ -1660,6 +1711,10 @@ class BaseBleService : Service() {
                         
                         // Publish availability
                         publishAvailability(device, true)
+                        
+                        // Resume scanning for passive plugins (Mopeka, etc.)
+                        // GATT connections don't block passive BLE scanning
+                        resumeScanningForPassivePlugins()
                     }
                 }
                 
