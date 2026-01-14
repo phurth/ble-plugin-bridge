@@ -68,8 +68,8 @@ data class PluginInstance(
                 val configJson = json.optJSONObject("config") ?: JSONObject()
                 val config = mutableMapOf<String, String>()
                 configJson.keys().forEach { key ->
-                    val value = configJson.optString(key)
-                    if (value != null) {
+                    val value = configJson.optString(key, "")
+                    if (value.isNotEmpty()) {
                         config[key] = value
                     }
                 }

@@ -21,6 +21,7 @@ import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
+import com.blemqttbridge.plugins.mopeka.MopekaDevicePlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.utils.AndroidTvHelper
@@ -708,6 +709,22 @@ class BaseBleService : Service() {
         
         memoryManager.logMemoryUsage()
         
+        // Migration: Ensure all loaded instances are in the enabled plugins list
+        // (for instances added before multi-instance support was finalized)
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
+        val needsUpdate = allInstances.keys.any { instanceId ->
+            !enabledPlugins.contains(instanceId)
+        }
+        if (needsUpdate) {
+            Log.i(TAG, "🔄 Migration: Auto-enabling discovered plugin instances")
+            for (instanceId in allInstances.keys) {
+                if (!enabledPlugins.contains(instanceId)) {
+                    ServiceStateManager.enableBlePlugin(applicationContext, instanceId)
+                    Log.i(TAG, "✓ Auto-enabled instance: $instanceId")
+                }
+            }
+        }
+        
         // Try to reconnect to bonded devices or scan for new ones
         reconnectToBondedDevices()
     }
@@ -873,8 +890,18 @@ class BaseBleService : Service() {
         val allInstances = ServiceStateManager.getAllInstances(applicationContext)
         Log.i(TAG, "🔄 Phase 4: Reconnecting ${allInstances.size} instances to their devices...")
         
-        // 1. For each instance, connect to its configured device MAC
+        // 1. For each instance, connect to its configured device MAC (if it requires GATT connection)
         for ((instanceId, instance) in allInstances) {
+            // Check if this plugin requires GATT connection
+            val devicePlugin = pluginRegistry.getPluginInstance(instanceId)
+            val configuredDevices = devicePlugin?.getConfiguredDevices() ?: emptyList()
+            
+            if (configuredDevices.isEmpty()) {
+                // Plugin uses passive scanning (e.g., Mopeka) - skip GATT connection
+                Log.i(TAG, "⏭️ Skipping GATT connection for passive scan plugin: $instanceId (${instance.pluginType})")
+                continue
+            }
+            
             val deviceMac = instance.deviceMac.uppercase()
             if (devicesToConnect.containsKey(deviceMac)) {
                 Log.w(TAG, "Device $deviceMac already assigned to another instance, skipping $instanceId")
@@ -924,6 +951,22 @@ class BaseBleService : Service() {
                 }
             }
         }
+        
+        // 4. Check if any passive scan plugins are enabled (e.g., Mopeka)
+        // If so, start BLE scanning to receive advertisements
+        val hasPassivePlugins = allInstances.values.any { instance ->
+            val devicePlugin = pluginRegistry.getPluginInstance(instance.instanceId)
+            devicePlugin?.getConfiguredDevices()?.isEmpty() == true
+        }
+        
+        if (hasPassivePlugins) {
+            Log.i(TAG, "📊 Passive scan plugins detected - starting BLE scanning for advertisements")
+            serviceScope.launch {
+                // Give active plugins time to establish GATT connections first
+                delay(2000)
+                startScanning()
+            }
+        }
     }
     
     /**
@@ -942,6 +985,16 @@ class BaseBleService : Service() {
         val scanFilters = mutableListOf<ScanFilter>()
         val addedMacs = mutableSetOf<String>() // Track MACs to avoid duplicates
         val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
+        
+        // Get all plugin instances (for multi-instance support)
+        val allInstances = ServiceStateManager.getAllInstances(applicationContext)
+        val enabledInstanceIds = allInstances.keys.filter { instanceId ->
+            // Instance is enabled if:
+            // 1. Full instance ID is explicitly in enabled list (new style: "easytouch_b1241e")
+            // 2. OR the plugin type is in enabled list (legacy style: "easytouch")
+            val pluginType = instanceId.substringBefore("_")
+            enabledPlugins.contains(instanceId) || enabledPlugins.contains(pluginType)
+        }.toSet()
         
         // Get target MAC addresses from loaded BlePluginInterface plugins (legacy)
         for ((pluginId, plugin) in pluginRegistry.getLoadedBlePlugins()) {
@@ -963,11 +1016,13 @@ class BaseBleService : Service() {
         
         // Get target MAC addresses from BleDevicePlugin plugins (new architecture)
         // This includes plugins like EasyTouch that use the new callback architecture
-        // Only check ENABLED plugins
+        // Handle both enabled plugin types (single-instance) and enabled instances (multi-instance)
+        
+        // For single-instance plugins, check if the plugin type is enabled
         for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
-            // Skip disabled plugins
+            // Skip if not in enabled plugins
             if (!enabledPlugins.contains(pluginId)) {
-                Log.d(TAG, "Skipping disabled plugin for scan filters: $pluginId")
+                Log.d(TAG, "Skipping disabled plugin type for scan filters: $pluginId")
                 continue
             }
             
@@ -990,6 +1045,51 @@ class BaseBleService : Service() {
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not get configured devices for plugin $pluginId: ${e.message}")
+                }
+            }
+        }
+        
+        // For multi-instance plugins, process each enabled instance
+        for ((instanceId, instance) in allInstances) {
+            if (!enabledInstanceIds.contains(instanceId)) {
+                Log.d(TAG, "Skipping disabled instance for scan filters: $instanceId")
+                continue
+            }
+            
+            val devicePlugin = pluginRegistry.getDevicePlugin(instance.pluginType, applicationContext)
+            if (devicePlugin != null) {
+                // Initialize with this instance's config
+                try {
+                    val config = PluginConfig(instance.config)
+                    devicePlugin.initialize(applicationContext, config)
+                    val configuredMacs = devicePlugin.getConfiguredDevices()
+                    
+                    // For active GATT plugins, add MACs from getConfiguredDevices()
+                    for (mac in configuredMacs) {
+                        if (addedMacs.add(mac.uppercase())) {
+                            Log.d(TAG, "Adding scan filter for MAC: $mac (instance: $instanceId)")
+                            scanFilters.add(
+                                ScanFilter.Builder()
+                                    .setDeviceAddress(mac.uppercase())
+                                    .build()
+                            )
+                        }
+                    }
+                    
+                    // For passive scan plugins (getConfiguredDevices() is empty), add instance MAC
+                    if (configuredMacs.isEmpty()) {
+                        val mac = instance.deviceMac
+                        if (addedMacs.add(mac.uppercase())) {
+                            Log.d(TAG, "Adding scan filter for MAC: $mac (passive instance: $instanceId)")
+                            scanFilters.add(
+                                ScanFilter.Builder()
+                                    .setDeviceAddress(mac.uppercase())
+                                    .build()
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not get configured devices for instance $instanceId: ${e.message}")
                 }
             }
         }
@@ -1021,12 +1121,12 @@ class BaseBleService : Service() {
         
         appendServiceLog("Starting BLE scan with ${scanFilters.size} device filters")
         try {
-            // Use filters if available, otherwise null (unfiltered)
-            val filters = if (scanFilters.isNotEmpty()) scanFilters else null
-            scanner.startScan(filters, scanSettings, scanCallback)
+            // TEMPORARY: Use unfiltered scan to debug Mopeka sensor reception
+            Log.w(TAG, "⚠️ USING UNFILTERED SCAN FOR DEBUGGING - configured ${scanFilters.size} filters but not applying them")
+            scanner.startScan(null, scanSettings, scanCallback)
             isScanning = true
             updateNotification("Scanning for devices...")
-            Log.i(TAG, "BLE scan started with ${scanFilters.size} filter(s)")
+            Log.i(TAG, "BLE scan started with UNFILTERED mode (debug)")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE scan", e)
             updateNotification("Error: BLE permission denied")
@@ -1120,9 +1220,11 @@ class BaseBleService : Service() {
             }
             
             scanResultCount++
-            // Log every 10th device to avoid spam, but always log our target
+            // Log every 10th device to avoid spam, but always log our target devices
             if (device.address.contains("24:DC:C3", ignoreCase = true) || 
                 device.address.contains("1E:0A", ignoreCase = true) ||
+                device.address.contains("C4:39:95", ignoreCase = true) ||
+                device.address.contains("DD:69:F4", ignoreCase = true) ||
                 scanResultCount % 10 == 1) {
                 Log.d(TAG, "📡 Scan result #$scanResultCount: ${device.address} (name: ${deviceName ?: "?"})")
             }
@@ -1138,14 +1240,41 @@ class BaseBleService : Service() {
                 Log.i(TAG, "✅ Found matching device: ${device.address} -> plugin: $pluginId")
                 appendServiceLog("Found device: ${device.address} (plugin: $pluginId)")
                 
-                // Stop scanning (we found a device)
+                // Find the specific instance for this device MAC (for multi-instance support)
+                val matchingInstanceId = ServiceStateManager.getAllInstances(applicationContext)
+                    .entries
+                    .firstOrNull { (_, instance) -> 
+                        instance.deviceMac.equals(device.address, ignoreCase = true)
+                    }?.key
+                
+                // Get the plugin instance (either specific instance or generic plugin)
+                val instanceId = matchingInstanceId ?: pluginId
+                val devicePlugin = pluginRegistry.getPluginInstance(instanceId)
+                val requiresConnection = devicePlugin?.getConfiguredDevices()?.isNotEmpty() ?: true
+                
+                if (!requiresConnection) {
+                    // Passive scan plugin - just pass the scan result, don't connect
+                    Log.i(TAG, "📊 Passive scan plugin detected - processing advertisement from ${device.address} (instance: $instanceId)")
+                    result.scanRecord?.let { record ->
+                        Log.d(TAG, "🎯 Calling handleScanResult on MopekaDevicePlugin (plugin=$devicePlugin, isMopeka=${devicePlugin is MopekaDevicePlugin})")
+                        // Set MQTT publisher for passive plugins before processing
+                        (devicePlugin as? MopekaDevicePlugin)?.apply {
+                            setMqttPublisher(mqttPublisher)
+                            handleScanResult(device, record)
+                        }
+                        // Update plugin status to show data is being received
+                        mqttPublisher.updatePluginStatus(instanceId, connected = false, authenticated = false, dataHealthy = true)
+                    } ?: Log.w(TAG, "⚠️ No scan record in result!")
+                    return  // Continue scanning for more advertisements
+                }
+                
+                // Stop scanning (we found a device to connect to)
                 stopScanning()
                 
                 // Load plugin and connect to device
                 serviceScope.launch {
                     // Check if plugin can be loaded (either legacy BlePluginInterface or new BleDevicePlugin)
                     val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
-                    val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
                     
                     if (legacyPlugin != null || devicePlugin != null) {
                         connectToDevice(device, pluginId)

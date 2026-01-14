@@ -2836,6 +2836,226 @@ This allows the UI to display GoPower's connection status independently from oth
 
 ---
 
+## 7.6. Mopeka Tank Sensor Protocol
+
+### Overview
+
+The Mopeka plugin integrates Mopeka Pro Check/Pro Plus/Pro H2O Bluetooth tank level sensors. Unlike other plugins in this system, Mopeka uses **passive BLE advertisement scanning** - no GATT connection is required. The sensor broadcasts tank level, temperature, and battery status in manufacturer-specific advertisement data.
+
+**Credits:**
+- **sbrogan**: Original work decoding the Mopeka sensor BLE protocol (mopeka-iot-ble library)
+- **jrhelbert**: Volumetric calculation formulas for accurate tank percentage ([HA Community Post](https://community.home-assistant.io/t/add-tank-percentage-to-mopeka-integration/531322/34))
+
+**Supported Models:**
+- Mopeka Pro Plus (M1015)
+- Mopeka Pro Check (M1017)
+- Mopeka Pro 200
+- Mopeka Pro H2O (water sensors)
+- Mopeka Pro H2O Plus
+- Lippert BottleCheck
+- TD40, TD200
+
+**Plugin Type:** Passive advertisement scanner  
+**Multi-Instance:** Yes (supports multiple sensors)  
+**Protocol:** Manufacturer ID 0x0059, passive BLE advertisements  
+**Location:** `app/src/main/java/com/blemqttbridge/plugins/mopeka/`
+
+### Protocol Characteristics
+
+**Passive Scanning:**
+- No BLE connection required
+- Parses manufacturer-specific data (ID: 0x0059) from advertisements
+- Sensor broadcasts every few seconds
+- Much simpler than connection-based plugins (~300 lines vs 900+ for GoPower)
+
+**Advertisement Data Structure (10 bytes):**
+```
+Byte 0: Sync byte (model ID: 0x03-0x0C)
+Byte 1: Battery raw value
+Byte 2: Temperature raw (bits 0-6) + button state (bit 7)
+Byte 3-4: Distance (14-bit little-endian) + quality (2-bit)
+Byte 5-7: Reserved
+Byte 8-9: Accelerometer X, Y
+```
+
+**References:**
+- Home Assistant core: `mopeka-iot-ble` library
+- HA Community formulas: https://community.home-assistant.io/t/add-tank-percentage-to-mopeka-integration/531322/34
+
+### Configuration Options
+
+Each Mopeka instance requires configuration for accurate percentage calculations:
+
+**sensor_mac** (required):
+- MAC address of the specific sensor to monitor
+- Format: `C4:39:95:29:EF:FD`
+
+**medium_type** (required):
+- Type of fluid in the tank
+- Options: `propane` (default), `air`, `fresh_water`, `waste_water`, `black_water`, `live_well`, `gasoline`, `diesel`, `lng`, `oil`, `hydraulic_oil`, `custom`
+- Used for temperature compensation (speed of sound varies by medium)
+
+**tank_type** (required):
+- Physical dimensions and shape of the tank
+- Vertical Propane: `20lb_v` (default), `30lb_v`, `40lb_v`
+- Horizontal Propane: `250gal_h`, `500gal_h`, `1000gal_h`
+- European: `europe_6kg`, `europe_11kg`, `europe_14kg`
+- Custom: `custom`
+
+**minimum_quality** (optional):
+- Quality threshold (0-100%) for accepting readings
+- Default: 0 (accept all readings)
+- Options: 0, 20, 50, 80
+
+### Tank Percentage Calculation
+
+When you select a tank type from the web UI dropdown (like "20lb Vertical" or "500 Gallon Horizontal"), that configuration is stored and used to initialize the MopekaDevicePlugin with a specific TankType enum value. Each TankType contains the precise physical dimensions of that tank: overall length/height, diameter, wall thickness, and orientation (vertical or horizontal). These dimensions define the tank's actual 3D geometry.
+
+When the sensor broadcasts its data, the plugin receives the raw ultrasonic distance reading, applies temperature compensation to correct for speed-of-sound variations, and then passes this compensated distance (in mm from sensor to liquid surface) along with the selected TankType to the `calculateTankPercentage()` function. This function uses geometric volume formulas specific to the tank's shape - for vertical tanks it calculates ellipsoid cap volumes (2:1 ratio) plus a cylindrical middle section, while horizontal tanks use spherical end caps plus a partial horizontal cylinder volume. By comparing the filled volume at the measured depth to the tank's total capacity (based on those stored dimensions), it returns an accurate fill percentage (0-100%) instead of just a raw distance measurement.
+
+**Processing Flow:**
+```
+1. Receive BLE advertisement with raw distance (mm)
+   ↓
+2. Apply temperature compensation using polynomial coefficients
+   - Formula: distance = raw * (c0 + c1*temp + c2*temp²)
+   - Coefficients vary by medium_type (propane, water, etc.)
+   ↓
+3. Calculate tank percentage using geometric volume formulas
+   - Vertical: 2:1 ellipsoid caps + cylindrical middle
+   - Horizontal: Spherical caps + horizontal cylinder partial volume
+   ↓
+4. Return fill percentage (0-100%)
+```
+
+**Temperature Compensation:**
+
+The ultrasonic sensor's accuracy depends on the speed of sound in the measured medium, which varies with temperature. The plugin applies medium-specific polynomial coefficients to correct for this:
+
+```kotlin
+// MopekaConstants.TankLevelCoefficients
+val PROPANE = Triple(0.573045, 0.002822, -0.00000535)
+val FRESH_WATER = Triple(0.558096, 0.003124, -0.00000535)
+// ... other media
+
+// Apply compensation
+val distance_mm = raw_distance * (c0 + (c1 * temp) + (c2 * temp²))
+```
+
+**Geometric Volume Formulas:**
+
+**Vertical Tanks (BBQ propane):**
+- Bottom cap: Ellipsoid cap (E_c = R/2)
+- Middle: Cylindrical section
+- Top cap: Ellipsoid cap
+- Piecewise calculation based on fill depth region
+
+**Horizontal Tanks (RV/home propane):**
+- End caps: Spherical caps
+- Middle: Partial horizontal cylinder volume
+- Uses arc length and segment area calculations
+
+**File:** `MopekaConstants.kt`, functions `calculateVerticalTankPercentage()` and `calculateHorizontalTankPercentage()`
+
+### Home Assistant Entities
+
+Each Mopeka sensor publishes 3 entities:
+
+**Battery Sensor:**
+- Topic: `mopeka/{MAC}/battery/state`
+- Unit: `%`
+- Device class: `battery`
+- Formula: `((raw/32.0 - 2.2) / 0.65) * 100`
+
+**Temperature Sensor:**
+- Topic: `mopeka/{MAC}/temperature/state`
+- Unit: `°C`
+- Device class: `temperature`
+- Formula: `(raw & 0x7F) - 40`
+
+**Tank Level Sensor:**
+- Topic: `mopeka/{MAC}/tank_level/state`
+- Unit: `%`
+- Icon: `mdi:propane-tank`
+- Calculated using geometric volume formulas (see above)
+
+**Discovery Topics:**
+```
+homeassistant/sensor/mopeka_{MAC}/battery/config
+homeassistant/sensor/mopeka_{MAC}/temperature/config
+homeassistant/sensor/mopeka_{MAC}/tank_level/config
+```
+
+### Plugin Structure
+
+**Files:**
+- `MopekaDevicePlugin.kt` - Main plugin, handles scan results
+- `MopekaConstants.kt` - Protocol constants, TankType enum, geometric calculations
+- `MopekaAdvertisementParser.kt` - Parse 10-byte advertisement data
+- `MopekaSensorData.kt` - Data model for sensor readings
+- `MopekaHomeAssistantDiscovery.kt` - HA MQTT discovery payloads
+
+**Key Methods:**
+
+```kotlin
+// Called by BaseBleService when Mopeka advertisement detected
+fun handleScanResult(device: BluetoothDevice, scanRecord: ScanRecord?) {
+    // 1. Extract manufacturer data (ID 0x0059)
+    // 2. Parse advertisement bytes
+    // 3. Apply quality threshold check
+    // 4. Apply temperature compensation
+    // 5. Calculate tank percentage
+    // 6. Publish to MQTT
+}
+```
+
+### Health Status
+
+Mopeka is a **passive plugin** - it doesn't connect to devices, so the health indicator works differently:
+
+- **Green:** Receiving advertisement data (dataHealthy = true)
+- **Red:** No data received recently
+- **Connection/Authentication indicators:** Not shown (passive plugins don't connect)
+
+The plugin updates its status each time an advertisement is processed:
+
+```kotlin
+// In BaseBleService.kt, scan callback
+mqttPublisher.updatePluginStatus(
+    instanceId, 
+    connected = false,       // Passive, no connection
+    authenticated = false,   // Passive, no auth
+    dataHealthy = true       // Green when receiving ads
+)
+```
+
+### Multi-Instance Support
+
+Mopeka supports multiple sensor instances. Each instance:
+- Has unique `instanceId`: `mopeka_{macSuffix}` (e.g., `mopeka_29effd`)
+- Configured independently with its own `medium_type` and `tank_type`
+- Publishes to separate MQTT topics using its MAC address
+- Appears as separate device in Home Assistant
+
+**Web UI Configuration:**
+- Add multiple Mopeka instances via "Add Instance" button
+- Each instance shows medium/tank type in instance card: "Medium: propane | Tank: 20lb_v"
+- Edit to change medium_type or tank_type dropdowns
+
+### Comparison to GoPower
+
+| Aspect | Mopeka | GoPower |
+|--------|--------|---------|
+| Connection | Passive (no GATT) | Active (GATT connection) |
+| Code complexity | ~300 lines | ~900 lines |
+| Data source | BLE advertisements | BLE notifications |
+| Authentication | None | None (but connects) |
+| Multi-instance | Yes | No |
+| Configuration | MAC + medium + tank type | MAC only |
+| Polling | None (broadcast based) | Write space char to poll |
+
+---
+
 ## 7. MQTT Integration
 
 ### MqttOutputPlugin

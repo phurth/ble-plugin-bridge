@@ -41,6 +41,12 @@ class AppSettings(private val context: Context) {
         val GOPOWER_ENABLED = booleanPreferencesKey("gopower_enabled")
         val GOPOWER_CONTROLLER_MAC = stringPreferencesKey("gopower_controller_mac")
         
+        // Mopeka Plugin Settings
+        val MOPEKA_ENABLED = booleanPreferencesKey("mopeka_enabled")
+        val MOPEKA_SENSOR_MAC = stringPreferencesKey("mopeka_sensor_mac")
+        val MOPEKA_MEDIUM_TYPE = stringPreferencesKey("mopeka_medium_type")
+        val MOPEKA_MINIMUM_QUALITY = intPreferencesKey("mopeka_minimum_quality")
+        
         // BLE Scanner Plugin Settings
         val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
         
@@ -87,6 +93,12 @@ class AppSettings(private val context: Context) {
     // GoPower Plugin Flows
     val goPowerEnabled: Flow<Boolean> = context.dataStore.data.map { it[GOPOWER_ENABLED] ?: false }
     val goPowerControllerMac: Flow<String> = context.dataStore.data.map { it[GOPOWER_CONTROLLER_MAC] ?: "" }
+    
+    // Mopeka Plugin Flows
+    val mopekaEnabled: Flow<Boolean> = context.dataStore.data.map { it[MOPEKA_ENABLED] ?: false }
+    val mopekaSensorMac: Flow<String> = context.dataStore.data.map { it[MOPEKA_SENSOR_MAC] ?: "" }
+    val mopekaMediumType: Flow<String> = context.dataStore.data.map { it[MOPEKA_MEDIUM_TYPE] ?: "propane" }
+    val mopekaMinimumQuality: Flow<Int> = context.dataStore.data.map { it[MOPEKA_MINIMUM_QUALITY] ?: 0 }
     
     // BLE Scanner Plugin Flows
     val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
@@ -161,6 +173,22 @@ class AppSettings(private val context: Context) {
     
     suspend fun setGoPowerControllerMac(mac: String) {
         context.dataStore.edit { it[GOPOWER_CONTROLLER_MAC] = mac }
+    }
+    
+    suspend fun setMopekaEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[MOPEKA_ENABLED] = enabled }
+    }
+    
+    suspend fun setMopekaSensorMac(mac: String) {
+        context.dataStore.edit { it[MOPEKA_SENSOR_MAC] = mac }
+    }
+    
+    suspend fun setMopekaMediumType(mediumType: String) {
+        context.dataStore.edit { it[MOPEKA_MEDIUM_TYPE] = mediumType }
+    }
+    
+    suspend fun setMopekaMinimumQuality(quality: Int) {
+        context.dataStore.edit { it[MOPEKA_MINIMUM_QUALITY] = quality }
     }
     
     suspend fun setWebServerEnabled(enabled: Boolean) {

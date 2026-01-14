@@ -40,6 +40,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val goPowerEnabled = settings.goPowerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val goPowerControllerMac = settings.goPowerControllerMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     
+    val mopekaEnabled = settings.mopekaEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val mopekaSensorMac = settings.mopekaSensorMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val mopekaMediumType = settings.mopekaMediumType.stateIn(viewModelScope, SharingStarted.Eagerly, "propane")
+    val mopekaMinimumQuality = settings.mopekaMinimumQuality.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+    
     val bleScannerEnabled = settings.bleScannerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     
     val webServerEnabled = settings.webServerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -60,6 +65,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     private val _goPowerExpanded = MutableStateFlow(false)
     val goPowerExpanded: StateFlow<Boolean> = _goPowerExpanded
+    
+    private val _mopekaExpanded = MutableStateFlow(false)
+    val mopekaExpanded: StateFlow<Boolean> = _mopekaExpanded
     
     private val _bleScannerExpanded = MutableStateFlow(false)
     val bleScannerExpanded: StateFlow<Boolean> = _bleScannerExpanded
@@ -260,6 +268,30 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { settings.setGoPowerControllerMac(mac) }
     }
     
+    fun setMopekaEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setMopekaEnabled(enabled)
+            if (enabled) {
+                ServiceStateManager.enableBlePlugin(context, "mopeka")
+            } else {
+                ServiceStateManager.disableBlePlugin(context, "mopeka")
+            }
+            restartService()
+        }
+    }
+    
+    fun setMopekaSensorMac(mac: String) {
+        viewModelScope.launch { settings.setMopekaSensorMac(mac) }
+    }
+    
+    fun setMopekaMediumType(mediumType: String) {
+        viewModelScope.launch { settings.setMopekaMediumType(mediumType) }
+    }
+    
+    fun setMopekaMinimumQuality(quality: Int) {
+        viewModelScope.launch { settings.setMopekaMinimumQuality(quality) }
+    }
+    
     fun toggleMqttExpanded() {
         _mqttExpanded.value = !_mqttExpanded.value
     }
@@ -274,6 +306,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     fun toggleGoPowerExpanded() {
         _goPowerExpanded.value = !_goPowerExpanded.value
+    }
+    
+    fun toggleMopekaExpanded() {
+        _mopekaExpanded.value = !_mopekaExpanded.value
     }
     
     fun toggleBleScannerExpanded() {
@@ -329,6 +365,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 "onecontrol" -> settings.setOneControlEnabled(true)
                 "easytouch" -> settings.setEasyTouchEnabled(true)
                 "gopower" -> settings.setGoPowerEnabled(true)
+                "mopeka" -> settings.setMopekaEnabled(true)
             }
             
             // 2. Update ServiceStateManager (for service to know which plugins to load)

@@ -560,6 +560,7 @@ class WebServerManager(
                         <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
                         <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
                         <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
+                        <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
                         <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
                     </select>
                     <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
@@ -698,10 +699,11 @@ class WebServerManager(
             'onecontrol': 'OneControl',
             'easytouch': 'EasyTouch',
             'gopower': 'GoPower',
+            'mopeka': 'Mopeka',
             'blescanner': 'BLE Scanner'
         };
         
-        const MULTI_INSTANCE_PLUGINS = ['easytouch']; // Only EasyTouch supports multiple instances
+        const MULTI_INSTANCE_PLUGINS = ['easytouch', 'mopeka']; // Plugins supporting multiple instances
         
         // Load status on page load
         window.addEventListener('load', () => {
@@ -844,8 +846,12 @@ class WebServerManager(
                         const authenticated = status.authenticated || false;
                         const dataHealthy = status.dataHealthy || false;
                         
+                        // Passive plugins (mopeka, gopower, blescanner) only need dataHealthy to be green
+                        // Active plugins (onecontrol, easytouch) need full connection
+                        const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner';
+                        
                         // If service is stopped, all instances are unhealthy
-                        const healthy = serviceRunning ? (connected && authenticated && dataHealthy) : false;
+                        const healthy = serviceRunning ? (isPassive ? dataHealthy : (connected && authenticated && dataHealthy)) : false;
                         
                         const healthClass = healthy ? 'instance-healthy' : 'instance-unhealthy';
                         const displayName = instance.displayName || instance.instanceId;
@@ -858,6 +864,10 @@ class WebServerManager(
                         } else if (pluginType === 'easytouch') {
                             const hasPassword = instance.config?.password ? 'Set' : 'Not set';
                             configDetails = ${'`'}<div class="instance-detail-line">Password: ${'$'}{hasPassword}</div>${'`'};
+                        } else if (pluginType === 'mopeka') {
+                            const mediumType = instance.config?.medium_type || 'propane';
+                            const tankType = instance.config?.tank_type || '20lb_v';
+                            configDetails = ${'`'}<div class="instance-detail-line">Medium: ${'$'}{mediumType} | Tank: ${'$'}{tankType}</div>${'`'};
                         }
                         
                         html += ${'`'}
@@ -879,7 +889,7 @@ class WebServerManager(
                                     <div class="instance-detail-line">ID: ${'$'}{instance.instanceId}</div>
                                     ${'$'}{pluginType !== 'blescanner' ? `<div class="instance-detail-line">MAC: ${'$'}{instance.deviceMac}</div>` : ''}
                                     ${'$'}{configDetails}
-                                    ${'$'}{pluginType !== 'blescanner' ? `<div class="instance-detail-line">
+                                    ${'$'}{!isPassive ? `<div class="instance-detail-line">
                                         Connected: <span class="${'$'}{connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{connected ? 'Yes' : 'No'}</span>
                                         | Authenticated: <span class="${'$'}{authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{authenticated ? 'Yes' : 'No'}</span>
                                         | Data: <span class="${'$'}{dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{dataHealthy ? 'Healthy' : 'Unhealthy'}</span>
@@ -1051,6 +1061,11 @@ class WebServerManager(
             } else if (pluginType === 'easytouch') {
                 const password = document.getElementById('new-password')?.value.trim();
                 if (password) config.password = password;
+            } else if (pluginType === 'mopeka') {
+                const mediumType = document.getElementById('new-medium-type')?.value || 'propane';
+                const tankType = document.getElementById('new-tank-type')?.value || '20lb_v';
+                config.medium_type = mediumType;
+                config.tank_type = tankType;
             }
             
             try {
@@ -1130,6 +1145,8 @@ class WebServerManager(
             const config = {};
             const pinField = document.getElementById('edit-gateway-pin');
             const passwordField = document.getElementById('edit-password');
+            const mediumTypeField = document.getElementById('edit-medium-type');
+            const tankTypeField = document.getElementById('edit-tank-type');
             
             if (pinField) {
                 const pin = pinField.value.trim();
@@ -1138,6 +1155,12 @@ class WebServerManager(
             if (passwordField) {
                 const password = passwordField.value.trim();
                 if (password) config.password = password;
+            }
+            if (mediumTypeField) {
+                config.medium_type = mediumTypeField.value || 'propane';
+            }
+            if (tankTypeField) {
+                config.tank_type = tankTypeField.value || '20lb_v';
             }
             
             try {
@@ -1225,6 +1248,47 @@ class WebServerManager(
                         <input type="password" id="new-password" placeholder="Device password" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                     </div>
                 ${'`'};
+            } else if (pluginType === 'mopeka') {
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Medium Type:</label>
+                        <select id="new-medium-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="propane">Propane</option>
+                            <option value="air">Air (Tank Ratio)</option>
+                            <option value="fresh_water">Fresh Water</option>
+                            <option value="waste_water">Waste Water</option>
+                            <option value="black_water">Black Water</option>
+                            <option value="live_well">Live Well</option>
+                            <option value="gasoline">Gasoline</option>
+                            <option value="diesel">Diesel</option>
+                            <option value="lng">LNG</option>
+                            <option value="oil">Oil</option>
+                            <option value="hydraulic_oil">Hydraulic Oil</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Tank Type:</label>
+                        <select id="new-tank-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <optgroup label="Vertical Propane">
+                                <option value="20lb_v">20lb Vertical</option>
+                                <option value="30lb_v">30lb Vertical</option>
+                                <option value="40lb_v">40lb Vertical</option>
+                            </optgroup>
+                            <optgroup label="Horizontal Propane">
+                                <option value="250gal_h">250 Gallon Horizontal</option>
+                                <option value="500gal_h">500 Gallon Horizontal</option>
+                                <option value="1000gal_h">1000 Gallon Horizontal</option>
+                            </optgroup>
+                            <optgroup label="European">
+                                <option value="europe_6kg">6kg European Vertical</option>
+                                <option value="europe_11kg">11kg European Vertical</option>
+                                <option value="europe_14kg">14kg European Vertical</option>
+                            </optgroup>
+                            <option value="custom">Custom Tank</option>
+                        </select>
+                    </div>
+                ${'`'};
             } else {
                 container.innerHTML = '';
             }
@@ -1249,6 +1313,49 @@ class WebServerManager(
                     <div style="margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
                         <input type="password" id="edit-password" value="${'$'}{password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else if (pluginType === 'mopeka') {
+                const mediumType = config?.medium_type || 'propane';
+                const tankType = config?.tank_type || '20lb_v';
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Medium Type:</label>
+                        <select id="edit-medium-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="propane" ${'$'}{mediumType === 'propane' ? 'selected' : ''}>Propane</option>
+                            <option value="air" ${'$'}{mediumType === 'air' ? 'selected' : ''}>Air (Tank Ratio)</option>
+                            <option value="fresh_water" ${'$'}{mediumType === 'fresh_water' ? 'selected' : ''}>Fresh Water</option>
+                            <option value="waste_water" ${'$'}{mediumType === 'waste_water' ? 'selected' : ''}>Waste Water</option>
+                            <option value="black_water" ${'$'}{mediumType === 'black_water' ? 'selected' : ''}>Black Water</option>
+                            <option value="live_well" ${'$'}{mediumType === 'live_well' ? 'selected' : ''}>Live Well</option>
+                            <option value="gasoline" ${'$'}{mediumType === 'gasoline' ? 'selected' : ''}>Gasoline</option>
+                            <option value="diesel" ${'$'}{mediumType === 'diesel' ? 'selected' : ''}>Diesel</option>
+                            <option value="lng" ${'$'}{mediumType === 'lng' ? 'selected' : ''}>LNG</option>
+                            <option value="oil" ${'$'}{mediumType === 'oil' ? 'selected' : ''}>Oil</option>
+                            <option value="hydraulic_oil" ${'$'}{mediumType === 'hydraulic_oil' ? 'selected' : ''}>Hydraulic Oil</option>
+                            <option value="custom" ${'$'}{mediumType === 'custom' ? 'selected' : ''}>Custom</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Tank Type:</label>
+                        <select id="edit-tank-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <optgroup label="Vertical Propane">
+                                <option value="20lb_v" ${'$'}{tankType === '20lb_v' ? 'selected' : ''}>20lb Vertical</option>
+                                <option value="30lb_v" ${'$'}{tankType === '30lb_v' ? 'selected' : ''}>30lb Vertical</option>
+                                <option value="40lb_v" ${'$'}{tankType === '40lb_v' ? 'selected' : ''}>40lb Vertical</option>
+                            </optgroup>
+                            <optgroup label="Horizontal Propane">
+                                <option value="250gal_h" ${'$'}{tankType === '250gal_h' ? 'selected' : ''}>250 Gallon Horizontal</option>
+                                <option value="500gal_h" ${'$'}{tankType === '500gal_h' ? 'selected' : ''}>500 Gallon Horizontal</option>
+                                <option value="1000gal_h" ${'$'}{tankType === '1000gal_h' ? 'selected' : ''}>1000 Gallon Horizontal</option>
+                            </optgroup>
+                            <optgroup label="European">
+                                <option value="europe_6kg" ${'$'}{tankType === 'europe_6kg' ? 'selected' : ''}>6kg European Vertical</option>
+                                <option value="europe_11kg" ${'$'}{tankType === 'europe_11kg' ? 'selected' : ''}>11kg European Vertical</option>
+                                <option value="europe_14kg" ${'$'}{tankType === 'europe_14kg' ? 'selected' : ''}>14kg European Vertical</option>
+                            </optgroup>
+                            <option value="custom" ${'$'}{tankType === 'custom' ? 'selected' : ''}>Custom Tank</option>
+                        </select>
                     </div>
                 ${'`'};
             } else {
@@ -1926,7 +2033,7 @@ class WebServerManager(
 
             // Validate service is stopped
             val service = BaseBleService.getInstance()
-            if (service != null) {
+            if (service != null && runBlocking { BaseBleService.serviceRunning.first() }) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
@@ -2045,7 +2152,7 @@ class WebServerManager(
 
             // Validate service is stopped
             val service = BaseBleService.getInstance()
-            if (service != null) {
+            if (service != null && runBlocking { BaseBleService.serviceRunning.first() }) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
@@ -2054,7 +2161,7 @@ class WebServerManager(
             }
 
             // Validate plugin type
-            val validTypes = setOf("onecontrol", "easytouch", "gopower", "blescanner")
+            val validTypes = setOf("onecontrol", "easytouch", "gopower", "mopeka", "blescanner")
             if (!validTypes.contains(pluginType)) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
@@ -2075,6 +2182,8 @@ class WebServerManager(
 
             // Save to ServiceStateManager
             ServiceStateManager.saveInstance(context, instance)
+            // Enable the instance
+            ServiceStateManager.enableBlePlugin(context, instanceId)
             Log.i(TAG, "Instance added via web UI: $instanceId (${instance.pluginType})")
             
             newFixedLengthResponse(
@@ -2166,7 +2275,7 @@ class WebServerManager(
 
             // Validate service is stopped
             val service = BaseBleService.getInstance()
-            if (service != null) {
+            if (service != null && runBlocking { BaseBleService.serviceRunning.first() }) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",

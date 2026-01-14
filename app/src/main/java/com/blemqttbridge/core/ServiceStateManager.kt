@@ -2,6 +2,7 @@ package com.blemqttbridge.core
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 
 /**
  * Manages service and plugin state persistence.
@@ -19,6 +20,7 @@ import android.content.SharedPreferences
  */
 object ServiceStateManager {
     
+    private const val TAG = "ServiceStateManager"
     private const val PREFS_NAME = "service_state"
     
     // Service state keys
@@ -188,13 +190,16 @@ object ServiceStateManager {
             
             json.keys().forEach { instanceId ->
                 val instanceJson = json.getString(instanceId)
+                Log.d(TAG, "📖 Loading instance $instanceId, JSON: $instanceJson")
                 PluginInstance.fromJson(instanceJson)?.let {
+                    Log.d(TAG, "✅ Loaded instance $instanceId with config: ${it.config}")
                     instances[instanceId] = it
                 }
             }
             
             instances
         } catch (e: Exception) {
+            Log.e(TAG, "Error loading instances", e)
             emptyMap()
         }
     }
@@ -222,7 +227,9 @@ object ServiceStateManager {
             org.json.JSONObject(jsonString)
         }
         
-        json.put(instance.instanceId, PluginInstance.toJson(instance))
+        val instanceJson = PluginInstance.toJson(instance)
+        Log.d(TAG, "💾 Saving instance ${instance.instanceId}, JSON: $instanceJson")
+        json.put(instance.instanceId, instanceJson)
         
         prefs.edit()
             .putString(KEY_PLUGIN_INSTANCES, json.toString())

@@ -148,9 +148,16 @@ class PluginRegistry {
             if (loadedBlePlugins.containsKey(pluginId)) continue // already checked
             
             // Skip if not enabled (when context is available)
-            if (enabledPlugins != null && !enabledPlugins.contains(pluginId)) {
-                Log.d(TAG, "Skipping disabled plugin: $pluginId")
-                continue
+            // For multi-instance plugins, check if ANY instance of this plugin type is enabled
+            if (enabledPlugins != null) {
+                val pluginOrInstanceEnabled = enabledPlugins.contains(pluginId) || 
+                    enabledPlugins.any { it.startsWith("${pluginId}_") }
+                if (!pluginOrInstanceEnabled) {
+                    Log.d(TAG, "Skipping disabled plugin: $pluginId (device: ${device.address})")
+                    continue
+                } else {
+                    Log.d(TAG, "Plugin $pluginId is enabled, will check device ${device.address}")
+                }
             }
             
             try {
@@ -158,21 +165,55 @@ class PluginRegistry {
                 
                 // Check if it's a new-style BleDevicePlugin
                 if (tempPlugin is BleDevicePlugin) {
-                    // Initialize with config if context available (for MAC matching)
-                    if (context != null) {
-                        try {
-                            val config = PluginConfig(AppConfig.getBlePluginConfig(context, pluginId))
-                            tempPlugin.initialize(context, config)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Could not initialize temp plugin $pluginId with config: ${e.message}")
+                    // For multi-instance plugins, check each instance's config
+                    if (context != null && tempPlugin.supportsMultipleInstances) {
+                        val allInstances = ServiceStateManager.getAllInstances(context)
+                        val matchingInstances = allInstances.filter { (_, instance) -> 
+                            instance.pluginType == pluginId 
                         }
-                    }
-                    
-                    // For now, pass null for scanRecord - matching is done by MAC/name
-                    // TODO: Convert ByteArray to ScanRecord when needed
-                    if (tempPlugin.matchesDevice(device, null)) {
-                        Log.d(TAG, "Device ${device.address} matches device plugin: $pluginId (not loaded yet)")
-                        return pluginId
+                        
+                        for ((instanceId, instance) in matchingInstances) {
+                            try {
+                                val instancePlugin = factory() as BleDevicePlugin
+                                Log.d(TAG, "Instance $instanceId config map: ${instance.config}")
+                                
+                                // Build config from instance data
+                                val configMap = if (instance.config.isNotEmpty()) {
+                                    instance.config
+                                } else {
+                                    // Fallback: use instance deviceMac as sensor_mac
+                                    mapOf("sensor_mac" to instance.deviceMac)
+                                }
+                                
+                                val config = PluginConfig(configMap)
+                                Log.d(TAG, "PluginConfig parameters: ${config.parameters}")
+                                instancePlugin.initialize(context, config)
+                                
+                                Log.d(TAG, "Checking if device ${device.address} matches instance: $instanceId")
+                                if (instancePlugin.matchesDevice(device, null)) {
+                                    Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
+                                    return pluginId
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error checking instance $instanceId: ${e.message}")
+                            }
+                        }
+                    } else {
+                        // Single-instance plugin: use generic config
+                        if (context != null) {
+                            try {
+                                val config = PluginConfig(AppConfig.getBlePluginConfig(context, pluginId))
+                                tempPlugin.initialize(context, config)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not initialize temp plugin $pluginId with config: ${e.message}")
+                            }
+                        }
+                        
+                        Log.d(TAG, "Checking if device ${device.address} matches plugin: $pluginId")
+                        if (tempPlugin.matchesDevice(device, null)) {
+                            Log.d(TAG, "Device ${device.address} matches device plugin: $pluginId (not loaded yet)")
+                            return pluginId
+                        }
                     }
                 }
                 // Check if it's a legacy BlePluginInterface
@@ -340,14 +381,34 @@ class PluginRegistry {
             // Build config map with device-specific fields
             val configWithDevice = instance.config.toMutableMap()
             
-            // Add device MAC to config with plugin-specific key names
+            // Map generic config keys to plugin-specific key names
             when (instance.pluginType) {
-                "easytouch" -> configWithDevice["thermostat_mac"] = instance.deviceMac
-                "onecontrol" -> configWithDevice["gateway_mac"] = instance.deviceMac
-                "onecontrol_v2" -> configWithDevice["gateway_mac"] = instance.deviceMac
-                "gopower" -> configWithDevice["controller_mac"] = instance.deviceMac
+                "easytouch" -> {
+                    configWithDevice["thermostat_mac"] = instance.deviceMac
+                    // Map generic "password" to "thermostat_password"
+                    instance.config["password"]?.let {
+                        configWithDevice["thermostat_password"] = it
+                        Log.d(TAG, "Mapped password -> thermostat_password for ${instance.instanceId}")
+                    }
+                }
+                "onecontrol" -> {
+                    configWithDevice["gateway_mac"] = instance.deviceMac
+                    // "gateway_pin" already uses correct key name
+                }
+                "onecontrol_v2" -> {
+                    configWithDevice["gateway_mac"] = instance.deviceMac
+                    // "gateway_pin" already uses correct key name
+                }
+                "gopower" -> {
+                    configWithDevice["controller_mac"] = instance.deviceMac
+                }
+                "mopeka" -> {
+                    configWithDevice["sensor_mac"] = instance.deviceMac
+                }
                 // Add other plugin types as needed
             }
+            
+            Log.d(TAG, "Instance ${instance.instanceId} config keys: ${configWithDevice.keys}")
             
             // Initialize with instance-specific configuration (including device MAC)
             plugin.initializeWithConfig(instance.instanceId, configWithDevice)

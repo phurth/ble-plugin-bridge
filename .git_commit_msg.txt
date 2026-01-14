@@ -1,0 +1,25 @@
+Release v2.5.6: Multi-instance support and comprehensive testing
+
+Major Updates:
+- Complete multi-instance plugin architecture (v2.6.0)
+  * Multiple instances of same plugin type can coexist independently
+  * Instance-based storage and per-instance status tracking
+  * Full web API for instance management (/api/instances/*)
+  * EasyTouch fully supports multi-instance mode
+
+- Comprehensive testing infrastructure (43 tests, 0 failures)
+  * TestContextHelper with in-memory SharedPreferences mock
+  * ServiceStateManagerTest: 6 tests for instance persistence
+  * DeviceStatusParserTest: 4 tests for protocol parsing
+  * WebServerEndpointTest: 6 tests for HTTP API validation
+  * PluginRegistryTest: 7 tests for plugin lifecycle
+  * MultiInstanceWebApiTest: 9 tests for multi-instance operations
+  * Additional tests for MQTT, GoPower, battery plugins
+
+- Comprehensive INTERNALS.md revision
+  * New section 1: Multi-Instance Plugin Architecture
+  * New section 11: Testing Infrastructure with examples
+  * Updated version history and table of contents
+  * Complete overview of testing best practices
+
+Version: 2.5.6 (versionCode: 36)
