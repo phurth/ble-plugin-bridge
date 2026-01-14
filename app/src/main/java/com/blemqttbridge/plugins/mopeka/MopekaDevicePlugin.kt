@@ -95,21 +95,35 @@ class MopekaDevicePlugin : BleDevicePlugin {
     /**
      * Check if this device is a Mopeka sensor
      * 
-     * Key: Unlike plugins that need GATT connection, Mopeka just needs
-     * to detect the manufacturer ID in the advertisement
+     * Matches by:
+     * 1. Configured MAC address if specified (for single sensor mode)
+     * 2. Mopeka manufacturer ID (0x0059) in advertisement (for multi-sensor mode)
      */
     override fun matchesDevice(device: BluetoothDevice, scanRecord: ScanRecord?): Boolean {
-        // Match by configured MAC address (Mopeka sensors have static MACs)
-        DebugLog.d("Mopeka", "matchesDevice: device=${device.address}, configured=$configuredMacAddress")
+        // If MAC is configured, match only that specific sensor
+        if (!configuredMacAddress.isNullOrBlank()) {
+            val matches = device.address.equals(configuredMacAddress, ignoreCase = true)
+            DebugLog.d("Mopeka", "matchesDevice: Configured MAC=$configuredMacAddress, device=${device.address}, match=$matches")
+            return matches
+        }
         
-        if (configuredMacAddress == null || configuredMacAddress!!.isBlank()) {
-            DebugLog.d("Mopeka", "matchesDevice: No MAC configured, returning false")
+        // No MAC configured - detect any Mopeka sensor by manufacturer ID
+        if (scanRecord == null) {
+            DebugLog.d("Mopeka", "matchesDevice: No scan record for ${device.address}")
             return false
         }
         
-        val matches = device.address.equals(configuredMacAddress, ignoreCase = true)
-        DebugLog.d("Mopeka", "matchesDevice: Match result=$matches")
-        return matches
+        // Check manufacturer-specific data for Mopeka ID (0x0059)
+        val manufacturerData = scanRecord.getManufacturerSpecificData(MopekaConstants.MANUFACTURER_ID)
+        val isMopeka = manufacturerData != null
+        
+        if (isMopeka) {
+            DebugLog.i("Mopeka", "✅ Detected Mopeka sensor: ${device.address} (mfgId=0x${MopekaConstants.MANUFACTURER_ID.toString(16)})")
+        } else {
+            DebugLog.d("Mopeka", "matchesDevice: ${device.address} is not a Mopeka sensor")
+        }
+        
+        return isMopeka
     }
     
     override fun getConfiguredDevices(): List<String> {
@@ -247,6 +261,14 @@ class MopekaDevicePlugin : BleDevicePlugin {
         
         DebugLog.d("Mopeka", "📡 Publishing to MQTT...")
         publishToMqtt(sensorData)
+        
+        // Update plugin status to show green health indicator
+        mqttPublisher?.updatePluginStatus(
+            pluginId = instanceId,
+            connected = false,  // Passive plugin, no connection
+            authenticated = false,  // Passive plugin, no authentication
+            dataHealthy = true  // We're receiving data
+        )
     }
     
     /**
@@ -297,6 +319,9 @@ class MopekaDevicePlugin : BleDevicePlugin {
         // Read quality as 0-3 diagnostic sensor
         val qualityRaw = (sensorData.quality / 33).coerceIn(0, 3)  // Convert 0-100% back to 0-3
         publisher.publishState("$actualBaseTopic/quality", qualityRaw.toString(), false)
+        
+        // Data healthy diagnostic (always ON when we receive data)
+        publisher.publishState("$actualBaseTopic/data_healthy", "ON", true)
         
         // Publish combined state JSON (includes all data for debugging/advanced users)
         publisher.publishState("$actualBaseTopic/state", sensorData.toMqttJson(), false)

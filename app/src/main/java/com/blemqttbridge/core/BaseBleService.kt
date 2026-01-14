@@ -1211,7 +1211,7 @@ class BaseBleService : Service() {
         
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
-            val scanRecord = result.scanRecord?.bytes
+            val scanRecordBytes = result.scanRecord?.bytes
             
             // Store device name from scan result (prevents 'null' in pairing dialog)
             val deviceName = device.name ?: result.scanRecord?.deviceName
@@ -1235,7 +1235,7 @@ class BaseBleService : Service() {
             }
             
             // Check if any plugin can handle this device
-            val pluginId = pluginRegistry.findPluginForDevice(device, scanRecord, applicationContext)
+            val pluginId = pluginRegistry.findPluginForDevice(device, scanRecordBytes, applicationContext)
             if (pluginId != null) {
                 Log.i(TAG, "✅ Found matching device: ${device.address} -> plugin: $pluginId")
                 appendServiceLog("Found device: ${device.address} (plugin: $pluginId)")

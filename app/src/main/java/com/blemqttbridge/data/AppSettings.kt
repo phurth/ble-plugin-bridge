@@ -60,8 +60,8 @@ class AppSettings(private val context: Context) {
         // Default values
         const val DEFAULT_MQTT_HOST = ""
         const val DEFAULT_MQTT_PORT = 1883
-        const val DEFAULT_MQTT_USERNAME = "mqtt"
-        const val DEFAULT_MQTT_PASSWORD = "mqtt"
+        const val DEFAULT_MQTT_USERNAME = ""
+        const val DEFAULT_MQTT_PASSWORD = ""
         const val DEFAULT_TOPIC_PREFIX = "homeassistant"
         const val DEFAULT_GATEWAY_MAC = ""
         const val DEFAULT_GATEWAY_PIN = ""
@@ -104,7 +104,7 @@ class AppSettings(private val context: Context) {
     val bleScannerEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_SCANNER_ENABLED] ?: false }
     
     // Web Server Flows
-    val webServerEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_SERVER_ENABLED] ?: false }
+    val webServerEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_SERVER_ENABLED] ?: true }
     val webServerPort: Flow<Int> = context.dataStore.data.map { it[WEB_SERVER_PORT] ?: DEFAULT_WEB_SERVER_PORT }
     val webAuthEnabled: Flow<Boolean> = context.dataStore.data.map { it[WEB_AUTH_ENABLED] ?: false }
     val webAuthUsername: Flow<String> = context.dataStore.data.map { it[WEB_AUTH_USERNAME] ?: "" }

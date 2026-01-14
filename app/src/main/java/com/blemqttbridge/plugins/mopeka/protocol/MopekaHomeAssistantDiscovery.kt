@@ -121,6 +121,13 @@ object MopekaHomeAssistantDiscovery {
                 generateQualityDiscoveryJson(
                     macAddress,
                     baseTopic
+                ),
+            
+            // Data healthy binary sensor (diagnostic)
+            "$discoveryPrefix/binary_sensor/mopeka_$cleanMac/data_healthy/config" to
+                generateDataHealthyDiscoveryJson(
+                    macAddress,
+                    baseTopic
                 )
         )
     }
@@ -223,6 +230,45 @@ object MopekaHomeAssistantDiscovery {
             append("\"icon\":\"mdi:signal\",")
             append("\"entity_category\":\"diagnostic\",")  // Mark as diagnostic
             append("\"state_class\":\"measurement\",")
+            
+            // Device grouping
+            append("\"device\":{")
+            append("\"identifiers\":[\"mopeka_$cleanMac\"],")
+            append("\"name\":\"Mopeka Tank Sensor $macAddress\",")
+            append("\"model\":\"Mopeka Pro Series\",")
+            append("\"manufacturer\":\"Mopeka\"")
+            append("},")
+            
+            // Home Assistant connection info
+            append("\"availability_topic\":\"$discoveryPrefix/$baseTopic/availability\",")
+            append("\"payload_available\":\"online\",")
+            append("\"payload_not_available\":\"offline\"")
+            
+            append("}")
+        }
+    }
+    
+    /**
+     * Generate data_healthy binary sensor discovery (diagnostic sensor)
+     */
+    private fun generateDataHealthyDiscoveryJson(
+        macAddress: String,
+        baseTopic: String
+    ): String {
+        val cleanMac = macAddress.replace(":", "").uppercase()
+        val uniqueId = "mopeka_${cleanMac}_data_healthy"
+        val discoveryPrefix = "homeassistant"
+        val stateTopic = "$discoveryPrefix/$baseTopic/data_healthy"
+        
+        return buildString {
+            append("{")
+            append("\"name\":\"Data Healthy\",")
+            append("\"state_topic\":\"$stateTopic\",")
+            append("\"unique_id\":\"$uniqueId\",")
+            append("\"device_class\":\"connectivity\",")
+            append("\"entity_category\":\"diagnostic\",")  // Mark as diagnostic
+            append("\"payload_on\":\"ON\",")
+            append("\"payload_off\":\"OFF\",")
             
             // Device grouping
             append("\"device\":{")

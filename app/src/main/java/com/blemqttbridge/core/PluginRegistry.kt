@@ -190,7 +190,19 @@ class PluginRegistry {
                                 instancePlugin.initialize(context, config)
                                 
                                 Log.d(TAG, "Checking if device ${device.address} matches instance: $instanceId")
-                                if (instancePlugin.matchesDevice(device, null)) {
+                                // Convert ByteArray back to ScanRecord for matching
+                                val scanRecordObj = scanRecord?.let { bytes ->
+                                    try {
+                                        // Use the bytes directly to create a new ScanRecord via the builder pattern
+                                        val parser = Class.forName("android.bluetooth.le.ScanRecord")
+                                            .getDeclaredMethod("parseFromBytes", ByteArray::class.java)
+                                        parser.invoke(null, bytes) as? android.bluetooth.le.ScanRecord
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Failed to parse ScanRecord: ${e.message}")
+                                        null
+                                    }
+                                }
+                                if (instancePlugin.matchesDevice(device, scanRecordObj)) {
                                     Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
                                     return pluginId
                                 }
@@ -210,7 +222,18 @@ class PluginRegistry {
                         }
                         
                         Log.d(TAG, "Checking if device ${device.address} matches plugin: $pluginId")
-                        if (tempPlugin.matchesDevice(device, null)) {
+                        // Convert ByteArray back to ScanRecord for matching
+                        val scanRecordObj = scanRecord?.let { bytes ->
+                            try {
+                                val parser = Class.forName("android.bluetooth.le.ScanRecord")
+                                    .getDeclaredMethod("parseFromBytes", ByteArray::class.java)
+                                parser.invoke(null, bytes) as? android.bluetooth.le.ScanRecord
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to parse ScanRecord: ${e.message}")
+                                null
+                            }
+                        }
+                        if (tempPlugin.matchesDevice(device, scanRecordObj)) {
                             Log.d(TAG, "Device ${device.address} matches device plugin: $pluginId (not loaded yet)")
                             return pluginId
                         }
