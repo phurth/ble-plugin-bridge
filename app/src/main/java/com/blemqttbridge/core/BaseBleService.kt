@@ -28,6 +28,8 @@ import com.blemqttbridge.utils.AndroidTvHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import java.util.UUID
+import java.util.Collections
+import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
  * Base BLE service with plugin hooks.
@@ -145,7 +147,9 @@ class BaseBleService : Service() {
     private val MAX_SERVICE_LOG_LINES = 1000
     
     // BLE trace logging (for BLE events only)
-    private val bleTraceBuffer = ArrayDeque<String>()
+    // Thread-safe: uses ConcurrentLinkedDeque to protect against concurrent access
+    // from BLE callbacks and web server threads
+    private val bleTraceBuffer = ConcurrentLinkedDeque<String>()
     private val MAX_BLE_TRACE_LINES = 1000
     private var traceEnabled = false
     private var traceWriter: java.io.BufferedWriter? = null
@@ -2701,7 +2705,7 @@ class BaseBleService : Service() {
             appendLine("")
             appendLine("Recent BLE Events (last $MAX_BLE_TRACE_LINES):")
             appendLine("=".repeat(50))
-            bleTraceBuffer.forEach { line -> appendLine(line) }
+            bleTraceBuffer.forEach { line: String -> appendLine(line) }
             
             if (bleTraceBuffer.isEmpty()) {
                 appendLine("(No BLE events logged yet)")
