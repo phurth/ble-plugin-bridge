@@ -26,6 +26,15 @@ import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
+ * Tank query response collector for multi-frame encrypted responses
+ */
+data class TankQueryResponse(
+    val queryId: String,  // E0, E1, E2, etc.
+    val frames: MutableList<ByteArray> = mutableListOf(),
+    var isComplete: Boolean = false
+)
+
+/**
  * OneControl BLE Device Plugin - NEW ARCHITECTURE
  * 
  * This plugin OWNS the BluetoothGattCallback for OneControl gateway devices.
@@ -172,7 +181,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     override fun onDeviceDisconnected(device: BluetoothDevice) {
         Log.i(TAG, "Device disconnected: ${device.address}")
-        // Cleanup if needed
+        // Cleanup handled by GATT callback cleanup method
     }
     
     /**
@@ -332,6 +341,12 @@ class OneControlGattCallback(
     
     // Home Assistant discovery tracking - prevents duplicate discovery publishes
     private val haDiscoveryPublished = mutableSetOf<String>()
+
+    // Tank query response handling
+    private val pendingTankResponses = mutableMapOf<String, TankQueryResponse>()
+    
+    // Session key for TEA decryption (16-byte auth key from SEED notification)
+    private var sessionAuthKey: ByteArray? = null
 
     // Device metadata from GetDevicesMetadata response
     data class DeviceMetadata(
@@ -1093,12 +1108,20 @@ class OneControlGattCallback(
         
         when (uuid) {
             DATA_READ_CHARACTERISTIC_UUID -> {
-                // Queue for stream reading (like official app)
-                notificationQueue.offer(data)
-                // Update last data timestamp for health tracking
-                lastDataTimestampMs = System.currentTimeMillis()
-                synchronized(streamReadLock) {
-                    streamReadLock.notify()
+                // Check if this is a tank query response first
+                val tankResult = processTankQueryResponse(data)
+                if (tankResult != null) {
+                    // Tank query response decoded successfully
+                    Log.i(TAG, "🪣 Tank query response decoded: ${tankResult.queryId} -> ${tankResult.level}%")
+                    publishTankQueryResult(tankResult)
+                } else {
+                    // Queue for normal stream reading (like official app)
+                    notificationQueue.offer(data)
+                    // Update last data timestamp for health tracking
+                    lastDataTimestampMs = System.currentTimeMillis()
+                    synchronized(streamReadLock) {
+                        streamReadLock.notify()
+                    }
                 }
             }
             SEED_CHARACTERISTIC_UUID -> {
@@ -1223,6 +1246,7 @@ class OneControlGattCallback(
     private fun stopActiveStreamReading() {
         isStreamReadingActive = false
         shouldStopStreamReading = true
+        sessionAuthKey = null
         synchronized(streamReadLock) {
             streamReadLock.notify()
         }
@@ -1559,6 +1583,175 @@ class OneControlGattCallback(
         }
         mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/hvac", json.toString(), true)
     }
+    
+    /**
+     * Process tank query responses (E0-E9 encrypted multi-frame responses)
+     * Returns decoded tank data if response is complete, null otherwise
+     */
+    private fun processTankQueryResponse(data: ByteArray): TankData? {
+        if (data.size < 4) return null
+        
+        // Look for tank query response pattern: 00 XX 02 QQ...
+        if (data[0] != 0x00.toByte()) return null
+        
+        val responseType = data[1].toInt() and 0xFF
+        if (data[2] != 0x02.toByte()) return null  // Not a query response
+        
+        val queryId = String.format("%02X", data[3].toInt() and 0xFF)
+        
+        // Only process tank queries E0-E9
+        if (!queryId.matches(Regex("E[0-9]"))) return null
+        
+        Log.d(TAG, "🪣 Tank query response frame: $queryId, type=0x${responseType.toString(16)}, ${data.size} bytes")
+        
+        // Get or create response collector
+        val response = pendingTankResponses.getOrPut(queryId) { TankQueryResponse(queryId) }
+        
+        // Add frame to response (skip 00 XX prefix)
+        val frameData = data.copyOfRange(2, data.size)
+        response.frames.add(frameData)
+        
+        // Check if this is the final frame (usually starts with 0x0A)
+        if (responseType == 0x0A) {
+            response.isComplete = true
+            pendingTankResponses.remove(queryId)
+            
+            Log.i(TAG, "🪣 Complete response for $queryId: ${response.frames.size} frames")
+            return decodeTankQueryResponse(response)
+        }
+        
+        return null
+    }
+    
+    /**
+     * Decode a complete tank query response
+     */
+    private fun decodeTankQueryResponse(response: TankQueryResponse): TankData? {
+        try {
+            // Reconstruct multi-frame payload
+            val reconstructed = reconstructTankQueryFrames(response.frames)
+            Log.d(TAG, "🪣 Reconstructed ${reconstructed.size} bytes for ${response.queryId}")
+            
+            // COBS decode
+            val cobsDecoded = CobsDecoder.decode(reconstructed)
+            if (cobsDecoded == null) {
+                Log.w(TAG, "❌ COBS decode failed for ${response.queryId}")
+                return null
+            }
+            Log.d(TAG, "🪣 COBS decoded ${cobsDecoded.size} bytes for ${response.queryId}")
+            
+            // TEA decrypt using session key
+            val decrypted = if (cobsDecoded.size >= 8) {
+                // Get session key from gateway authentication
+                val sessionKey = getSessionKey()
+                if (sessionKey != null && sessionKey.size == 8) {
+                    val decryptedData = TeaEncryption.decryptByteArray(cobsDecoded, sessionKey)
+                    if (decryptedData != null) {
+                        Log.i(TAG, "✅ TEA decryption successful for ${response.queryId}")
+                        decryptedData
+                    } else {
+                        Log.w(TAG, "❌ TEA decryption failed for ${response.queryId} - using raw data")
+                        cobsDecoded
+                    }
+                } else {
+                    Log.w(TAG, "⚠️ No valid session key available for ${response.queryId} - using raw data")
+                    cobsDecoded
+                }
+            } else {
+                Log.w(TAG, "❌ Data too short for ${response.queryId}")
+                cobsDecoded
+            }
+            
+            // Parse tank data (level is in first byte, masked to 0x7F)
+            val level = if (decrypted.isNotEmpty()) {
+                (decrypted[0].toInt() and 0x7F).coerceIn(0, 100)
+            } else 0
+            
+            Log.i(TAG, "🪣 ${response.queryId}: Tank level = $level%")
+            
+            return TankData(
+                queryId = response.queryId,
+                tableId = 8, // Assuming table 8 like autonomous systems
+                deviceId = response.queryId.substring(1).toIntOrNull() ?: 0, // E0->0, E1->1, etc.
+                level = level
+            )
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error decoding ${response.queryId}: ${e.message}")
+            return null
+        }
+    }
+    
+    /**
+     * Reconstruct frames into complete payload
+     */
+    private fun reconstructTankQueryFrames(frames: List<ByteArray>): ByteArray {
+        val result = mutableListOf<Byte>()
+        
+        for (frame in frames) {
+            // Skip frame headers and add payload data
+            if (frame.size > 6) {
+                // Skip query response header: 02 QQ 01 XX XX...
+                val payload = frame.copyOfRange(6, frame.size)
+                result.addAll(payload.toList())
+            }
+        }
+        
+        return result.toByteArray()
+    }
+    
+    /**
+     * Get the current session key for TEA decryption
+     * Uses first 8 bytes of the 16-byte authentication key from SEED notification
+     */
+    private fun getSessionKey(): ByteArray? {
+        val authKey = sessionAuthKey
+        return if (authKey != null && authKey.size >= 8) {
+            authKey.copyOfRange(0, 8)  // First 8 bytes for TEA decryption
+        } else {
+            Log.w(TAG, "No session authentication key available for decryption")
+            null
+        }
+    }
+    
+    /**
+     * Publish decoded tank query result to MQTT
+     */
+    private fun publishTankQueryResult(tankData: TankData) {
+        val keyHex = String.format("%02X%02X", tankData.tableId, tankData.deviceId)
+        val uniqueKey = "tank_${tankData.queryId}_${keyHex}" // Use query ID for uniqueness
+        
+        // Publish entity state
+        publishEntityState(
+            entityType = EntityType.TANK_SENSOR,
+            tableId = tankData.tableId,
+            deviceId = tankData.deviceId,
+            discoveryKey = uniqueKey,
+            state = mapOf(
+                "level" to tankData.level.toString(),
+                "query_id" to tankData.queryId,
+                "communication_type" to "query_response"
+            )
+        ) { friendlyName, _, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/${tankData.tableId}/${tankData.deviceId}/level"
+            discoveryBuilder.buildSensor(
+                sensorName = "Tank ${tankData.queryId} Level",
+                stateTopic = "$prefix/$stateTopic",
+                unit = "%",
+                icon = "mdi:gauge"
+            )
+        }
+    }
+    
+    /**
+     * Tank data structure for both autonomous and query-based tanks
+     */
+    private data class TankData(
+        val queryId: String = "",
+        val tableId: Int,
+        val deviceId: Int,
+        val level: Int
+    )
     
     /**
      * Handle TankSensorStatus event
@@ -2048,6 +2241,10 @@ class OneControlGattCallback(
         
         val authKey = calculateAuthKey(data, gatewayPin, gatewayCypher)
         Log.i(TAG, "🔑 Calculated auth key: ${authKey.joinToString(" ") { "%02X".format(it) }}")
+        
+        // Store auth key for TEA decryption of tank query responses
+        sessionAuthKey = authKey
+        Log.d(TAG, "🔐 Stored session key for tank decryption (${authKey.size} bytes)")
         
         // Write auth key to KEY characteristic (00000013)
         keyChar?.let { char ->
