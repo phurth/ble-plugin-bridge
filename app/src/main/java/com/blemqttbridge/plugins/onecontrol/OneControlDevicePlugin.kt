@@ -1758,38 +1758,51 @@ class OneControlGattCallback(
     )
     
     /**
-     * Handle TankSensorStatus event
+     * Handle TankSensorStatus event (0x0C)
+     * Format: [eventType(0x0C)] [deviceTableId] [deviceId1] [percent1] [deviceId2] [percent2] ...
+     * Multiple tanks can be reported in a single event as pairs of (DeviceId, Percent)
      */
     private fun handleTankStatus(data: ByteArray) {
-        if (data.size < 5) return
+        // Minimum: eventType(1) + tableId(1) + deviceId(1) + percent(1) = 4 bytes
+        if (data.size < 4) return
         
         val tableId = data[1].toInt() and 0xFF
-        val deviceId = data[2].toInt() and 0xFF
-        val level = data[3].toInt() and 0xFF
+        val tankCount = (data.size - 2) / 2  // Each tank is 2 bytes (deviceId + percent)
         
-        // Create entity instance
-        val entity = OneControlEntity.Tank(
-            tableId = tableId,
-            deviceId = deviceId,
-            level = level
-        )
+        Log.i(TAG, "📦 TankSensorStatus: tableId=$tableId, tankCount=$tankCount, dataSize=${data.size}")
         
-        Log.i(TAG, "📦 Tank ${entity.address} level=${entity.level}%")
-        
-        publishEntityState(
-            entityType = EntityType.TANK_SENSOR,
-            tableId = entity.tableId,
-            deviceId = entity.deviceId,
-            discoveryKey = "tank_${entity.key}",
-            state = mapOf("level" to entity.level.toString())
-        ) { friendlyName, _, prefix, baseTopic ->
-            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
-            discoveryBuilder.buildSensor(
-                sensorName = friendlyName,
-                stateTopic = "$prefix/$stateTopic",
-                unit = "%",
-                icon = "mdi:gauge"
+        // Iterate through all tank pairs starting at index 2
+        var index = 2
+        while (index + 1 < data.size) {
+            val deviceId = data[index].toInt() and 0xFF
+            val level = data[index + 1].toInt() and 0xFF
+            
+            // Create entity instance
+            val entity = OneControlEntity.Tank(
+                tableId = tableId,
+                deviceId = deviceId,
+                level = level
             )
+            
+            Log.i(TAG, "📦 Tank ${entity.address} level=${entity.level}%")
+            
+            publishEntityState(
+                entityType = EntityType.TANK_SENSOR,
+                tableId = entity.tableId,
+                deviceId = entity.deviceId,
+                discoveryKey = "tank_${entity.key}",
+                state = mapOf("level" to entity.level.toString())
+            ) { friendlyName, _, prefix, baseTopic ->
+                val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
+                discoveryBuilder.buildSensor(
+                    sensorName = friendlyName,
+                    stateTopic = "$prefix/$stateTopic",
+                    unit = "%",
+                    icon = "mdi:gauge"
+                )
+            }
+            
+            index += 2  // Move to next tank pair
         }
     }
     
