@@ -556,7 +556,10 @@ class OneControlGattCallback(
                         gatt.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        Log.i(TAG, "❌ Disconnected from ${device.address}")
+                        Log.i(TAG, "❌ Disconnected from ${device.address} with status=$status")
+                        if (status == 133) {
+                            Log.w(TAG, "⚠️ Status 133: Connection timeout or GATT error - check authentication flow")
+                        }
                         cleanup(gatt)
                         onDisconnect(device, status)
                     }
@@ -1246,7 +1249,7 @@ class OneControlGattCallback(
     private fun stopActiveStreamReading() {
         isStreamReadingActive = false
         shouldStopStreamReading = true
-        sessionAuthKey = null
+        // Don't clear sessionAuthKey here - keep it for reconnection
         synchronized(streamReadLock) {
             streamReadLock.notify()
         }
@@ -1707,9 +1710,10 @@ class OneControlGattCallback(
     private fun getSessionKey(): ByteArray? {
         val authKey = sessionAuthKey
         return if (authKey != null && authKey.size >= 8) {
+            Log.v(TAG, "🔓 Session key available (${authKey.size} bytes)")
             authKey.copyOfRange(0, 8)  // First 8 bytes for TEA decryption
         } else {
-            Log.w(TAG, "No session authentication key available for decryption")
+            Log.w(TAG, "No session authentication key available for decryption (authKey=${authKey?.size ?: "null"})")
             null
         }
     }
@@ -2243,8 +2247,12 @@ class OneControlGattCallback(
         Log.i(TAG, "🔑 Calculated auth key: ${authKey.joinToString(" ") { "%02X".format(it) }}")
         
         // Store auth key for TEA decryption of tank query responses
-        sessionAuthKey = authKey
-        Log.d(TAG, "🔐 Stored session key for tank decryption (${authKey.size} bytes)")
+        try {
+            sessionAuthKey = authKey
+            Log.d(TAG, "🔐 Stored session key for tank decryption (${authKey.size} bytes)")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error storing session key: ${e.message}", e)
+        }
         
         // Write auth key to KEY characteristic (00000013)
         keyChar?.let { char ->
