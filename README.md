@@ -1,7 +1,13 @@
 # BLE-MQTT Bridge (Android)
 
-Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
+Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture. Available plugins:
+- OneControl RV Control System
+- Micro-Air EasyTouch RV Thermostat
+- GoPower Solar Controller
+- Mopeka Pro Check Fluid Sensors
+- Basic BLE scanner plugin
 
+Note: I'm able to build and test these plugins since they are components I have in my RV. There's a good chance your RV is different and adjustments will need to be made. Pleaase help other users by submitting an issue or feature request if you encounter problems.
 
 ## 🚀 Quick Start
 

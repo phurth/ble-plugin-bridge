@@ -771,6 +771,7 @@ class WebServerManager(
                     <div class="mqtt-config-item ${'$'}{mqttClass}">
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'broker', 'MQTT Broker', data.mqttBroker, editDisabled, false)}</div>
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'port', 'MQTT Port', data.mqttPort, editDisabled, false)}</div>
+                        <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'topicPrefix', 'Topic Prefix', data.mqttTopicPrefix, editDisabled, false, 'Default: homeassistant (for Home Assistant discovery)')}</div>
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'username', 'MQTT Username', data.mqttUsername, editDisabled, false)}</div>
                         <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'password', 'MQTT Password', data.mqttPassword, editDisabled, true)}</div>
                     </div>
@@ -1363,10 +1364,11 @@ class WebServerManager(
             }
         }
 
-        function buildEditableField(pluginId, fieldName, label, value, editDisabled, isSecret) {
+        function buildEditableField(pluginId, fieldName, label, value, editDisabled, isSecret, helperText) {
             const fieldId = ${'`'}${'$'}{pluginId}_${'$'}{fieldName}${'`'};
             const displayValue = value || 'None';
             const maskedValue = isSecret && value ? '•'.repeat(value.length) : displayValue;
+            const helper = helperText ? ${'`'}<div style="font-size: 12px; color: #888; margin-top: 2px;">${'$'}{helperText}</div>${'`'} : '';
             
             return ${'`'}
                 <div class="plugin-config-field">
@@ -1375,6 +1377,7 @@ class WebServerManager(
                     <input type="text" id="${'$'}{fieldId}_input" class="config-input" value="${'$'}{value}" style="display:none;">
                     <button id="${'$'}{fieldId}_edit" class="edit-btn" ${'$'}{editDisabled} onclick="editField('${'$'}{pluginId}', '${'$'}{fieldName}', ${'$'}{isSecret})">Edit</button>
                     <button id="${'$'}{fieldId}_save" class="edit-btn save-btn" style="display:none;" onclick="saveField('${'$'}{pluginId}', '${'$'}{fieldName}')">Save</button>
+                    ${'$'}{helper}
                 </div>
             ${'`'};
         }
@@ -1587,6 +1590,7 @@ class WebServerManager(
             put("mqttPort", settings.mqttBrokerPort.first())
             put("mqttUsername", settings.mqttUsername.first())
             put("mqttPassword", settings.mqttPassword.first())
+            put("mqttTopicPrefix", settings.mqttTopicPrefix.first())
             
             val enabledPlugins = JSONArray()
             if (settings.oneControlEnabled.first()) enabledPlugins.put("onecontrol")
@@ -1860,6 +1864,7 @@ class WebServerManager(
                 when (field) {
                     "broker" -> settings.setMqttBrokerHost(value)
                     "port" -> settings.setMqttBrokerPort(value.toIntOrNull() ?: 1883)
+                    "topicPrefix" -> settings.setMqttTopicPrefix(value)
                     "username" -> settings.setMqttUsername(value)
                     "password" -> settings.setMqttPassword(value)
                     else -> return@runBlocking newFixedLengthResponse(
