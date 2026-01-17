@@ -2,8 +2,8 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.6  
-> **Last Updated:** January 13, 2026  
+> **Current Version:** v2.5.11  
+> **Last Updated:** January 17, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -1322,49 +1322,86 @@ private fun handleDimmableLightStatus(data: ByteArray) {
 
 OneControl supports two tank sensor event formats:
 
-**TankSensorStatus (0x0C) - V1 Format:**
-- Multiple tanks reported in a single event
-- Format: `[0x0C][tableId][deviceId1][level1][deviceId2][level2]...`
-- 2 bytes per tank: `[deviceId, level]`
+**TankSensorStatus (0x0C) - Multi-Tank Batched Format:**
+- **Multiple tanks reported in a single event** as sequential pairs
+- Format: `[0x0C][tableId][deviceId1][level1][deviceId2][level2][deviceId3][level3]...`
+- Each tank is 2 bytes: `[deviceId, level]`
+- Number of tanks = `(data.size - 2) / 2`
+- **Critical:** Must iterate through ALL pairs to capture all tanks in the system
 
-**TankSensorStatusV2 (0x1B) - V2 Format:**
+**TankSensorStatusV2 (0x1B) - Single Tank Format:**
 - Single tank per event
 - Format: `[0x1B][tableId][deviceId][level]`
 - May include extended status (8 bytes with battery, quality, accelerometer data)
 
+**Multi-Tank Parsing (v2.5.11+):**
+
+The V1 format (0x0C) can batch multiple tanks in one event. RV systems with 2-5 tanks may send all tank data in a single broadcast:
+
 ```kotlin
 private fun handleTankStatus(data: ByteArray) {
-    if (data.size < 5) return
+    // Minimum: eventType(1) + tableId(1) + deviceId(1) + percent(1) = 4 bytes
+    if (data.size < 4) return
     
     val tableId = data[1].toInt() and 0xFF
-    val deviceId = data[2].toInt() and 0xFF
-    val level = data[3].toInt() and 0xFF  // 0-100 percentage
+    val tankCount = (data.size - 2) / 2  // Each tank is 2 bytes
     
-    // Create entity instance
-    val entity = OneControlEntity.Tank(
-        tableId = tableId,
-        deviceId = deviceId,
-        level = level
-    )
+    Log.i(TAG, "📦 TankSensorStatus: tableId=$tableId, tankCount=$tankCount")
     
-    // Publish state and discovery
-    publishEntityState(
-        entityType = EntityType.TANK_SENSOR,
-        tableId = entity.tableId,
-        deviceId = entity.deviceId,
-        discoveryKey = "tank_${entity.key}",
-        state = mapOf("level" to entity.level.toString())
-    ) { friendlyName, _, prefix, baseTopic ->
-        val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
-        discoveryBuilder.buildSensor(
-            sensorName = friendlyName,
-            stateTopic = "$prefix/$stateTopic",
-            unit = "%",
-            icon = "mdi:gauge"
+    // Iterate through all tank pairs starting at index 2
+    var index = 2
+    while (index + 1 < data.size) {
+        val deviceId = data[index].toInt() and 0xFF
+        val level = data[index + 1].toInt() and 0xFF
+        
+        // Create entity for THIS tank
+        val entity = OneControlEntity.Tank(
+            tableId = tableId,
+            deviceId = deviceId,
+            level = level
         )
+        
+        // Publish state and discovery for THIS tank
+        publishEntityState(
+            entityType = EntityType.TANK_SENSOR,
+            tableId = entity.tableId,
+            deviceId = entity.deviceId,
+            discoveryKey = "tank_${entity.key}",
+            state = mapOf("level" to entity.level.toString())
+        ) { friendlyName, _, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/level"
+            discoveryBuilder.buildSensor(
+                sensorName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                unit = "%",
+                icon = "mdi:gauge"
+            )
+        }
+        
+        index += 2  // Move to next tank pair
     }
 }
 ```
+
+**Example: 5-Tank System**
+
+A 5-tank RV system might send:
+```
+0C 01 05 64 06 50 07 75 08 30 09 80
+│  │  └────────────────────────────── Tank pairs: (5,100%), (6,50%), (7,75%), (8,30%), (9,80%)
+│  └── tableId = 0x01
+└── eventType = 0x0C (TankSensorStatus)
+```
+
+This single 12-byte event contains all 5 tanks. Prior to v2.5.11, only the first tank (5, 100%) was extracted, causing systems with multiple tanks to show only 1 tank in Home Assistant.
+
+**Format Detection:**
+
+Different RV configurations use different formats:
+- **0x0C batched:** Typically used by systems with multiple tanks (2-5 tanks)
+- **0x1B individual:** Some systems send separate events per tank
+
+Both formats work after COBS decoding - no additional encryption or encoding is applied to tank data.
 
 **Tank Level Values:**
 
