@@ -13,11 +13,8 @@
 0. [Quick Reference for LLMs](#0-quick-reference-for-llms)
    - [Common Tasks](#common-tasks)
    - [Key Files](#key-files)
-   - [Recent Critical Changes](#recent-critical-changes)
-   - [v2.5.6 Testing & Multi-Instance](#v256-testing--multi-instance-january-2026)
-   - [v2.5.5 Web Interface](#v255-web-interface-january-2026)
 
-1. [Multi-Instance Plugin Architecture](#1-multi-instance-plugin-architecture-v260)
+1. [Multi-Instance Plugin Architecture](#1-multi-instance-plugin-architecture)
    - [Overview](#overview-multi-instance)
    - [PluginInstance Data Model](#plugininstance-data-model)
    - [Instance Registry](#instance-registry)
@@ -88,30 +85,16 @@
    - [Troubleshooting](#troubleshooting)
    - [Known Limitations](#known-limitations)
 
-7. [GoPower Solar Controller Protocol](#7-gopower-solar-controller-protocol)
-   - [Overview](#overview-3)
-   - [Protocol Characteristics](#protocol-characteristics)
-   - [Notification Data Format](#notification-data-format)
-   - [Key Implementation Details](#key-implementation-details)
-   - [Home Assistant Entities](#home-assistant-entities)
-   - [Plugin Structure](#plugin-structure)
-   - [Configuration Requirements](#configuration-requirements)
-   - [Reboot Command](#reboot-command)
-   - [Diagnostic Sensors](#diagnostic-sensors)
-   - [Troubleshooting](#troubleshooting)
-   - [Known Limitations](#known-limitations)
-
 8. [MQTT Integration](#8-mqtt-integration)
    - [MqttOutputPlugin](#mqttoutputplugin)
-   - [Topic Structure](#topic-structure-v248)
+   - [Topic Structure](#topic-structure)
    - [Graceful Error Handling](#graceful-error-handling)
-   - [Multi-Gateway Support](#8-multi-gateway-support-v248)
+   - [Multi-Gateway Support](#multi-gateway-support)
      - [Overview](#overview-4)
      - [Device Identification Strategy](#device-identification-strategy)
      - [Implementation](#implementation)
      - [System Diagnostics](#system-diagnostics-in-multi-gateway-setup)
      - [Deployment Example](#multi-gateway-deployment-example)
-     - [Migration Notes](#migration-notes)
 
 9. [Home Assistant Discovery](#9-home-assistant-discovery)
    - [Discovery Payload Format](#discovery-payload-format)
@@ -123,15 +106,15 @@
    - [Step-by-Step: Adding a New Entity Type](#step-by-step-adding-a-new-entity-type-example-rgb-light)
 
 10. [State Management & Status Indicators](#10-state-management--status-indicators)
-    - [Per-Plugin Status Architecture](#per-plugin-status-architecture-v231)
+    - [Per-Plugin Status Architecture](#per-plugin-status-architecture)
     - [MQTT Diagnostic Sensors](#mqtt-diagnostic-sensors-per-plugin)
-    - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status-v232)
+    - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status)
     - [SettingsScreen Indicators](#settingsscreen-per-plugin-indicators)
     - [BLE Scanner Conditional Initialization](#ble-scanner-conditional-initialization)
     - [System Diagnostic Sensors](#system-diagnostic-sensors)
     - [Settings Screen](#settings-screen)
 
-11. [Testing Infrastructure](#11-testing-infrastructure-v256)
+11. [Testing Infrastructure](#11-testing-infrastructure)
     - [Overview](#testing-overview)
     - [Test Framework](#test-framework)
     - [TestContextHelper](#testcontexthelper)
@@ -148,18 +131,15 @@
     - [Usage Guidelines](#usage-guidelines)
     - [BLE Trace Capture](#ble-trace-capture)
     - [Performance Impact](#performance-impact)
-    - [Emoji Removal](#emoji-removal)
     - [Best Practices](#best-practices)
 
 14. [Common Pitfalls & Solutions](#14-common-pitfalls--solutions)
-    - [MQTT Publish Exceptions](#1-mqtt-publish-exceptions)
-    - [Stale Status Indicators](#2-stale-status-indicators)
-    - [BLE GATT Error 133](#3-ble-gatt-error-133)
-    - [Wrong Byte Order](#4-wrong-byte-order)
-    - [Missing COBS Encoding](#5-missing-cobs-encoding)
-    - [Notification Subscription Race Condition](#6-notification-subscription-race-condition)
-    - [Dimmable Bouncing](#7-dimmable-bouncing)
-    - [BLE Trace Logging](#8-ble-trace-logging)
+    - [MQTT Publish Exceptions](#mqtt-publish-exceptions)
+    - [Stale Status Indicators](#stale-status-indicators)
+    - [BLE GATT Error 133](#ble-gatt-error-133)
+    - [Wrong Byte Order](#wrong-byte-order)
+    - [Missing COBS Encoding](#missing-cobs-encoding)
+    - [Notification Subscription Race Condition](#notification-subscription-race-condition)
 
 15. [Background Operation](#15-background-operation)
     - [Battery Optimization & Background Execution](#battery-optimization--background-execution)
@@ -174,11 +154,11 @@
 
 ### Common Tasks
 
-- **Adding new OneControl entity type:** See [Section 11](#11-adding-new-entity-types)
+- **Adding new OneControl entity type:** See [Section 9](#9-home-assistant-discovery) (Entity Model Architecture)
 - **Creating new plugin:** See [Section 12](#12-creating-new-plugins)
-- **Understanding MQTT topics:** See [Section 7.5 (Multi-Gateway)](#75-multi-gateway-support-v248) and [Section 7](#7-mqtt-integration)
-- **Debugging connection issues:** See [Section 13 (Common Pitfalls)](#13-common-pitfalls)
-- **Multi-gateway deployment:** See [Section 7.5](#75-multi-gateway-support-v248)
+- **Understanding MQTT topics:** See [Section 8](#8-mqtt-integration)
+- **Debugging connection issues:** See [Section 14](#14-common-pitfalls--solutions)
+- **Multi-gateway deployment:** See [Section 8 (Multi-Gateway Support)](#multi-gateway-support)
 
 ### Key Files
 
@@ -190,133 +170,9 @@
 - **Entity models:** `OneControlEntity.kt`
 - **Service layer:** `BaseBleService.kt`
 
-### Recent Critical Changes
-
-**v2.5.6 (January 2026):**
-- **Complete Multi-Instance Plugin Support:** Full implementation of v2.6.0 multi-instance architecture
-  - Multiple instances of same plugin type can now coexist independently
-  - `PluginInstance` data model with unique instanceId (format: `{pluginType}_{macSuffix}`)
-  - Instance-based storage in `ServiceStateManager` (SharedPreferences)
-  - All plugins load from instances on service startup
-  - Web API endpoints: `/api/instances`, `/api/instances/add`, `/api/instances/remove`, `/api/instances/update`
-  - Web UI displays instances grouped by plugin type with instance-level controls
-  - Per-instance status tracking in `BaseBleService._pluginStatuses`
-  - EasyTouch plugin fully supports multi-instance mode
-  - All other plugins prepared for multi-instance (supportsMultipleInstances = false by default)
-- **Comprehensive Testing Infrastructure:** Full unit test suite with 43 tests, 0 failures
-  - `TestContextHelper` utility: In-memory SharedPreferences mock for test isolation
-  - `ServiceStateManagerTest`: 6 tests for instance persistence (CRUD, serialization)
-  - `DeviceStatusParserTest`: 4 tests for protocol message parsing
-  - `WebServerEndpointTest`: 6 tests for HTTP API payload validation
-  - `PluginRegistryTest`: 7 tests for plugin lifecycle
-  - `MultiInstanceWebApiTest`: 9 tests for multi-instance API operations
-  - Additional tests for MQTT, GoPower, and mock battery plugins
-  - Tests validated after each change to catch regressions early
-  - Foundation for continued test expansion
-
-**v2.5.5 (January 2026):**
-- **Web Interface Phase 4:** Plugin management and MQTT configuration editing
-  - Add/remove plugins via web UI with modal dialogs
-  - MQTT broker, port, username, password editable when MQTT service stopped
-  - Real-time sync: changes in web UI immediately reflect in Android UI
-  - Dual storage consistency: Updates both AppSettings (DataStore) and ServiceStateManager (SharedPreferences)
-  - Styled configuration sections with blue left border matching plugin cards
-- **BLE Scanner Integration:** Fully integrated BLE Scanner plugin
-  - Fixed PLUGIN_ID to "blescanner" (no underscore) for consistency
-  - Fixed Home Assistant button discovery topic structure
-  - Added to web UI plugin list with proper styling
-  - Hidden health indicators and MAC address field (not device-specific)
-  - Skip logic in BaseBleService plugin registry loop (initialized separately)
-- **Web UI Enhancements:**
-  - Plugin configuration editing (MAC addresses, PINs, passwords)
-  - Edit buttons disabled when service/MQTT running
-  - Helper text: "Service must be stopped to edit plugin configurations"
-  - MQTT config helper text: "MQTT service must be stopped to edit the MQTT configuration"
-  - Confirmation dialogs for plugin removal
-  - LaunchedEffect observers for reactive UI updates
-
-**v2.5.2 (January 2026):**
-- **Multi-Plugin Boot Support:** Fixed `BootReceiver` to auto-start all enabled plugins on device boot
-  - Previously hardcoded to only start `onecontrol_v2` plugin
-  - Now queries `ServiceStateManager.getEnabledBlePlugins()` for runtime plugin list
-  - Empty plugin check prevents service start when no plugins enabled
-  - Added "Start on Boot" toggle to System Settings UI
-- **OneControl Configuration Fix:** Fixed critical bug in `OneControlDevicePlugin.initialize()`
-  - `gatewayMac` was never read from config, always used hardcoded test value "24:DC:C3:ED:1E:0A"
-  - Added `gatewayMac = config.getString("gateway_mac", gatewayMac)` to load user's configured MAC
-  - Simplified PIN architecture: removed separate `bluetooth_pin` field, now uses single `gateway_pin` for both BLE bonding and protocol authentication
-  - Updated UI: Single PIN field in OneControl settings instead of confusing dual-field setup
-  - Affects legacy gateway pairing: `getBondingPin()` now correctly returns PIN for legacy devices
-
-**v2.4.9 (January 2026):**
-- **EasyTouch Watchdog Fix:** Fixed false "stale connection" detection causing disconnects every 5 minutes
-  - Root cause: `lastSuccessfulOperationTime` not updated during status polling
-  - Status responses now update timestamp to prevent watchdog false positives
-  - Watchdog only triggers on genuine zombie states or actual stale connections (5+ min with no responses)
-- **EasyTouch Setpoint Fixes:** Resolved temperature setpoint changes reverting in Home Assistant
-  - Implemented optimistic state updates for instant UI feedback
-  - Extended suppression window from 2s to 8s (skips 2 polling cycles instead of 1)
-  - Added verification status read 4s after command to confirm change applied
-  - Fixed float parsing: Home Assistant sends "64.0", code now handles floats via `toFloatOrNull()?.toInt()`
-- **Watchdog Infinite Loop Fix:** Prevented zombie state cleanup from rescheduling itself
-  - Added `shouldContinue` flag to break loop when cleanup() is triggered
-  - Watchdog now stops cleanly after detecting and resolving zombie states
-- Connection robustness improvements: Added GATT 133 retry logic to GoPower and EasyTouch
-- Per-plugin watchdog: Added connection health monitoring and zombie state detection
-- Persistent metadata cache: OneControl friendly names survive app restarts
-
-**v2.4.8 (January 2026):**
-- Multi-gateway support: Gateway and scanner devices now use Android device ID suffix
-- OneControl guard check fix: Restored guards preventing 4x entity duplication
-- Device IDs now include suffix: `ble_mqtt_bridge_{android_id}`, `ble_scanner_{android_id}`
-- EasyTouch fan mode fix: Fixed "Invalid fan_modes mode: off" error
-
-**v2.4.7 (January 2026):**
-- BLE notification race condition fix (servicesDiscovered/mtuReady flags)
-- BLE trace logging for all plugins
-
-**v2.4.6 (January 2026):**
-- Android TV power fix (prevents service kill on TV standby)
-
-### v2.5.4 Breaking Changes (January 2026)
-
-**⚠️ BREAKING CHANGE - Device ID Stability:**
-
-Changed device identification from Android ID to Bluetooth MAC address to prevent Home Assistant entity duplication after app updates.
-
-**Impact:**
-- Existing Home Assistant entities will appear as "unavailable"
-- New entities with different IDs will be created
-- Users must manually remove old entities from Home Assistant
-
-**Device ID Format Change:**
-```
-# Old (v2.5.3 and earlier)
-homeassistant/sensor/ble_mqtt_bridge_929334/...
-
-# New (v2.5.4+)
-homeassistant/sensor/ble_mqtt_bridge_0c9919/...
-```
-
-**Why This Change:**
-- Android ID can change across app updates/OS updates
-- Bluetooth MAC is stable and guaranteed unique per device
-- Prevents accumulation of duplicate entities in Home Assistant
-
-**Migration Steps:**
-1. Install v2.5.4
-2. New entities will appear in Home Assistant
-3. Delete old entities manually (filter by "unavailable")
-4. Update dashboards/automations to use new entity IDs
-
-**Other v2.5.4 Changes:**
-- OneControl MAC normalization fix (resolves PIN pairing failures)
-- Boot receiver enhancements for Android TV (LOCKED_BOOT_COMPLETED, QUICKBOOT_POWERON)
-- FORCE_DEBUG_LOG enabled for both debug and release builds
-
 ---
 
-## 1. Multi-Instance Plugin Architecture (v2.6.0)
+## 1. Multi-Instance Plugin Architecture
 
 ### Overview: Multi-Instance Architecture
 
