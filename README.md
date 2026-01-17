@@ -36,14 +36,17 @@ Note: I'm able to build and test these plugins since they are components I have 
 3. Tap the **⚙️ Settings icon** (top-right) to:
    - Enable **Battery Optimization Exemption** (critical for reliable operation on battery-powered devices, especially phones)
    - Verify all permissions are granted
-4. Return to main screen and configure **MQTT broker settings** (expand "Broker Settings"):
+4. Return to the main screen and if desired, enable authentication for the web configuration interface and/or change the port used for the web service.
+**All further config will happen in the web UI**
+5. Either click the URL to open the web UI on the Android device, or note the URL and open on any device on the same network.
+6. In the web UI, configure **MQTT broker settings** (expand "Broker Settings"):
    - Host, Port, Username, Password
    - Topic Prefix: `homeassistant` (recommended for auto-discovery)
-5. Configure your **device plugin settings** (see plugin sections below)
-6. Enable toggles in order: **MQTT → Main Service**
-7. Restarting the device is not necessary, but if things don't start showing up in Home Assistant, you may need to try toggling the main service, or stopping and relaunching the app to get things flowing.
+7. Configure your **device plugin settings** (see plugin sections below)
+8. Enable toggles in order: **MQTT → Main Service**
+9. Restarting the device is not necessary, but if things don't start showing up in Home Assistant, you may need to try toggling the main service, or stopping and relaunching the app to get things flowing.
 
-> **Note:** Settings are locked while their toggle is ON. Turn OFF to edit.
+> **Note:** Settings are locked while the service toggle is ON. Turn OFF to edit.
 
 ### Home Assistant Integration
 
@@ -88,10 +91,9 @@ Newer Android OS versions do not show BLE devices in the Bluetooth pairing setti
 
 1. **Use an existing pairing:** 
   - If you previously connected to the OneControl gateway with the same device, you already have a pair bond (you can confirm this by checking devices in  Bluetooth settings). In this case, you're good to go.
-  - Go ahead and configure the plugin:
-     - Make sure the main service toggle is off (you won't be able to make changes while it's running)
+  - Go ahead and configure the plugin in the web UI:
+     - Make sure the BLE service toggle is off (you won't be able to make changes while it's running)
      - Add the plugin
-     - Expand settings under the OneControl plugin
      - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
      - Enter your **Gateway PIN/Password** (found on a sticker on your OneControl board)
      - Toggle the service on
@@ -100,7 +102,6 @@ Newer Android OS versions do not show BLE devices in the Bluetooth pairing setti
 2. **Let the app trigger pairing:**
      - Make sure the main service toggle is off (you won't be able to make changes while it's running)
      - Add the plugin
-     - Expand settings under the OneControl plugin
      - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
      - Enter your **Gateway PIN/Password** (found on a sticker on your OneControl board)
      - **IMPORTANT:** From here there are two pairing paths depeding upon they style supported by your OneControl hardware
@@ -146,8 +147,7 @@ Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and his [ha-micro-air-
 #### Configuration
   - Make sure the main service toggle is off (you won't be able to make changes while it's running)
   - Add the plugin
-  - Expand settings under the EasyTouch plugin
-  - Enter the **Thermostat MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant)
+  - Enter the **Thermostat MAC Address** (you can get this from the Advertisement Monitor in Home Aassistant)
   - Enter your **Thermostat Password** (this is the password you use to login in the Micro-Air app)
 - Toggle the service on
 - Plugin status indicators should turn green: Connection → Data → Pair
@@ -181,7 +181,6 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 - Make sure the main service toggle is off (you won't be able to make changes while it's running)
 - Add the plugin
-- Expand settings under the GoPower plugin
 - Enter the **Controller MAC Address** (found in Bluetooth settings after pairing or you can get this from the Advertisement Monitor in Home Aassistant) 
 - Toggle the service on
 - Plugin status indicators should turn green: Connection → Data
@@ -219,6 +218,55 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 ---
 
+### 🔌 Mopeka Pro Check Fluid Sensors
+
+The Mopeka plugin integrates Mopeka Pro Check/Pro Plus/Pro H2O Bluetooth tank level sensors. Unlike other plugins in this system, Mopeka uses **passive BLE advertisement scanning** - no GATT connection is required. The sensor broadcasts tank level, temperature, and battery status in manufacturer-specific advertisement data.
+
+**Credits:**
+- **sbrogan**: Original work decoding the Mopeka sensor BLE protocol (mopeka-iot-ble library)
+- **jrhelbert**: Volumetric calculation formulas for accurate tank percentage ([HA Community Post](https://community.home-assistant.io/t/add-tank-percentage-to-mopeka-integration/531322/34))
+
+**Supported Models:**
+- Mopeka Pro Plus (M1015)
+- Mopeka Pro Check (M1017)
+- Mopeka Pro 200
+- Mopeka Pro H2O (water sensors)
+- Mopeka Pro H2O Plus
+- Lippert BottleCheck
+- TD40, TD200
+
+#### Configuration
+
+- Make sure the main service toggle is off (you won't be able to make changes while it's running)
+- Add the plugin
+- Enter the **MAC Address** (you can get this from the Advertisement Monitor in Home Aassistant)
+- Enter the tank size and fluid type
+- Toggle the service on
+- Plugin status indicator should turn green
+
+**Note:** Mopeka controllers do not require pairing or authentication.
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **No Authentication** | Connects without pairing or password |
+| **Real-Time Data** | ~14 second update rate |
+
+#### Sensors
+
+| Sensor | Description | Unit |
+|--------|-------------|------|
+| Battery Percentage | State of charge | % |
+| Temperature | Sensor temperature | °C |
+| Tank Level | Tank level percent | % |
+
+#### Troubleshooting
+
+- **No data received:** Ensure sensors are in BLE range (within ~30 feet)
+
+---
+
 ### 🔌 BLE Scanner Plugin
 
 A utility plugin that scans for nearby BLE devices and publishes results to MQTT. This is not needed for anything else to function, but was added as a proof of concept for supporting multiple BLE connected plugins and might be useful, so I left it in.
@@ -234,26 +282,15 @@ A utility plugin that scans for nearby BLE devices and publishes results to MQTT
 - Make sure the main service toggle is off (you won't be able to make changes while it's running)
 - Add the plugin
 - Toggle the service on
-- Scanning is triggered by a button in the device in Home Assistant
+- Scanning is triggered by a button in the MQTT device in Home Assistant
 - Results are published as sensor attributes in Home Assistant
 
 ---
 
 ## 🏗️ Architecture
 
-```
-BaseBleService (foreground service)
-  ├─> MqttOutputPlugin (MQTT connection & publishing)
-  ├─> OneControlDevicePlugin (RV automation)
-  ├─> EasyTouchDevicePlugin (climate control)
-  ├─> GoPowerDevicePlugin (solar monitoring)
-  └─> BleScannerPlugin (device discovery - optional)
-```
-
 See [docs/INTERNALS.md](docs/INTERNALS.md) for detailed architecture documentation.
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-EasyTouch thermostat protocol implementation was informed by the [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) project by k3vmcd.
