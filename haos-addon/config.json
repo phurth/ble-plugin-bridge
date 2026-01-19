@@ -8,6 +8,7 @@
   "startup": "application",
   "boot": "manual",
   "init": false,
+  "privileged": ["all"],
   "devices": ["/dev/bus/usb:/dev/bus/usb:rwm"],
   "options": {
     "mode": "auto",
