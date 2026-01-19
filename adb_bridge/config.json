@@ -8,7 +8,7 @@
   "startup": "application",
   "boot": "manual",
   "init": false,
-  "privileged": true,
+  "privileged": ["all"],
   "options": {
     "mode": "auto",
     "device_serial": "",
