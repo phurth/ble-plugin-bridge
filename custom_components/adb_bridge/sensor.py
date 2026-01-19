@@ -22,6 +22,7 @@ async def async_setup_entry(
     async_add_entities([
         AdbConnectionSensor(coordinator, entry),
         AdbWifiIpSensor(coordinator, entry),
+        AdbPortSensor(coordinator, entry),
     ])
 
 
@@ -93,3 +94,44 @@ class AdbWifiIpSensor(CoordinatorEntity[AdbBridgeCoordinator], SensorEntity):
         if self.coordinator.data:
             return self.coordinator.data.get("wifi_ip")
         return None
+
+
+class AdbPortSensor(CoordinatorEntity[AdbBridgeCoordinator], SensorEntity):
+    """Sensor showing ADB port."""
+
+    _attr_has_entity_name = True
+    _attr_name = "ADB Port"
+    _attr_icon = "mdi:ethernet"
+
+    def __init__(
+        self,
+        coordinator: AdbBridgeCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_adb_port"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": f"ADB Bridge ({coordinator.device_serial or coordinator.device_ip or 'Device'})",
+            "manufacturer": "Android",
+            "model": "ADB Device",
+        }
+
+    @property
+    def native_value(self) -> int | None:
+        """Return ADB port."""
+        if self.coordinator.data and self.coordinator.data.get("wifi_adb_enabled"):
+            return self.coordinator.data.get("adb_port", 5555)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return extra attributes."""
+        if self.coordinator.data and self.coordinator.data.get("wifi_ip"):
+            ip = self.coordinator.data.get("wifi_ip")
+            port = self.coordinator.data.get("adb_port", 5555)
+            return {
+                "connect_command": f"adb connect {ip}:{port}",
+            }
+        return {}

@@ -120,6 +120,7 @@ class AdbBridgeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "serial": None,
                     "wifi_ip": None,
                     "wifi_adb_enabled": False,
+                    "adb_port": 5555,
                 }
                 
                 try:
@@ -146,8 +147,11 @@ class AdbBridgeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Check if WiFi ADB is enabled (port 5555 listening)
                     try:
                         result = self._device.shell("getprop service.adb.tcp.port")
-                        if result and result.strip() == "5555":
-                            data["wifi_adb_enabled"] = True
+                        if result and result.strip():
+                            port = result.strip()
+                            if port != "0" and port != "-1":
+                                data["wifi_adb_enabled"] = True
+                                data["adb_port"] = int(port)
                     except Exception:
                         pass
                     
