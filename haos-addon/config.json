@@ -15,6 +15,7 @@
   "full_access": false,
   "options": {
     "mode": "auto",
+    "device_serial": "",
     "adb_port": 5555,
     "bridge_port": 5037,
     "check_interval": 3600,
@@ -26,6 +27,7 @@
   },
   "schema": {
     "mode": "list(auto|wireless|bridge)",
+    "device_serial": "str?",
     "adb_port": "port",
     "bridge_port": "port",
     "check_interval": "int(60,86400)",

@@ -22,6 +22,24 @@ Forces bridge mode. Best for devices connected via Ethernet or when you want to 
 - Forwards commands to device via USB connection
 - Works regardless of device network configuration
 
+## Device Selection
+
+### device_serial (Optional)
+Specify which Android device to use when multiple devices are connected via USB.
+
+**How to find device serial:**
+1. Start the add-on without this setting
+2. Check the add-on logs - all connected devices will be listed with their serials
+3. Copy the serial of the device you want to use
+4. Stop the add-on, add the serial to config, restart
+
+**Example:**
+```yaml
+device_serial: "R58M123456A"
+```
+
+**If not set:** The add-on will use the first device found. If multiple devices are connected, a warning will be shown.
+
 ## Port Configuration
 
 ### adb_port (Default: 5555)

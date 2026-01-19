@@ -2,6 +2,7 @@
 
 # Get configuration options
 MODE=$(bashio::config 'mode')
+DEVICE_SERIAL=$(bashio::config 'device_serial')
 ADB_PORT=$(bashio::config 'adb_port')
 BRIDGE_PORT=$(bashio::config 'bridge_port')
 CHECK_INTERVAL=$(bashio::config 'check_interval')
@@ -12,7 +13,7 @@ bashio::log.info "====================================="
 bashio::log.info "Mode: ${MODE}"
 
 # Wait for USB device to appear
-bashio::log.info "Waiting for Android device via USB..."
+bashio::log.info "Probing for Android devices via USB..."
 RETRY_COUNT=0
 MAX_RETRIES=30
 
@@ -30,12 +31,59 @@ while ! adb devices | grep -q "device$"; do
   fi
 done
 
-SERIAL=$(adb devices | grep "device$" | awk '{print $1}')
-bashio::log.info "✓ Device found: ${SERIAL}"
+# List all connected devices
+bashio::log.info "====================================="
+bashio::log.info "Connected Android Devices:"
+bashio::log.info "====================================="
+
+DEVICE_COUNT=$(adb devices | grep "device$" | wc -l)
+
+if [ $DEVICE_COUNT -eq 0 ]; then
+  bashio::log.error "No devices found"
+  exit 1
+fi
+
+adb devices -l | grep "device$" | while read -r line; do
+  SERIAL=$(echo "$line" | awk '{print $1}')
+  MODEL=$(echo "$line" | grep -o 'model:[^ ]*' | cut -d: -f2)
+  PRODUCT=$(echo "$line" | grep -o 'product:[^ ]*' | cut -d: -f2)
+  bashio::log.info "  Serial: ${SERIAL}"
+  if [ -n "$MODEL" ]; then
+    bashio::log.info "    Model: ${MODEL}"
+  fi
+  if [ -n "$PRODUCT" ]; then
+    bashio::log.info "    Product: ${PRODUCT}"
+  fi
+done
+
+bashio::log.info "====================================="
+
+# Select device
+if [ -n "$DEVICE_SERIAL" ]; then
+  # Use specified device
+  if ! adb devices | grep "^${DEVICE_SERIAL}" | grep -q "device$"; then
+    bashio::log.error "Specified device serial '${DEVICE_SERIAL}' not found"
+    bashio::log.error "Available devices:"
+    adb devices | grep "device$" | awk '{print "  " $1}'
+    exit 1
+  fi
+  SERIAL="$DEVICE_SERIAL"
+  bashio::log.info "Using specified device: ${SERIAL}"
+else
+  # Use first device
+  SERIAL=$(adb devices | grep "device$" | head -n1 | awk '{print $1}')
+  
+  if [ $DEVICE_COUNT -gt 1 ]; then
+    bashio::log.warning "Multiple devices detected, using first: ${SERIAL}"
+    bashio::log.warning "To select a specific device, set 'device_serial' in config"
+  else
+    bashio::log.info "Using device: ${SERIAL}"
+  fi
+fi
 
 # Detect network interface
 bashio::log.info "Detecting device network configuration..."
-DEVICE_IFACE=$(adb shell ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
+DEVICE_IFACE=$(adb -s "$SERIAL" shell ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | head -n1)
 
 if [ -z "$DEVICE_IFACE" ]; then
   bashio::log.warning "Could not detect network interface, defaulting to bridge mode"
@@ -62,11 +110,11 @@ bashio::log.info "====================================="
 if [ "$MODE" = "wireless" ]; then
   # Mode 1: Enable wireless ADB (WiFi only)
   bashio::log.info "Enabling wireless ADB on port ${ADB_PORT}..."
-  adb tcpip "${ADB_PORT}"
+  adb -s "$SERIAL" tcpip "${ADB_PORT}"
   sleep 2
   
   # Get device IP
-  DEVICE_IP=$(adb shell ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n1)
+  DEVICE_IP=$(adb -s "$SERIAL" shell ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n1)
   
   if [ -z "$DEVICE_IP" ]; then
     bashio::log.error "Could not determine device IP address"
@@ -100,10 +148,10 @@ if [ "$MODE" = "wireless" ]; then
       bashio::log.warning "Wireless ADB disconnected, re-enabling..."
       
       # Re-enable via USB
-      adb tcpip "${ADB_PORT}"
+      adb -s "$SERIAL" tcpip "${ADB_PORT}"
       sleep 2
       
-      NEW_IP=$(adb shell ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n1)
+      NEW_IP=$(adb -s "$SERIAL" shell ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n1)
       if [ -n "$NEW_IP" ] && [ "$NEW_IP" != "$DEVICE_IP" ]; then
         bashio::log.info "Device IP changed from ${DEVICE_IP} to ${NEW_IP}"
         DEVICE_IP="$NEW_IP"
