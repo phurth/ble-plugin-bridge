@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ADB Bridge",
+        "description": "Select how to connect to your Android device.",
+        "data": {
+          "connection_type": "Connection Type"
+        }
+      },
+      "usb": {
+        "title": "USB Connection",
+        "description": "Found {device_count} USB device(s). Select the device to connect to.\n\n**Note:** You may need to approve the connection on your Android device.",
+        "data": {
+          "device_serial": "Device"
+        }
+      },
+      "wifi": {
+        "title": "WiFi Connection",
+        "description": "Enter the IP address of your Android device. The device must already be in wireless ADB mode (tcpip).",
+        "data": {
+          "device_ip": "Device IP Address",
+          "adb_port": "ADB Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to device. Make sure USB debugging is enabled and approve the connection on the device."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connection_status": {
+        "name": "Connection Status"
+      },
+      "wifi_ip_address": {
+        "name": "WiFi IP Address"
+      }
+    },
+    "button": {
+      "enable_wifi_adb": {
+        "name": "Enable WiFi ADB"
+      },
+      "reconnect": {
+        "name": "Reconnect"
+      }
+    }
+  }
+}

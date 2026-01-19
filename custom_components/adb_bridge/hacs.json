@@ -1,0 +1,8 @@
+{
+  "name": "ADB Bridge",
+  "render_readme": true,
+  "domains": ["sensor", "button"],
+  "homeassistant": "2024.1.0",
+  "iot_class": "local_polling",
+  "hacs": "2.0.0"
+}
