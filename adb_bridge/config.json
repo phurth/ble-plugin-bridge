@@ -1,6 +1,6 @@
 {
   "name": "ADB Bridge",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "slug": "adb_bridge",
   "description": "Maintains wireless ADB connection to USB-connected Android device",
   "url": "https://github.com/phurth/ble-plugin-bridge/tree/main/adb_bridge",
@@ -8,8 +8,8 @@
   "startup": "application",
   "boot": "manual",
   "init": false,
-  "privileged": ["SYS_ADMIN", "SYS_RAWIO"],
-  "devices": ["/dev/bus/usb:/dev/bus/usb:rwm", "/dev/ttyUSB0:/dev/ttyUSB0:rwm", "/dev/ttyACM0:/dev/ttyACM0:rwm"],
+  "gpio": true,
+  "privileged": ["SYS_ADMIN"],
   "options": {
     "mode": "auto",
     "device_serial": "",
