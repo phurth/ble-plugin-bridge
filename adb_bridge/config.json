@@ -1,6 +1,6 @@
 {
   "name": "ADB Bridge",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "slug": "adb_bridge",
   "description": "Maintains wireless ADB connection to USB-connected Android device",
   "url": "https://github.com/phurth/ble-plugin-bridge/tree/main/adb_bridge",
