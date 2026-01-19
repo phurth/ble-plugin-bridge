@@ -1,8 +1,5 @@
 {
   "name": "BLE MQTT Bridge Add-ons",
   "url": "https://github.com/phurth/ble-plugin-bridge",
-  "maintainer": "phurth",
-  "addons": {
-    "adb_bridge": "https://github.com/phurth/ble-plugin-bridge/tree/main/haos-addon"
-  }
+  "maintainer": "phurth"
 }
