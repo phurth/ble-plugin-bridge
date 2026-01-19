@@ -8,7 +8,7 @@ RUN apk add --no-cache \
     coreutils
 
 # Copy run script
-COPY run.sh /
-RUN chmod +x /run.sh
+COPY run.sh /usr/bin/
+RUN chmod a+x /usr/bin/run.sh
 
-CMD ["/run.sh"]
+CMD ["/usr/bin/run.sh"]
