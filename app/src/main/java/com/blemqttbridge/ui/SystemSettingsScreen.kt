@@ -24,9 +24,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.blemqttbridge.BuildConfig
+import com.blemqttbridge.core.UpdateManager
+import com.blemqttbridge.core.Release
 import com.blemqttbridge.ui.viewmodel.SettingsViewModel
 import com.blemqttbridge.utils.AndroidTvHelper
 import com.blemqttbridge.utils.BatteryOptimizationHelper
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -349,6 +353,196 @@ fun SystemSettingsScreen(
                         try {
                             context.startService(intent)
                         } catch (_: Exception) {}
+                    }
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // App Updates Section
+            SectionHeader("App Updates")
+            
+            var showUpdateDialog by remember { mutableStateOf(false) }
+            var updateCheckLoading by remember { mutableStateOf(false) }
+            var latestRelease by remember { mutableStateOf<Release?>(null) }
+            var updateCheckError by remember { mutableStateOf<String?>(null) }
+            var includePrerelease by remember { mutableStateOf(false) }
+            var shouldFetchRelease by remember { mutableStateOf(false) }
+            
+            val updateManager = remember { UpdateManager(context) }
+            
+            // LaunchedEffect for fetching releases
+            if (shouldFetchRelease) {
+                LaunchedEffect(shouldFetchRelease) {
+                    val result = updateManager.getLatestRelease(includePrerelease)
+                    updateCheckLoading = false
+                    if (result.isSuccess) {
+                        latestRelease = result.getOrNull()
+                        if (latestRelease != null) {
+                            showUpdateDialog = true
+                        }
+                    } else {
+                        updateCheckError = result.exceptionOrNull()?.message ?: "Unknown error"
+                    }
+                    shouldFetchRelease = false
+                }
+            }
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Current Version",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = BuildConfig.VERSION_NAME,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        
+                        Button(
+                            onClick = {
+                                updateCheckLoading = true
+                                updateCheckError = null
+                                shouldFetchRelease = true
+                            },
+                            enabled = !updateCheckLoading,
+                            modifier = Modifier.padding(start = 8.dp)
+                        ) {
+                            if (updateCheckLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Check")
+                            }
+                        }
+                    }
+                    
+                    if (updateCheckError != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Error: ${updateCheckError}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = includePrerelease,
+                            onCheckedChange = { includePrerelease = it }
+                        )
+                        Text(
+                            text = "Include pre-releases",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+            
+            // Update Dialog
+            if (showUpdateDialog && latestRelease != null) {
+                var downloadProgress by remember { mutableStateOf(0f) }
+                var isDownloading by remember { mutableStateOf(false) }
+                var downloadedFile by remember { mutableStateOf<File?>(null) }
+                var shouldDownload by remember { mutableStateOf(false) }
+                
+                // LaunchedEffect for handling download
+                if (shouldDownload) {
+                    LaunchedEffect(shouldDownload) {
+                        val result = updateManager.downloadApk(latestRelease!!) { downloaded, total ->
+                            downloadProgress = if (total > 0) downloaded.toFloat() / total else 0f
+                        }
+                        isDownloading = false
+                        if (result.isSuccess) {
+                            downloadedFile = result.getOrNull()
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Download failed: ${result.exceptionOrNull()?.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        shouldDownload = false
+                    }
+                }
+                
+                AlertDialog(
+                    onDismissRequest = { showUpdateDialog = false },
+                    title = { Text("Update Available") },
+                    text = {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "Version ${latestRelease!!.tagName}",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            )
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Text(
+                                text = latestRelease!!.body.takeIf { it.isNotEmpty() } ?: "No release notes available",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            
+                            if (isDownloading) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                LinearProgressIndicator(
+                                    progress = { downloadProgress },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    text = "${(downloadProgress * 100).toInt()}%",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                if (downloadedFile != null) {
+                                    // File already downloaded, install it
+                                    updateManager.installApk(downloadedFile!!)
+                                    showUpdateDialog = false
+                                } else if (!isDownloading) {
+                                    // Start download
+                                    isDownloading = true
+                                    shouldDownload = true
+                                }
+                            },
+                            enabled = !isDownloading
+                        ) {
+                            Text(if (downloadedFile != null) "Install" else "Download")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showUpdateDialog = false }) {
+                            Text("Later")
+                        }
                     }
                 )
             }
