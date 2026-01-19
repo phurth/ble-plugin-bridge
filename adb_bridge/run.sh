@@ -15,6 +15,17 @@ echo "Starting ADB Bridge v1.0.0"
 echo "====================================="
 echo "Mode: ${MODE}"
 
+# Debug: List available USB devices
+echo "====================================="
+echo "Checking USB devices..."
+echo "====================================="
+if [ -d /dev/bus/usb ]; then
+  echo "USB bus found. Devices:"
+  find /dev/bus/usb -type c 2>/dev/null | head -20 || echo "  (No devices found)"
+else
+  echo "ERROR: /dev/bus/usb not found in container!"
+fi
+
 # Wait for USB device to appear
 echo "Probing for Android devices via USB..."
 RETRY_COUNT=0

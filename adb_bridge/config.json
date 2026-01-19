@@ -9,7 +9,7 @@
   "boot": "manual",
   "init": false,
   "privileged": ["SYS_ADMIN", "SYS_RAWIO"],
-  "devices": ["/dev/bus/usb:/dev/bus/usb:rwm"],
+  "devices": ["/dev/bus/usb:/dev/bus/usb:rwm", "/dev/ttyUSB0:/dev/ttyUSB0:rwm", "/dev/ttyACM0:/dev/ttyACM0:rwm"],
   "options": {
     "mode": "auto",
     "device_serial": "",
