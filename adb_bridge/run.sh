@@ -1,5 +1,9 @@
 #!/bin/bash
-set -e
+set -o pipefail
+
+# Ensure output is flushed immediately
+exec 1> >(cat)
+exec 2> >(cat >&2)
 
 # Read config from /data/options.json
 CONFIG_PATH=/data/options.json
@@ -13,21 +17,28 @@ CHECK_INTERVAL=$(jq -r '.check_interval' $CONFIG_PATH)
 echo "====================================="
 echo "Starting ADB Bridge v1.0.0"
 echo "====================================="
-echo "Mode: ${MODE}"
+echo "Mode: ${MODE}" >&2
+echo >&2
 
 # Debug: List available USB devices
 echo "====================================="
 echo "Checking USB devices..."
 echo "====================================="
 if [ -d /dev/bus/usb ]; then
-  echo "USB bus found. Devices:"
-  find /dev/bus/usb -type c 2>/dev/null | head -20 || echo "  (No devices found)"
+  echo "USB bus found at /dev/bus/usb"
+  ls -la /dev/bus/usb/ 2>&1 | head -20
+  echo ""
+  echo "USB Devices:"
+  find /dev/bus/usb -type c 2>/dev/null | wc -l | xargs echo "  Total devices found:"
 else
   echo "ERROR: /dev/bus/usb not found in container!"
+  echo "Available /dev entries:"
+  ls -la /dev/ | grep -E "tty|usb" || echo "  (None found)"
 fi
 
-# Wait for USB device to appear
-echo "Probing for Android devices via USB..."
+echo ""
+echo "Attempting to probe ADB..."
+echo "====================================="
 RETRY_COUNT=0
 MAX_RETRIES=30
 
