@@ -1,13 +1,15 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
 
-# Install android-tools (adb)
+# Install android-tools (adb) and jq for JSON parsing
 RUN apk add --no-cache \
     android-tools \
     bash \
-    coreutils
+    coreutils \
+    jq
 
-# Copy run script to s6-overlay service directory
-RUN mkdir -p /etc/services.d/adb-bridge
-COPY run.sh /etc/services.d/adb-bridge/run
-RUN chmod a+x /etc/services.d/adb-bridge/run
+# Copy run script
+COPY run.sh /
+RUN chmod a+x /run.sh
+
+CMD [ "/run.sh" ]
