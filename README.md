@@ -291,6 +291,29 @@ A utility plugin that scans for nearby BLE devices and publishes results to MQTT
 
 See [docs/INTERNALS.md](docs/INTERNALS.md) for detailed architecture documentation.
 
+---
+
+## 🛠️ Home Assistant Add-on: ADB Bridge
+
+For HAOS users who want remote APK deployment without physical device access, this repository includes an optional add-on that maintains wireless ADB connectivity.
+
+### Features
+- **Auto-detection**: Automatically chooses wireless or bridge mode based on device network
+- **Wireless ADB**: Keeps wireless ADB alive for WiFi-connected devices
+- **Bridge Mode**: ADB over network for Ethernet-connected devices
+- **Works with any Android device**: Not limited to this app
+
+### Quick Start
+1. Add this repository to Home Assistant: `https://github.com/phurth/ble-plugin-bridge`
+2. Install "ADB Bridge" add-on
+3. Connect Android device via USB to HAOS host
+4. Enable USB debugging on device
+5. Start add-on and deploy APKs remotely via `adb connect`
+
+See [haos-addon/README.md](haos-addon/README.md) for detailed setup and usage.
+
+---
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

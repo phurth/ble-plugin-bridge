@@ -1,0 +1,48 @@
+{
+  "name": "ADB Bridge",
+  "version": "1.0.0",
+  "slug": "adb_bridge",
+  "description": "Maintains wireless ADB connection to USB-connected Android device with scrcpy screen mirroring",
+  "url": "https://github.com/phurth/ble-plugin-bridge/tree/main/haos-addon",
+  "arch": ["amd64", "aarch64", "armhf", "armv7"],
+  "startup": "services",
+  "boot": "auto",
+  "webui": "http://[HOST]:[PORT:8099]",
+  "ingress": true,
+  "ingress_port": 8099,
+  "devices": ["/dev/bus/usb:/dev/bus/usb:rwm"],
+  "privileged": ["SYS_RAWIO"],
+  "full_access": false,
+  "options": {
+    "mode": "auto",
+    "adb_port": 5555,
+    "bridge_port": 5037,
+    "check_interval": 3600,
+    "enable_scrcpy": true,
+    "scrcpy_web_ui": true,
+    "scrcpy_bitrate": "8M",
+    "scrcpy_max_size": 1920,
+    "scrcpy_port": 27183
+  },
+  "schema": {
+    "mode": "list(auto|wireless|bridge)",
+    "adb_port": "port",
+    "bridge_port": "port",
+    "check_interval": "int(60,86400)",
+    "enable_scrcpy": "bool",
+    "scrcpy_web_ui": "bool",
+    "scrcpy_bitrate": "str",
+    "scrcpy_max_size": "int",
+    "scrcpy_port": "port"
+  },
+  "ports": {
+    "5037/tcp": 5037,
+    "8099/tcp": 8099,
+    "27183/tcp": 27183
+  },
+  "ports_description": {
+    "5037/tcp": "ADB bridge port (bridge mode)",
+    "8099/tcp": "scrcpy web UI",
+    "27183/tcp": "scrcpy TCP server (desktop client)"
+  }
+}

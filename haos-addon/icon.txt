@@ -1,0 +1,13 @@
+# Icon Placeholder
+
+This file is a placeholder. For a production add-on, you should add a PNG icon file named `icon.png` (128x128 pixels or 256x256 pixels recommended).
+
+The icon should visually represent ADB/Android connectivity, such as:
+- Android robot with USB cable
+- Phone with network symbol
+- Bridge icon with Android branding
+
+You can create this using any graphics editor or find a suitable icon from:
+- https://materialdesignicons.com/
+- https://icons8.com/
+- Adobe Illustrator / Figma / Inkscape
