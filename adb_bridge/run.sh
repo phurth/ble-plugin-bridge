@@ -20,13 +20,8 @@ echo ""
 # The supervisor exposes ADB on localhost:5037
 export ADB_SERVER_SOCKET=tcp:localhost:5037
 
-echo "Connecting to HAOS ADB server at localhost:5037..."
+echo "Connecting to HAOS ADB server..."
 sleep 1
-
-# Check if adb can connect to HAOS's server
-if ! adb connect localhost:5037 >/dev/null 2>&1; then
-  echo "WARNING: Could not verify HAOS ADB server"
-fi
 
 echo "Waiting for USB-connected devices..."
 WAIT_COUNT=0
