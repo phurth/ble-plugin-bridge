@@ -79,6 +79,14 @@ class BaseBleService : Service() {
         private val _serviceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
         val serviceRunning: kotlinx.coroutines.flow.StateFlow<Boolean> = _serviceRunning
         
+        // BLE scanning state - tracks if BLE scanner is actively running
+        private val _bleScanningActive = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val bleScanningActive: kotlinx.coroutines.flow.StateFlow<Boolean> = _bleScanningActive
+        
+        // Bluetooth availability state - tracks if BT adapter is enabled
+        private val _bluetoothAvailable = kotlinx.coroutines.flow.MutableStateFlow(true)
+        val bluetoothAvailable: kotlinx.coroutines.flow.StateFlow<Boolean> = _bluetoothAvailable
+        
         // Per-plugin status tracking
         data class PluginStatus(
             val pluginId: String,
@@ -141,6 +149,11 @@ class BaseBleService : Service() {
     
     private var isScanning = false
     private var bluetoothEnabled = true
+    
+    // Guard against double initialization during startup race conditions
+    @Volatile
+    private var isInitializing = false
+    private val initializationLock = Any()
     
     // Service debug logging (separate from BLE trace)
     private val serviceLogBuffer = ArrayDeque<String>()
@@ -343,6 +356,15 @@ class BaseBleService : Service() {
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
+                // Check if already initializing to prevent race condition
+                synchronized(initializationLock) {
+                    if (isInitializing) {
+                        Log.i(TAG, "⚙️ Skipping ACTION_START_SCAN - already initializing")
+                        return START_STICKY
+                    }
+                    isInitializing = true
+                }
+                
                 // Mark service as running
                 ServiceStateManager.setServiceRunning(applicationContext, true)
                 _serviceRunning.value = true
@@ -358,28 +380,88 @@ class BaseBleService : Service() {
                 val outputConfig = AppConfig.getMqttConfig(applicationContext)
                 
                 serviceScope.launch {
-                    initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
-                    // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
-                    // either connects to bonded devices or falls back to scanning
-                    
-                    // Schedule keepalive if enabled (redundant with onCreate but ensures it's set)
-                    if (isKeepAliveEnabled()) {
-                        Log.i(TAG, "⏰ Scheduling keepalive from ACTION_START_SCAN (primary path)")
-                        scheduleKeepAlive()
-                    } else {
-                        Log.i(TAG, "⏰ Keepalive is disabled")
+                    try {
+                        initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
+                        // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
+                        // either connects to bonded devices or falls back to scanning
+                        
+                        // Schedule keepalive if enabled (redundant with onCreate but ensures it's set)
+                        if (isKeepAliveEnabled()) {
+                            Log.i(TAG, "⏰ Scheduling keepalive from ACTION_START_SCAN (primary path)")
+                            scheduleKeepAlive()
+                        } else {
+                            Log.i(TAG, "⏰ Keepalive is disabled")
+                        }
+                    } finally {
+                        isInitializing = false
                     }
                 }
             }
             
-            null -> {
-                // Service started without explicit action (e.g., from MainActivity or system restart)
-                Log.i(TAG, "⚙️ Service started with null action - likely from UI or system restart")
+            null, "START_WEB_SERVER" -> {
+                // Service started without explicit scan action (e.g., from MainActivity, web server, or system restart)
+                Log.i(TAG, "⚙️ Service started with action=${intent?.action ?: "null"} - checking if service should auto-start")
                 
-                // Ensure keepalive is scheduled (onCreate already did this, but be explicit)
-                if (isKeepAliveEnabled() && keepAlivePendingIntent == null) {
-                    Log.i(TAG, "⏰ Keepalive not yet scheduled, scheduling now")
-                    scheduleKeepAlive()
+                // Check if service was previously enabled - if so, auto-start scanning
+                serviceScope.launch {
+                    // Check if already initializing to prevent race condition
+                    synchronized(initializationLock) {
+                        if (isInitializing) {
+                            Log.i(TAG, "⚙️ Skipping auto-start - already initializing from another path")
+                            return@launch
+                        }
+                    }
+                    
+                    val settings = AppSettings(applicationContext)
+                    val serviceEnabled = settings.serviceEnabled.first()
+                    
+                    if (serviceEnabled) {
+                        // Double-check we're not racing with ACTION_START_SCAN
+                        synchronized(initializationLock) {
+                            if (isInitializing) {
+                                Log.i(TAG, "⚙️ Skipping auto-start - initialization started by another path")
+                                return@launch
+                            }
+                            isInitializing = true
+                        }
+                        
+                        try {
+                            Log.i(TAG, "⚙️ Service was enabled in settings - auto-starting BLE scanning")
+                            appendServiceLog("Auto-starting BLE scanning (serviceEnabled=true in settings)")
+                            
+                            // Mark service as running
+                            ServiceStateManager.setServiceRunning(applicationContext, true)
+                            _serviceRunning.value = true
+                            
+                            // Get ALL enabled BLE plugins from ServiceStateManager
+                            val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
+                            val outputPluginId = "mqtt"
+                            
+                            Log.i(TAG, "Enabled BLE plugins: $enabledBlePlugins")
+                            
+                            // Load output config
+                            val outputConfig = AppConfig.getMqttConfig(applicationContext)
+                            
+                            initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
+                            
+                            // Schedule keepalive if enabled
+                            if (isKeepAliveEnabled()) {
+                                Log.i(TAG, "⏰ Scheduling keepalive from auto-start path")
+                                scheduleKeepAlive()
+                            }
+                        } finally {
+                            isInitializing = false
+                        }
+                    } else {
+                        Log.i(TAG, "⚙️ Service not enabled in settings - web server only mode")
+                        appendServiceLog("Service not enabled in settings - running web server only")
+                        
+                        // Ensure keepalive is scheduled (onCreate already did this, but be explicit)
+                        if (isKeepAliveEnabled() && keepAlivePendingIntent == null) {
+                            Log.i(TAG, "⏰ Keepalive not yet scheduled, scheduling now")
+                            scheduleKeepAlive()
+                        }
+                    }
                 }
             }
             
@@ -1018,40 +1100,9 @@ class BaseBleService : Service() {
             }
         }
         
-        // Get target MAC addresses from BleDevicePlugin plugins (new architecture)
-        // This includes plugins like EasyTouch that use the new callback architecture
-        // Handle both enabled plugin types (single-instance) and enabled instances (multi-instance)
-        
-        // For single-instance plugins, check if the plugin type is enabled
-        for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
-            // Skip if not in enabled plugins
-            if (!enabledPlugins.contains(pluginId)) {
-                Log.d(TAG, "Skipping disabled plugin type for scan filters: $pluginId")
-                continue
-            }
-            
-            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
-            if (devicePlugin != null) {
-                // Initialize with config so it knows the configured MAC
-                try {
-                    val config = PluginConfig(AppConfig.getBlePluginConfig(applicationContext, pluginId))
-                    devicePlugin.initialize(applicationContext, config)
-                    val configuredMacs = devicePlugin.getConfiguredDevices()
-                    for (mac in configuredMacs) {
-                        if (addedMacs.add(mac.uppercase())) {
-                            Log.d(TAG, "Adding scan filter for MAC: $mac (device plugin: $pluginId)")
-                            scanFilters.add(
-                                ScanFilter.Builder()
-                                    .setDeviceAddress(mac.uppercase())
-                                    .build()
-                            )
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not get configured devices for plugin $pluginId: ${e.message}")
-                }
-            }
-        }
+        // REMOVED: Old loop that called initialize() on every registered plugin
+        // This was creating temporary plugin instances and logging "No MAC configured!" warnings
+        // Multi-instance architecture handles scan filters via the instance loop below
         
         // For multi-instance plugins, process each enabled instance
         var hasMopekaInstances = false
@@ -1066,13 +1117,11 @@ class BaseBleService : Service() {
                 hasMopekaInstances = true
             }
             
-            val devicePlugin = pluginRegistry.getDevicePlugin(instance.pluginType, applicationContext)
-            if (devicePlugin != null) {
-                // Initialize with this instance's config
+            // Get the already-initialized plugin instance from the registry
+            val instancePlugin = pluginRegistry.getPluginInstance(instanceId)
+            if (instancePlugin != null) {
                 try {
-                    val config = PluginConfig(instance.config)
-                    devicePlugin.initialize(applicationContext, config)
-                    val configuredMacs = devicePlugin.getConfiguredDevices()
+                    val configuredMacs = instancePlugin.getConfiguredDevices()
                     
                     // For active GATT plugins, add MACs from getConfiguredDevices()
                     for (mac in configuredMacs) {
@@ -1101,6 +1150,8 @@ class BaseBleService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not get configured devices for instance $instanceId: ${e.message}")
                 }
+            } else {
+                Log.d(TAG, "Instance not yet loaded: $instanceId (will be loaded when device is discovered)")
             }
         }
         
@@ -1124,10 +1175,12 @@ class BaseBleService : Service() {
         
         // Check if Bluetooth is enabled before scanning
         if (!bluetoothAdapter.isEnabled) {
-            Log.w(TAG, "Cannot start scan: Bluetooth is disabled")
+            Log.w(TAG, "⚠️ Cannot start scan: Bluetooth is disabled")
+            _bluetoothAvailable.value = false
             updateNotification("Bluetooth is disabled")
             return
         }
+        _bluetoothAvailable.value = true
         
         // Check if BLE scanner is available
         val scanner = bluetoothLeScanner
@@ -1153,6 +1206,7 @@ class BaseBleService : Service() {
                 scanner.startScan(null, scanSettings, scanCallback)
             }
             isScanning = true
+            _bleScanningActive.value = true
             updateNotification("Scanning for devices...")
             Log.i(TAG, "BLE scan started")
         } catch (e: SecurityException) {
@@ -1175,6 +1229,7 @@ class BaseBleService : Service() {
         try {
             scanner.stopScan(scanCallback)
             isScanning = false
+            _bleScanningActive.value = false
             Log.i(TAG, "BLE scan stopped")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for stopping scan", e)
@@ -1216,10 +1271,12 @@ class BaseBleService : Service() {
             BluetoothAdapter.STATE_OFF -> {
                 Log.w(TAG, "⚠️ Bluetooth turned OFF")
                 bluetoothEnabled = false
+                _bluetoothAvailable.value = false
                 
                 // Stop scanning if active
                 if (isScanning) {
                     isScanning = false  // Set directly without calling stopScan (BT is off)
+                    _bleScanningActive.value = false
                     Log.i(TAG, "Scanning stopped due to Bluetooth OFF")
                 }
                 
@@ -1235,6 +1292,7 @@ class BaseBleService : Service() {
             BluetoothAdapter.STATE_ON -> {
                 Log.i(TAG, "✅ Bluetooth turned ON")
                 bluetoothEnabled = true
+                _bluetoothAvailable.value = true
                 
                 updateNotification("Bluetooth restored - reconnecting...")
                 
@@ -1348,6 +1406,7 @@ class BaseBleService : Service() {
             Log.e(TAG, "BLE scan failed: $errorCode")
             updateNotification("Scan failed: $errorCode")
             isScanning = false
+            _bleScanningActive.value = false
         }
     }
     

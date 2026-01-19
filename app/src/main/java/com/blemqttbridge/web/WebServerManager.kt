@@ -5,6 +5,7 @@ import android.util.Base64
 import android.util.Log
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.core.ConfigBackupManager
 import com.blemqttbridge.core.PluginInstance
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
@@ -121,6 +122,8 @@ class WebServerManager(
                 uri == "/api/config/mqtt" && method == Method.POST -> handleMqttConfig(session)
                 uri == "/api/plugins/add" && method == Method.POST -> handlePluginAdd(session)
                 uri == "/api/plugins/remove" && method == Method.POST -> handlePluginRemove(session)
+                uri == "/api/config/export" && method == Method.GET -> handleConfigExport()
+                uri == "/api/config/import" && method == Method.POST -> handleConfigImport(session)
                 uri.startsWith("/api/") -> newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "application/json",
@@ -151,60 +154,122 @@ class WebServerManager(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BLE-MQTT Plugin Bridge</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            /* Light mode colors (default) */
+            --bg-primary: #f5f5f5;
+            --bg-secondary: #fafafa;
+            --bg-card: white;
+            --bg-header: #1976d2;
+            --bg-input: white;
+            --text-primary: #333;
+            --text-secondary: #666;
+            --text-on-primary: white;
+            --border-color: #eee;
+            --border-light: #ddd;
+            --shadow: rgba(0,0,0,0.1);
+            --shadow-strong: rgba(0,0,0,0.3);
+            --code-bg: #263238;
+            --code-text: #aed581;
+            --modal-overlay: rgba(0,0,0,0.5);
+        }
+
+        [data-theme="dark"] {
+            /* Dark mode colors */
+            --bg-primary: #121212;
+            --bg-secondary: #1a1a1a;
+            --bg-card: #1e1e1e;
+            --bg-header: #1565c0;
+            --bg-input: #2a2a2a;
+            --text-primary: #e0e0e0;
+            --text-secondary: #b0b0b0;
+            --text-on-primary: #e0e0e0;
+            --border-color: #333;
+            --border-light: #444;
+            --shadow: rgba(0,0,0,0.3);
+            --shadow-strong: rgba(0,0,0,0.6);
+            --code-bg: #0d1117;
+            --code-text: #58a6ff;
+            --modal-overlay: rgba(0,0,0,0.7);
+        }
+
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box;
+            transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             padding: 20px;
         }
         .container { max-width: 1200px; margin: 0 auto; }
         .header {
-            background: #1976d2;
-            color: white;
+            background: var(--bg-header);
+            color: var(--text-on-primary);
             padding: 20px;
             position: relative;
             z-index: 1;
             border-radius: 8px;
             margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
         .header h1 { font-size: 24px; margin-bottom: 5px; }
         .header .version { opacity: 0.8; font-size: 14px; }
+        .header .header-content { flex: 1; }
+        .theme-toggle {
+            background: rgba(255,255,255,0.15);
+            color: var(--text-on-primary);
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        .theme-toggle:hover {
+            background: rgba(255,255,255,0.25);
+        }
         .card {
-            background: white;
+            background: var(--bg-card);
             border-radius: 8px;
             padding: 20px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px var(--shadow);
         }
         .card h2 {
             font-size: 18px;
             margin-bottom: 15px;
-            color: #333;
-            border-bottom: 2px solid #1976d2;
+            color: var(--text-primary);
+            border-bottom: 2px solid var(--bg-header);
             padding-bottom: 8px;
         }
         .status-row {
             display: flex;
             justify-content: space-between;
             padding: 10px 0;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--border-color);
         }
         .status-row:last-child { border-bottom: none; }
-        .status-label { font-weight: 500; color: #666; }
-        .status-value { color: #333; }
+        .status-label { font-weight: 500; color: var(--text-secondary); }
+        .status-value { color: var(--text-primary); }
         .status-online { color: #4caf50; font-weight: bold; }
         .status-offline { color: #f44336; font-weight: bold; }
         .plugin-item {
             padding: 12px;
             margin-bottom: 10px;
-            background: #f9f9f9;
+            background: var(--bg-secondary);
             border-radius: 4px;
-            border-left: 4px solid #1976d2;
+            border-left: 4px solid var(--bg-header);
         }
         .mqtt-config-item {
             padding: 12px;
             margin-bottom: 10px;
-            background: #f9f9f9;
+            background: var(--bg-secondary);
             border-radius: 4px;
         }
         .mqtt-config-item.mqtt-connected {
@@ -213,11 +278,11 @@ class WebServerManager(
         .mqtt-config-item.mqtt-disconnected {
             border-left: 4px solid #f44336;
         }
-        .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; text-align: left; }
-        .plugin-status { font-size: 14px; color: #666; text-align: left; }
+        .plugin-name { font-weight: 600; color: var(--text-primary); margin-bottom: 5px; text-align: left; }
+        .plugin-status { font-size: 14px; color: var(--text-secondary); text-align: left; }
         .plugin-status-line { margin-bottom: 8px; text-align: left; }
         .plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
-        .mqtt-config-field { margin: 4px 0; padding-left: 0; text-align: left; font-size: 14px; color: #666; }
+        .mqtt-config-field { margin: 4px 0; padding-left: 0; text-align: left; font-size: 14px; color: var(--text-secondary); }
         .plugin-healthy { color: #4caf50; }
         .plugin-unhealthy { color: #f44336; }
         .toggle-switch {
@@ -275,8 +340,8 @@ class WebServerManager(
         }
         button:hover { background: #1565c0; }
         .log-container {
-            background: #263238;
-            color: #aed581;
+            background: var(--code-bg);
+            color: var(--code-text);
             padding: 15px;
             border-radius: 4px;
             font-family: 'Courier New', monospace;
@@ -286,7 +351,7 @@ class WebServerManager(
             white-space: pre-wrap;
             word-break: break-all;
         }
-        .loading { text-align: center; padding: 20px; color: #666; }
+        .loading { text-align: center; padding: 20px; color: var(--text-secondary); }
         .edit-btn {
             background: #1976d2;
             color: white;
@@ -302,6 +367,10 @@ class WebServerManager(
             background: #ccc;
             cursor: not-allowed;
         }
+        [data-theme="dark"] .edit-btn:disabled {
+            background: #3a3a3a;
+            color: #666;
+        }
         .save-btn {
             background: #4caf50;
         }
@@ -309,7 +378,9 @@ class WebServerManager(
         .config-input {
             font-family: monospace;
             padding: 4px 8px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--border-light);
+            background: var(--bg-input);
+            color: var(--text-primary);
             border-radius: 4px;
             font-size: 14px;
             width: 200px;
@@ -321,7 +392,7 @@ class WebServerManager(
             font-style: italic;
         }
         .section-helper {
-            color: #666;
+            color: var(--text-secondary);
             font-size: 13px;
             font-style: italic;
             margin-top: -8px;
@@ -329,7 +400,6 @@ class WebServerManager(
         }
         .plugin-type-section {
             margin-bottom: 20px;
-            transition: transform 0.2s ease;
         }
         .plugin-type-section.dragging {
             opacity: 0.5;
@@ -342,19 +412,20 @@ class WebServerManager(
             justify-content: space-between;
             align-items: center;
             padding: 10px 15px;
-            background: #f0f0f0;
+            background: var(--bg-secondary);
             border-radius: 4px;
             margin-bottom: 10px;
             cursor: move;
             user-select: none;
+            border: 1px solid var(--border-color);
         }
         .plugin-type-header:hover {
-            background: #e8e8e8;
+            background: var(--bg-primary);
         }
         .plugin-type-title {
             font-weight: 600;
             font-size: 16px;
-            color: #333;
+            color: var(--text-primary);
         }
         .add-instance-btn {
             background: #4caf50;
@@ -370,9 +441,13 @@ class WebServerManager(
             background: #ccc;
             cursor: not-allowed;
         }
+        [data-theme="dark"] .add-instance-btn:disabled {
+            background: #3a3a3a;
+            color: #666;
+        }
         .instance-card {
-            background: #fafafa;
-            border: 1px solid #e0e0e0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             padding: 12px;
             margin-bottom: 8px;
@@ -394,7 +469,7 @@ class WebServerManager(
         .instance-name {
             font-weight: 600;
             font-size: 14px;
-            color: #333;
+            color: var(--text-primary);
         }
         .instance-actions {
             display: flex;
@@ -421,9 +496,14 @@ class WebServerManager(
             background: #ccc;
             cursor: not-allowed;
         }
+        [data-theme="dark"] .instance-edit-btn:disabled,
+        [data-theme="dark"] .instance-remove-btn:disabled {
+            background: #3a3a3a;
+            color: #666;
+        }
         .instance-details {
             font-size: 13px;
-            color: #666;
+            color: var(--text-secondary);
         }
         .instance-detail-line {
             margin: 4px 0;
@@ -454,6 +534,10 @@ class WebServerManager(
             background: #ccc;
             cursor: not-allowed;
         }
+        [data-theme="dark"] .remove-btn:disabled {
+            background: #3a3a3a;
+            color: #666;
+        }
         .modal {
             display: none;
             position: fixed;
@@ -462,20 +546,29 @@ class WebServerManager(
             top: 0;
             width: 100%;
             height: 100%;
-            background-color: rgba(0,0,0,0.5);
+            background-color: var(--modal-overlay);
         }
         .modal-content {
-            background-color: white;
+            background-color: var(--bg-card);
             margin: 15% auto;
             padding: 20px;
             border-radius: 8px;
             width: 80%;
             max-width: 400px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            box-shadow: 0 4px 6px var(--shadow-strong);
         }
         .modal-content h3 {
             margin-top: 0;
-            color: #333;
+            color: var(--text-primary);
+        }
+        .modal-content label {
+            color: var(--text-primary);
+        }
+        .modal-content input,
+        .modal-content select {
+            background: var(--bg-input);
+            color: var(--text-primary);
+            border: 1px solid var(--border-light);
         }
         .modal-buttons {
             margin-top: 20px;
@@ -496,7 +589,7 @@ class WebServerManager(
         .modal-btn-primary:hover { background: #1565c0; }
         .modal-btn-secondary {
             background: #ccc;
-            color: #333;
+            color: var(--text-primary);
         }
         .modal-btn-secondary:hover { background: #bbb; }
         .modal-btn-danger {
@@ -510,25 +603,28 @@ class WebServerManager(
         .plugin-option {
             padding: 10px;
             margin: 5px 0;
-            border: 1px solid #ddd;
+            border: 1px solid var(--border-light);
             border-radius: 4px;
             cursor: pointer;
-            background: white;
+            background: var(--bg-card);
         }
-        .plugin-option:hover { background: #f0f0f0; }
+        .plugin-option:hover { background: var(--bg-secondary); }
         .plugin-option.disabled {
-            background: #f5f5f5;
+            background: var(--bg-secondary);
             color: #999;
             cursor: not-allowed;
         }
-        .plugin-option.disabled:hover { background: #f5f5f5; }
+        .plugin-option.disabled:hover { background: var(--bg-secondary); }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>BLE-MQTT Plugin Bridge</h1>
-            <div class="version">Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})</div>
+            <div class="header-content">
+                <h1>BLE-MQTT Plugin Bridge</h1>
+                <div class="version">Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})</div>
+            </div>
+            <button id="theme-toggle" class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
         </div>
 
         <div class="card">
@@ -617,6 +713,27 @@ class WebServerManager(
             </div>
         </div>
 
+        <!-- Configuration Backup/Restore -->
+        <div class="card">
+            <h2>Configuration Backup & Restore</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 14px;">
+                Export all settings and plugin configurations to a JSON file, or restore from a previous backup.
+            </p>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                <button onclick="exportConfig()" style="background: #4caf50; color: white; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                    📥 Export Configuration
+                </button>
+                <button onclick="document.getElementById('importFile').click()" style="background: #2196f3; color: white; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                    📤 Import Configuration
+                </button>
+            </div>
+            
+            <input type="file" id="importFile" accept=".json" style="display: none;" onchange="handleFileImport(event)">
+            
+            <div id="importStatus" style="display: none; margin-top: 15px; padding: 12px; border-radius: 4px; font-size: 14px;"></div>
+        </div>
+
         <div class="card">
             <h2>Debug Log</h2>
             <button onclick="loadDebugLog()">Load/Refresh Debug Log</button>
@@ -689,6 +806,31 @@ class WebServerManager(
     </div>
 
     <script>
+        // Theme management
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            updateThemeButton(savedTheme);
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme') || 'light';
+            const newTheme = current === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            updateThemeButton(newTheme);
+        }
+
+        function updateThemeButton(theme) {
+            const btn = document.getElementById('theme-toggle');
+            if (btn) {
+                btn.textContent = theme === 'dark' ? '☀️ Light Mode' : '🌙 Dark Mode';
+            }
+        }
+
+        // Initialize theme on page load
+        initTheme();
+
         // Global state
         let serviceRunning = false;
         let configChanged = {}; // Track which configs have changed
@@ -1551,6 +1693,132 @@ class WebServerManager(
                 alert('Failed to copy: ' + err);
             });
         }
+
+        // Configuration backup/restore functions
+        async function exportConfig() {
+            try {
+                const response = await fetch('/api/config/export');
+                if (!response.ok) {
+                    throw new Error('Export failed: ' + response.statusText);
+                }
+                
+                // Get the filename from Content-Disposition header if available
+                const contentDisposition = response.headers.get('content-disposition');
+                let filename = 'ble-bridge-backup.json';
+                if (contentDisposition) {
+                    const filenamePart = contentDisposition.split('filename=')[1];
+                    if (filenamePart) {
+                        filename = filenamePart.replace(/"/g, '');
+                    }
+                }
+                
+                // Create download link
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                showImportStatus('✅ Configuration exported successfully', 'success');
+            } catch (err) {
+                console.error('Export error:', err);
+                showImportStatus('❌ Export failed: ' + err.message, 'error');
+            }
+        }
+
+        function handleFileImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            if (!file.name.endsWith('.json')) {
+                showImportStatus('❌ Please select a valid JSON backup file', 'error');
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    // Validate JSON
+                    const backup = JSON.parse(e.target.result);
+                    
+                    // Show confirmation dialog
+                    const confirmed = confirm(
+                        'Import configuration from ' + file.name + '?\n\n' +
+                        'Version: ' + (backup.appVersion || 'unknown') + '\n' +
+                        'Exported: ' + (backup.exportedAt || 'unknown') + '\n\n' +
+                        'This will overwrite your current configuration.\n\n' +
+                        'Continue?'
+                    );
+                    
+                    if (!confirmed) {
+                        showImportStatus('Import cancelled', 'info');
+                        return;
+                    }
+                    
+                    // Send to server for import
+                    const formData = new FormData();
+                    formData.append('backup', new Blob([JSON.stringify(backup)], { type: 'application/json' }));
+                    
+                    showImportStatus('Importing...', 'info');
+                    
+                    const response = await fetch('/api/config/import?replace=true', {
+                        method: 'POST',
+                        body: JSON.stringify(backup)
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        showImportStatus('✅ Configuration imported successfully.\n\nNote: Restart the service to apply changes.', 'success');
+                        // Clear the file input
+                        event.target.value = '';
+                        
+                        // Reload page after 2 seconds
+                        setTimeout(() => {
+                            location.reload();
+                        }, 2000);
+                    } else {
+                        showImportStatus('❌ Import failed: ' + result.message, 'error');
+                    }
+                } catch (err) {
+                    console.error('Import error:', err);
+                    showImportStatus('❌ Invalid backup file or import error: ' + err.message, 'error');
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function showImportStatus(message, type) {
+            const statusDiv = document.getElementById('importStatus');
+            statusDiv.style.display = 'block';
+            statusDiv.textContent = message;
+            
+            // Set background color based on type
+            if (type === 'success') {
+                statusDiv.style.background = '#dff0d8';
+                statusDiv.style.color = '#3c763d';
+                statusDiv.style.border = '1px solid #d6e9c6';
+            } else if (type === 'error') {
+                statusDiv.style.background = '#f8d7da';
+                statusDiv.style.color = '#721c24';
+                statusDiv.style.border = '1px solid #f5c6cb';
+            } else {
+                statusDiv.style.background = '#d1ecf1';
+                statusDiv.style.color = '#0c5460';
+                statusDiv.style.border = '1px solid #bee5eb';
+            }
+            
+            // Auto-hide success messages after 5 seconds
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    statusDiv.style.display = 'none';
+                }, 5000);
+            }
+        }
     </script>
 </body>
 </html>
@@ -2327,6 +2595,94 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error updating instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Export all configuration as a JSON file download.
+     * GET /api/config/export
+     */
+    private fun handleConfigExport(): Response {
+        return try {
+            Log.i(TAG, "Exporting configuration...")
+            
+            val backupJson = ConfigBackupManager.createBackup(context)
+            
+            // Return as downloadable file
+            val response = newFixedLengthResponse(Response.Status.OK, "application/json", backupJson)
+            val timestamp = java.time.LocalDateTime.now().format(
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+            )
+            response.addHeader("Content-Disposition", "attachment; filename=\"ble-bridge-backup-$timestamp.json\"")
+            
+            Log.i(TAG, "✅ Configuration exported")
+            response
+        } catch (e: Exception) {
+            Log.e(TAG, "Error exporting configuration", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Import and restore configuration from an uploaded JSON file.
+     * POST /api/config/import
+     * 
+     * Expects multipart form data with "backup" file field.
+     * Optional "replace" parameter (true/false) to replace vs merge config.
+     */
+    private fun handleConfigImport(session: IHTTPSession): Response {
+        return try {
+            Log.i(TAG, "Importing configuration...")
+            
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            
+            // Get the backup JSON from multipart body
+            val backupContent = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No backup file provided"}"""
+            )
+            
+            // Try to parse as JSON
+            val backupJson = try {
+                JSONObject(backupContent).toString()
+            } catch (e: Exception) {
+                // If not JSON object at root, try to extract from request
+                backupContent
+            }
+            
+            // Check for replace parameter
+            val queryParams = session.parms
+            val replaceExisting = queryParams["replace"]?.equals("true", ignoreCase = true) ?: false
+            
+            Log.i(TAG, "Restoring backup (replace=$replaceExisting)...")
+            
+            val result = runBlocking {
+                ConfigBackupManager.restoreBackup(backupJson, context, replaceExisting)
+            }
+            
+            val response = JSONObject()
+            response.put("success", result.success)
+            response.put("message", result.message)
+            
+            val status = if (result.success) Response.Status.OK else Response.Status.BAD_REQUEST
+            newFixedLengthResponse(
+                status,
+                "application/json",
+                response.toString()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error importing configuration", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",

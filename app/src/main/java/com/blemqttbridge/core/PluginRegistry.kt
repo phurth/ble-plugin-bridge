@@ -179,15 +179,24 @@ class PluginRegistry {
                                 
                                 // Build config from instance data
                                 val configMap = if (instance.config.isNotEmpty()) {
-                                    instance.config
+                                    instance.config.toMutableMap()
                                 } else {
-                                    // Fallback: use instance deviceMac as sensor_mac
-                                    mapOf("sensor_mac" to instance.deviceMac)
+                                    mutableMapOf()
                                 }
                                 
-                                val config = PluginConfig(configMap)
-                                Log.d(TAG, "PluginConfig parameters: ${config.parameters}")
-                                instancePlugin.initialize(context, config)
+                                // Add device MAC to config based on plugin type
+                                when (pluginId) {
+                                    "easytouch" -> {
+                                        configMap["thermostat_mac"] = instance.deviceMac
+                                        instance.config["password"]?.let { configMap["thermostat_password"] = it }
+                                    }
+                                    "onecontrol", "onecontrol_v2" -> configMap["gateway_mac"] = instance.deviceMac
+                                    "gopower" -> configMap["controller_mac"] = instance.deviceMac
+                                    "mopeka" -> configMap["sensor_mac"] = instance.deviceMac
+                                }
+                                
+                                // Use new initialize method with instance config
+                                instancePlugin.initializeWithConfig(instanceId, configMap)
                                 
                                 Log.d(TAG, "Checking if device ${device.address} matches instance: $instanceId")
                                 // Convert ByteArray back to ScanRecord for matching
@@ -211,32 +220,9 @@ class PluginRegistry {
                             }
                         }
                     } else {
-                        // Single-instance plugin: use generic config
-                        if (context != null) {
-                            try {
-                                val config = PluginConfig(AppConfig.getBlePluginConfig(context, pluginId))
-                                tempPlugin.initialize(context, config)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Could not initialize temp plugin $pluginId with config: ${e.message}")
-                            }
-                        }
-                        
-                        Log.d(TAG, "Checking if device ${device.address} matches plugin: $pluginId")
-                        // Convert ByteArray back to ScanRecord for matching
-                        val scanRecordObj = scanRecord?.let { bytes ->
-                            try {
-                                val parser = Class.forName("android.bluetooth.le.ScanRecord")
-                                    .getDeclaredMethod("parseFromBytes", ByteArray::class.java)
-                                parser.invoke(null, bytes) as? android.bluetooth.le.ScanRecord
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to parse ScanRecord: ${e.message}")
-                                null
-                            }
-                        }
-                        if (tempPlugin.matchesDevice(device, scanRecordObj)) {
-                            Log.d(TAG, "Device ${device.address} matches device plugin: $pluginId (not loaded yet)")
-                            return pluginId
-                        }
+                        // Single-instance plugin: Skip legacy initialize call
+                        // These plugins should already be loaded via createPluginInstance
+                        Log.d(TAG, "Skipping legacy initialize for plugin: $pluginId (should use instances)")
                     }
                 }
                 // Check if it's a legacy BlePluginInterface

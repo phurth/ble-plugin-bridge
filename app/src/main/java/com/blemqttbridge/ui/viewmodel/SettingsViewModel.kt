@@ -90,6 +90,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _mqttConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.mqttConnected.value)
     val mqttConnectedStatus: StateFlow<Boolean> = _mqttConnectedStatus
     
+    // BLE scanning status
+    private val _bleScanningActive = MutableStateFlow(BaseBleService.bleScanningActive.value)
+    val bleScanningActive: StateFlow<Boolean> = _bleScanningActive
+    
+    // Bluetooth availability status
+    private val _bluetoothAvailable = MutableStateFlow(BaseBleService.bluetoothAvailable.value)
+    val bluetoothAvailable: StateFlow<Boolean> = _bluetoothAvailable
+    
     // Trace status flows
     private val _traceActive = MutableStateFlow(BaseBleService.traceActive.value)
     val traceActive: StateFlow<Boolean> = _traceActive
@@ -143,6 +151,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             BaseBleService.traceFilePath.collect { 
                 _traceFilePath.value = it 
+            }
+        }
+        
+        // Collect BLE scanning status updates
+        viewModelScope.launch {
+            BaseBleService.bleScanningActive.collect {
+                _bleScanningActive.value = it
+            }
+        }
+        
+        // Collect Bluetooth availability status updates
+        viewModelScope.launch {
+            BaseBleService.bluetoothAvailable.collect {
+                _bluetoothAvailable.value = it
             }
         }
         

@@ -55,6 +55,10 @@ fun SettingsScreen(
     val mqttBrokerHost by viewModel.mqttBrokerHost.collectAsState()
     val mqttBrokerPort by viewModel.mqttBrokerPort.collectAsState()
     
+    // BLE scanning and Bluetooth availability status
+    val bleScanningActive by viewModel.bleScanningActive.collectAsState()
+    val bluetoothAvailable by viewModel.bluetoothAvailable.collectAsState()
+    
     // Plugin instances
     val pluginStatuses by viewModel.pluginStatuses.collectAsState()
     
@@ -333,15 +337,32 @@ fun SettingsScreen(
                                 text = "Service Status",
                                 style = MaterialTheme.typography.bodyMedium
                             )
+                            // 3-state indicator based on serviceEnabled, bleScanningActive, bluetoothAvailable
+                            val (statusText, statusColor) = when {
+                                !serviceEnabled -> "⚫ Stopped" to MaterialTheme.colorScheme.onSurfaceVariant
+                                !bluetoothAvailable -> "⚠️ Bluetooth OFF" to Color(0xFFFF9800) // Orange
+                                bleScanningActive -> "🟢 Scanning" to Color(0xFF4CAF50) // Green
+                                else -> "🟡 Running (not scanning)" to Color(0xFFFFC107) // Yellow
+                            }
                             Text(
-                                text = if (serviceEnabled) "� Running" else "⚫ Stopped",
+                                text = statusText,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = statusColor
                             )
                         }
                         Switch(
                             checked = serviceEnabled,
                             onCheckedChange = { viewModel.setServiceEnabled(it) }
+                        )
+                    }
+                    
+                    // Warning message when service enabled but not scanning
+                    if (serviceEnabled && !bleScanningActive && bluetoothAvailable) {
+                        Text(
+                            text = "⚠️ Service is enabled but not scanning. Try toggling Bluetooth or the service.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFFFC107), // Yellow
+                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                     
