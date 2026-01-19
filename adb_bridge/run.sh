@@ -9,7 +9,7 @@ ADB_PORT=$(jq -r '.adb_port' $CONFIG_PATH)
 CHECK_INTERVAL=$(jq -r '.check_interval' $CONFIG_PATH)
 
 echo "======================================"
-echo "ADB Bridge v1.0.9 - HAOS Edition"
+echo "ADB Bridge v1.0.10 - HAOS Edition"
 echo "======================================"
 echo "Mode: ${MODE}"
 echo ""
