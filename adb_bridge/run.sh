@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ADB Bridge for Home Assistant
-# Enables wireless ADB on USB-connected Android devices
+# Connects to HAOS's native ADB server to manage USB Android devices
 
 # Read config
 CONFIG_PATH=/data/options.json
@@ -16,33 +16,44 @@ echo "======================================"
 echo "Mode: ${MODE}"
 echo ""
 
-echo "Waiting for connected USB devices..."
+# Use HAOS's ADB server instead of running our own
+# The supervisor exposes ADB on localhost:5037
+export ADB_SERVER_SOCKET=tcp:localhost:5037
+
+echo "Connecting to HAOS ADB server at localhost:5037..."
+sleep 1
+
+# Check if adb can connect to HAOS's server
+if ! adb connect localhost:5037 >/dev/null 2>&1; then
+  echo "WARNING: Could not verify HAOS ADB server"
+fi
+
+echo "Waiting for USB-connected devices..."
 WAIT_COUNT=0
 while [ $WAIT_COUNT -lt 30 ]; do
   DEVICES=$(adb devices 2>&1 | grep -c "device$" || true)
   if [ "$DEVICES" -gt 0 ]; then
+    echo "Found $DEVICES device(s)!"
     break
   fi
-  echo "  No devices yet... waiting ($WAIT_COUNT/30)"
+  echo "  Waiting... ($WAIT_COUNT/30)"
   sleep 2
   WAIT_COUNT=$((WAIT_COUNT + 1))
 done
 
 if [ "$DEVICES" -eq 0 ]; then
+  echo ""
   echo "ERROR: No USB devices detected after 60 seconds"
   echo ""
   echo "Troubleshooting:"
-  echo "1. Verify USB device is plugged into HAOS host"
-  echo "2. Check Proxmox USB passthrough settings"
-  echo "3. Enable USB debugging on Android device"
-  echo "4. Accept authorization prompt on device"
+  echo "1. Is the Android device plugged into HAOS host?"
+  echo "2. Enable USB debugging on the device"
+  echo "3. Check Proxmox USB passthrough configuration"
+  echo "4. Verify device appears in 'ps aux | grep adb' on HAOS host"
   sleep infinity
 fi
 
-echo "Found $DEVICES device(s)"
 echo ""
-
-# List devices
 echo "======================================"
 echo "Connected Devices:"
 echo "======================================"
