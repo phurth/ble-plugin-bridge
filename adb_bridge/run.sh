@@ -1,7 +1,5 @@
-#!/bin/bash
-
 # ADB Bridge for Home Assistant
-# Connects to HAOS's native ADB server to manage USB Android devices
+# Manages USB Android devices via ADB
 
 # Read config
 CONFIG_PATH=/data/options.json
@@ -16,14 +14,12 @@ echo "======================================"
 echo "Mode: ${MODE}"
 echo ""
 
-# Use HAOS's ADB server instead of running our own
-# The supervisor exposes ADB on localhost:5037
-export ADB_SERVER_SOCKET=tcp:localhost:5037
+# Start ADB server (will use USB devices via gpio: true)
+echo "Starting ADB server..."
+adb start-server
+sleep 2
 
-echo "Connecting to HAOS ADB server..."
-sleep 1
-
-echo "Waiting for USB-connected devices..."
+echo "Scanning for USB devices..."
 WAIT_COUNT=0
 while [ $WAIT_COUNT -lt 30 ]; do
   DEVICES=$(adb devices 2>&1 | grep -c "device$" || true)
@@ -38,13 +34,16 @@ done
 
 if [ "$DEVICES" -eq 0 ]; then
   echo ""
-  echo "ERROR: No USB devices detected after 60 seconds"
+  echo "ERROR: No USB devices detected"
+  echo ""
+  echo "Debugging info:"
+  echo "USB devices visible:"
+  ls -la /dev/bus/usb/ 2>/dev/null | head -5
   echo ""
   echo "Troubleshooting:"
-  echo "1. Is the Android device plugged into HAOS host?"
-  echo "2. Enable USB debugging on the device"
-  echo "3. Check Proxmox USB passthrough configuration"
-  echo "4. Verify device appears in 'ps aux | grep adb' on HAOS host"
+  echo "1. Is device plugged into host?"
+  echo "2. Check Proxmox USB passthrough"
+  echo "3. Enable USB debugging on device"
   sleep infinity
 fi
 
@@ -52,10 +51,7 @@ echo ""
 echo "======================================"
 echo "Connected Devices:"
 echo "======================================"
-adb devices -l | grep "device" | while read -r line; do
-  SERIAL=$(echo "$line" | awk '{print $1}')
-  echo "  $SERIAL"
-done
+adb devices -l | grep "device"
 echo ""
 
 # Select device
@@ -73,10 +69,7 @@ echo "Target device: $TARGET_SERIAL"
 echo ""
 
 # Determine network interface
-echo "======================================"
-echo "Checking device network..."
-echo "======================================"
-
+echo "Checking device network interface..."
 NETWORK_IFACE=$(adb -s "$TARGET_SERIAL" shell ip route 2>/dev/null | grep "^default" | awk '{print $5}' || echo "unknown")
 echo "Network interface: $NETWORK_IFACE"
 echo ""
@@ -85,68 +78,52 @@ echo ""
 if [ "$MODE" = "auto" ]; then
   if [[ "$NETWORK_IFACE" == "wlan"* ]]; then
     MODE="wireless"
-    echo "Auto-detected WiFi → using wireless mode"
+    echo "Auto-detected WiFi → wireless mode"
   else
     MODE="bridge"
-    echo "Auto-detected Ethernet/Unknown → using bridge mode"
+    echo "Auto-detected Ethernet/Unknown → bridge mode"
   fi
 fi
 
 echo ""
 echo "======================================"
-echo "Starting in $MODE mode"
+echo "Operating in $MODE mode"
 echo "======================================"
 echo ""
 
 if [ "$MODE" = "wireless" ]; then
-  echo "Enabling wireless ADB on device..."
+  echo "Enabling wireless ADB..."
   adb -s "$TARGET_SERIAL" tcpip $ADB_PORT
   sleep 2
   
-  DEVICE_IP=$(adb -s "$TARGET_SERIAL" shell ip addr show $NETWORK_IFACE 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 || echo "unknown")
+  DEVICE_IP=$(adb -s "$TARGET_SERIAL" shell ip addr show $NETWORK_IFACE 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1)
   
-  if [ "$DEVICE_IP" = "unknown" ]; then
-    echo "ERROR: Could not determine device IP!"
+  if [ -z "$DEVICE_IP" ]; then
+    echo "ERROR: Could not get device IP!"
     sleep infinity
   fi
   
   echo ""
-  echo "======================================"
-  echo "Wireless ADB Enabled"
-  echo "======================================"
+  echo "SUCCESS!"
   echo "Device IP: $DEVICE_IP"
   echo "Port: $ADB_PORT"
   echo ""
-  echo "Next steps:"
+  echo "Connect from computer:"
   echo "  adb connect $DEVICE_IP:$ADB_PORT"
   echo ""
-  echo "To deploy APKs:"
-  echo "  adb install -r app.apk"
-  echo "======================================"
-  echo ""
-  
-  echo "Monitoring connection every ${CHECK_INTERVAL}s..."
+  echo "Monitor:"
   while true; do
     sleep "$CHECK_INTERVAL"
     if adb -s "$TARGET_SERIAL" get-state >/dev/null 2>&1; then
-      echo "[$(date '+%H:%M:%S')] Device still connected (USB)"
+      echo "[$(date '+%H:%M:%S')] Connected"
     else
-      echo "[$(date '+%H:%M:%S')] WARNING: Device lost - checking..."
-      if ! adb devices | grep "^${TARGET_SERIAL}" >/dev/null 2>&1; then
-        echo "Device disconnected! Re-enabling wireless ADB..."
-        adb -s "$TARGET_SERIAL" tcpip $ADB_PORT 2>/dev/null || true
-        sleep 2
-      fi
+      echo "[$(date '+%H:%M:%S')] Device lost, re-enabling..."
+      adb -s "$TARGET_SERIAL" tcpip $ADB_PORT 2>/dev/null || true
+      sleep 2
     fi
   done
-
 else
-  # Bridge mode - device is on Ethernet
-  echo "Device is on Ethernet or unknown network"
-  echo "Set to bridge mode for network forwarding"
-  echo ""
-  echo "Checking device connectivity..."
-  
+  echo "Bridge mode - monitoring device..."
   while true; do
     if adb -s "$TARGET_SERIAL" get-state >/dev/null 2>&1; then
       echo "[$(date '+%H:%M:%S')] Device connected"
