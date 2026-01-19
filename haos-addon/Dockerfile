@@ -7,8 +7,7 @@ RUN apk add --no-cache \
     bash \
     coreutils
 
-# Copy run script
-COPY run.sh /usr/bin/
-RUN chmod a+x /usr/bin/run.sh
-
-CMD ["/usr/bin/run.sh"]
+# Copy run script to s6-overlay service directory
+RUN mkdir -p /etc/services.d/adb-bridge
+COPY run.sh /etc/services.d/adb-bridge/run
+RUN chmod a+x /etc/services.d/adb-bridge/run

@@ -1,4 +1,5 @@
-#!/usr/bin/env bashio
+#!/usr/bin/with-contenv bashio
+set -e
 
 # Get configuration options
 MODE=$(bashio::config 'mode')
