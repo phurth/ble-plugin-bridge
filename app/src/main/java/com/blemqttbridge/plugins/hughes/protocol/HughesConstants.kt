@@ -7,12 +7,14 @@ import java.util.UUID
  * 
  * Frame structure: Two 20-byte notifications concatenated into 40-byte frame (no checksum).
  * Header: 01 03 20 (first chunk)
- * Payload (big-endian 32-bit ints, divide by 10,000):
+ * Payload (big-endian 32-bit ints, divide by 10,000 unless noted):
  *   [3..6]   volts (V)
  *   [7..10]  amps (A)
  *   [11..14] watts (W)
- *   [15..18] cumulative energy (kWh)
+ *   [15..18] cumulative energy (kWh, divide by 10,000)
  *   [19]     error code (0–9)
+ *   [20..30] reserved/unknown (observed zeroes)
+ *   [31..34] frequency (Hz, divide by 100)
  *   [37..39] line marker (0/0/0=line1, 1/1/1=line2; 30A only line1)
  */
 object HughesConstants {
@@ -69,6 +71,9 @@ object HughesConstants {
     
     /** Error code (1 byte @ [19], 0–9 map to error labels) */
     const val OFFSET_ERROR = 19
+    
+    /** Frequency (big-endian 32-bit int @ [31..34], divide by 100 for Hz) */
+    const val OFFSET_FREQUENCY = 31
     
     /** Line marker bytes (@ [37..39]; 0/0/0=line1, 1/1/1=line2) */
     const val OFFSET_LINE_MARKER = 37

@@ -175,6 +175,7 @@ class HughesGattCallback(
     private var currentAmps: Double = 0.0
     private var currentWatts: Double = 0.0
     private var currentEnergy: Double = 0.0
+    private var currentFrequency: Double = 0.0
     private var currentError: Int = 0
     private var currentLine: Int = 1
     
@@ -346,6 +347,9 @@ class HughesGattCallback(
             currentAmps = readInt32BE(frame, HughesConstants.OFFSET_AMPS) / 10000.0
             currentWatts = readInt32BE(frame, HughesConstants.OFFSET_WATTS) / 10000.0
             currentEnergy = readInt32BE(frame, HughesConstants.OFFSET_ENERGY) / 10000.0
+            val rawFrequency = readInt32BE(frame, HughesConstants.OFFSET_FREQUENCY)
+            currentFrequency = rawFrequency / 100.0
+            val freqBytes = frame.copyOfRange(HughesConstants.OFFSET_FREQUENCY, HughesConstants.OFFSET_FREQUENCY + 4)
             currentError = frame[HughesConstants.OFFSET_ERROR].toInt() and 0xFF
             
             // Detect line from marker bytes (simplified: assume all non-zero = line 2)
@@ -354,7 +358,15 @@ class HughesGattCallback(
             val marker2 = frame[HughesConstants.OFFSET_LINE_MARKER + 2].toInt() and 0xFF
             currentLine = if (marker0 == 0 && marker1 == 0 && marker2 == 0) 1 else 2
             
-            Log.d(TAG, "Parsed frame: V=${String.format("%.2f", currentVolts)}, A=${String.format("%.2f", currentAmps)}, W=${String.format("%.2f", currentWatts)}, E=${String.format("%.2f", currentEnergy)}, Line=$currentLine, Error=$currentError")
+            Log.d(
+                TAG,
+                "Parsed frame: V=${String.format("%.2f", currentVolts)}, " +
+                    "A=${String.format("%.2f", currentAmps)}, " +
+                    "W=${String.format("%.2f", currentWatts)}, " +
+                    "E=${String.format("%.2f", currentEnergy)}, " +
+                    "F=${String.format("%.2f", currentFrequency)} (raw=$rawFrequency, bytes=${freqBytes.joinToString(" "){ String.format("%02X", it) }}), " +
+                    "Line=$currentLine, Error=$currentError"
+            )
             
             // Publish to MQTT
             publishMetrics()
@@ -405,6 +417,7 @@ class HughesGattCallback(
         mqttPublisher.publishState("$baseTopic/amps$lineSuffix", String.format("%.2f", currentAmps), false)
         mqttPublisher.publishState("$baseTopic/watts$lineSuffix", String.format("%.2f", currentWatts), false)
         mqttPublisher.publishState("$baseTopic/energy$lineSuffix", String.format("%.2f", currentEnergy), false)
+        mqttPublisher.publishState("$baseTopic/frequency$lineSuffix", String.format("%.2f", currentFrequency), false)
         
         // Combined state for this line
         val stateJson = JSONObject().apply {
@@ -412,6 +425,7 @@ class HughesGattCallback(
             put("current", String.format("%.2f", currentAmps))
             put("power", String.format("%.2f", currentWatts))
             put("energy", String.format("%.2f", currentEnergy))
+            put("frequency", String.format("%.2f", currentFrequency))
             put("error_code", currentError)
             put("error", HughesConstants.ERROR_LABELS[currentError] ?: "Unknown")
             put("timestamp", ts)
@@ -457,13 +471,15 @@ class HughesGattCallback(
         publishDiscoverySensor("volts_l1", "L1 Voltage", "V", "voltage", deviceInfo, 1)
         publishDiscoverySensor("amps_l1", "L1 Current", "A", "current", deviceInfo, 1)
         publishDiscoverySensor("watts_l1", "L1 Power", "W", "power", deviceInfo, 1)
-        publishDiscoverySensor("energy_l1", "L1 Energy", "kWh", "energy", deviceInfo, 1)
+        publishDiscoverySensor("energy_l1", "Energy", "kWh", "energy", deviceInfo, 1)
+        publishDiscoverySensor("frequency_l1", "L1 Frequency", "Hz", "frequency", deviceInfo, 1)
         
         // Publish sensors for Line 2
         publishDiscoverySensor("volts_l2", "L2 Voltage", "V", "voltage", deviceInfo, 2)
         publishDiscoverySensor("amps_l2", "L2 Current", "A", "current", deviceInfo, 2)
         publishDiscoverySensor("watts_l2", "L2 Power", "W", "power", deviceInfo, 2)
-        publishDiscoverySensor("energy_l2", "L2 Energy", "kWh", "energy", deviceInfo, 2)
+        publishDiscoverySensor("energy_l2", "Cumulative Energy", "kWh", "energy", deviceInfo, 2)
+        publishDiscoverySensor("frequency_l2", "L2 Frequency", "Hz", "frequency", deviceInfo, 2)
         
         // Publish single error sensor (not line-specific)
         publishDiscoverySensor("error", "Error Status", null, null, deviceInfo, 0)
