@@ -185,7 +185,7 @@ class HughesGattCallback(
     }
     
     private val baseTopic: String
-        get() = "home/hughes_watchdog_${device.address.replace(":", "").lowercase()}"
+        get() = "hughes_watchdog_${device.address.replace(":", "").lowercase()}"
     
     // ===== LIFECYCLE CALLBACKS =====
     
