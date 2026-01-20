@@ -10,6 +10,7 @@ import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.hughes.protocol.HughesConstants
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.*
 
@@ -184,7 +185,7 @@ class HughesGattCallback(
     }
     
     private val baseTopic: String
-        get() = "hughes/${device.address}"
+        get() = "home/hughes_watchdog_${device.address.replace(":", "").lowercase()}"
     
     // ===== LIFECYCLE CALLBACKS =====
     
@@ -397,31 +398,33 @@ class HughesGattCallback(
      */
     private fun publishMetrics() {
         val ts = System.currentTimeMillis()
-        mqttPublisher.publishState("$baseTopic/metrics/volts", currentVolts.toString(), false)
-        mqttPublisher.publishState("$baseTopic/metrics/amps", currentAmps.toString(), false)
-        mqttPublisher.publishState("$baseTopic/metrics/watts", currentWatts.toString(), false)
-        mqttPublisher.publishState("$baseTopic/metrics/energy_kwh", currentEnergy.toString(), false)
+        val lineSuffix = "_l${currentLine}"
         
-        // Combined state
+        // Publish per-line metrics
+        mqttPublisher.publishState("$baseTopic/volts$lineSuffix", String.format("%.2f", currentVolts), false)
+        mqttPublisher.publishState("$baseTopic/amps$lineSuffix", String.format("%.2f", currentAmps), false)
+        mqttPublisher.publishState("$baseTopic/watts$lineSuffix", String.format("%.2f", currentWatts), false)
+        mqttPublisher.publishState("$baseTopic/energy$lineSuffix", String.format("%.2f", currentEnergy), false)
+        mqttPublisher.publishState("$baseTopic/error$lineSuffix", currentError.toString(), false)
+        
+        // Combined state for this line
         val stateJson = JSONObject().apply {
-            put("volts", String.format("%.2f", currentVolts))
-            put("amps", String.format("%.2f", currentAmps))
-            put("watts", String.format("%.2f", currentWatts))
-            put("energy_kwh", String.format("%.2f", currentEnergy))
-            put("line", currentLine)
+            put("voltage", String.format("%.2f", currentVolts))
+            put("current", String.format("%.2f", currentAmps))
+            put("power", String.format("%.2f", currentWatts))
+            put("energy", String.format("%.2f", currentEnergy))
             put("error_code", currentError)
-            put("error_label", HughesConstants.ERROR_LABELS[currentError] ?: "Unknown")
-            put("ts", ts)
+            put("error", HughesConstants.ERROR_LABELS[currentError] ?: "Unknown")
+            put("timestamp", ts)
         }
-        mqttPublisher.publishState("$baseTopic/state", stateJson.toString(), false)
+        mqttPublisher.publishState("$baseTopic/state$lineSuffix", stateJson.toString(), false)
     }
     
     /**
      * Publish diagnostics (error status)
      */
     private fun publishDiagnostics() {
-        val errorLabel = HughesConstants.ERROR_LABELS[currentError] ?: "Unknown"
-        mqttPublisher.publishState("$baseTopic/diagnostics/error", errorLabel, false)
+        // Error is now published per-line in publishMetrics()
     }
     
     /**
@@ -438,58 +441,51 @@ class HughesGattCallback(
         Log.i(TAG, "Publishing HA discovery for $baseTopic")
         
         val address = device.address
-        val deviceName = "Hughes Watchdog ($address)"
+        val deviceId = instanceId
+        val deviceName = "Hughes Watchdog"
         
-        // Voltage sensor
-        publishDiscoverySensor("volts", "Voltage", "V", "voltage")
-        
-        // Amperage sensor
-        publishDiscoverySensor("amps", "Current", "A", "current")
-        
-        // Watts sensor
-        publishDiscoverySensor("watts", "Power", "W", "power")
-        
-        // Energy sensor (cumulative)
-        publishDiscoverySensor("energy_kwh", "Energy", "kWh", "energy")
-        
-        // Error diagnostic
-        val errorDiscoveryTopic = "homeassistant/sensor/${instanceId}_error/config"
-        val errorPayload = JSONObject().apply {
-            put("name", "Error")
-            put("state_topic", "$baseTopic/diagnostics/error")
-            put("unique_id", "${instanceId}_error")
-            put("device", JSONObject().apply {
-                put("identifiers", arrayOf(address))
-                put("name", deviceName)
-                put("model", "Power Watchdog")
-                put("manufacturer", "Hughes Autoformers")
-            })
+        // Create device info shared by all sensors
+        val deviceInfo = JSONObject().apply {
+            put("identifiers", JSONArray().put(deviceId))
+            put("name", deviceName)
+            put("model", "Power Watchdog 50A")
+            put("manufacturer", "Hughes Autoformers")
         }
-        mqttPublisher.publishDiscovery(errorDiscoveryTopic, errorPayload.toString())
+        
+        // Publish sensors for Line 1
+        publishDiscoverySensor("volts_l1", "L1 Voltage", "V", "voltage", deviceInfo, 1)
+        publishDiscoverySensor("amps_l1", "L1 Current", "A", "current", deviceInfo, 1)
+        publishDiscoverySensor("watts_l1", "L1 Power", "W", "power", deviceInfo, 1)
+        publishDiscoverySensor("energy_l1", "L1 Energy", "kWh", "energy", deviceInfo, 1)
+        publishDiscoverySensor("error_l1", "L1 Error", null, null, deviceInfo, 1)
+        
+        // Publish sensors for Line 2
+        publishDiscoverySensor("volts_l2", "L2 Voltage", "V", "voltage", deviceInfo, 2)
+        publishDiscoverySensor("amps_l2", "L2 Current", "A", "current", deviceInfo, 2)
+        publishDiscoverySensor("watts_l2", "L2 Power", "W", "power", deviceInfo, 2)
+        publishDiscoverySensor("energy_l2", "L2 Energy", "kWh", "energy", deviceInfo, 2)
+        publishDiscoverySensor("error_l2", "L2 Error", null, null, deviceInfo, 2)
     }
     
     /**
      * Helper to publish a single sensor discovery
      */
-    private fun publishDiscoverySensor(field: String, name: String, unit: String, deviceClass: String?) {
-        val address = device.address
-        val deviceName = "Hughes Watchdog ($address)"
+    private fun publishDiscoverySensor(field: String, name: String, unit: String?, deviceClass: String?, deviceInfo: JSONObject, line: Int) {
         val discoveryTopic = "homeassistant/sensor/${instanceId}_$field/config"
         
         val payload = JSONObject().apply {
             put("name", name)
-            put("state_topic", "$baseTopic/metrics/$field")
-            put("unit_of_measurement", unit)
+            put("state_topic", "$baseTopic/${field}")
+            if (unit != null) {
+                put("unit_of_measurement", unit)
+            }
             if (deviceClass != null) {
                 put("device_class", deviceClass)
+                put("state_class", if (deviceClass == "energy") "total_increasing" else "measurement")
             }
             put("unique_id", "${instanceId}_$field")
-            put("device", JSONObject().apply {
-                put("identifiers", arrayOf(address))
-                put("name", deviceName)
-                put("model", "Power Watchdog")
-                put("manufacturer", "Hughes Autoformers")
-            })
+            put("device", deviceInfo)
+            put("availability_topic", "$baseTopic/availability")
         }
         
         mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
