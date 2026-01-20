@@ -2104,10 +2104,14 @@ class BaseBleService : Service() {
         // Create a copy to avoid ConcurrentModificationException
         for ((_, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
-            try {
-                gatt.disconnect()
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied for disconnect", e)
+            if (gatt != null) {
+                try {
+                    gatt.disconnect()
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Permission denied for disconnect", e)
+                }
+            } else {
+                Log.w(TAG, "disconnectAll: gatt was null, skipping disconnect")
             }
         }
         

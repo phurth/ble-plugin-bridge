@@ -411,6 +411,9 @@ class PluginRegistry {
                 "gopower" -> {
                     configWithDevice["controller_mac"] = instance.deviceMac
                 }
+                "hughes_watchdog" -> {
+                    configWithDevice["watchdog_mac"] = instance.deviceMac
+                }
                 "mopeka" -> {
                     configWithDevice["sensor_mac"] = instance.deviceMac
                 }

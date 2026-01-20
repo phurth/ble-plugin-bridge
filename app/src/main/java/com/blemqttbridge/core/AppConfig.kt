@@ -54,6 +54,7 @@ object AppConfig {
                     "controller_mac" to settings.goPowerControllerMac.first()
                 )
             }
+            "hughes_watchdog" -> mapOf()  // MAC is handled by PluginInstance
             else -> emptyMap()
         }
     }
