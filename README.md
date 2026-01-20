@@ -76,6 +76,7 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 The following OneControl gateways have been confirmed working:
 - Unity X270D
 - X1.5
+- x4
 
 #### Setup
 
