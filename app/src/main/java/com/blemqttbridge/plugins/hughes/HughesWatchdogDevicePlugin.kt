@@ -405,7 +405,6 @@ class HughesGattCallback(
         mqttPublisher.publishState("$baseTopic/amps$lineSuffix", String.format("%.2f", currentAmps), false)
         mqttPublisher.publishState("$baseTopic/watts$lineSuffix", String.format("%.2f", currentWatts), false)
         mqttPublisher.publishState("$baseTopic/energy$lineSuffix", String.format("%.2f", currentEnergy), false)
-        mqttPublisher.publishState("$baseTopic/error$lineSuffix", currentError.toString(), false)
         
         // Combined state for this line
         val stateJson = JSONObject().apply {
@@ -424,7 +423,9 @@ class HughesGattCallback(
      * Publish diagnostics (error status)
      */
     private fun publishDiagnostics() {
-        // Error is now published per-line in publishMetrics()
+        val errorLabel = HughesConstants.ERROR_LABELS[currentError] ?: "Unknown"
+        mqttPublisher.publishState("$baseTopic/error", errorLabel, false)
+        mqttPublisher.publishState("$baseTopic/error_code", currentError.toString(), false)
     }
     
     /**
@@ -457,14 +458,15 @@ class HughesGattCallback(
         publishDiscoverySensor("amps_l1", "L1 Current", "A", "current", deviceInfo, 1)
         publishDiscoverySensor("watts_l1", "L1 Power", "W", "power", deviceInfo, 1)
         publishDiscoverySensor("energy_l1", "L1 Energy", "kWh", "energy", deviceInfo, 1)
-        publishDiscoverySensor("error_l1", "L1 Error", null, null, deviceInfo, 1)
         
         // Publish sensors for Line 2
         publishDiscoverySensor("volts_l2", "L2 Voltage", "V", "voltage", deviceInfo, 2)
         publishDiscoverySensor("amps_l2", "L2 Current", "A", "current", deviceInfo, 2)
         publishDiscoverySensor("watts_l2", "L2 Power", "W", "power", deviceInfo, 2)
         publishDiscoverySensor("energy_l2", "L2 Energy", "kWh", "energy", deviceInfo, 2)
-        publishDiscoverySensor("error_l2", "L2 Error", null, null, deviceInfo, 2)
+        
+        // Publish single error sensor (not line-specific)
+        publishDiscoverySensor("error", "Error Status", null, null, deviceInfo, 0)
     }
     
     /**
@@ -475,7 +477,8 @@ class HughesGattCallback(
         
         val payload = JSONObject().apply {
             put("name", name)
-            put("state_topic", "$baseTopic/${field}")
+            // MqttPublisher adds topic_prefix, so state topics must match what's published
+            put("state_topic", "homeassistant/$baseTopic/${field}")
             if (unit != null) {
                 put("unit_of_measurement", unit)
             }
@@ -485,7 +488,7 @@ class HughesGattCallback(
             }
             put("unique_id", "${instanceId}_$field")
             put("device", deviceInfo)
-            put("availability_topic", "$baseTopic/availability")
+            put("availability_topic", "homeassistant/$baseTopic/availability")
         }
         
         mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
