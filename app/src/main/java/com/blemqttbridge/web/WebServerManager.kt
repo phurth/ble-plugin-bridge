@@ -1699,6 +1699,11 @@ class WebServerManager(
                     loadStatus();
                     loadConfig();
                 } else {
+                    // When enabling MQTT, service restarts and needs time to reconnect
+                    // Wait 2 seconds before refreshing UI to allow connection to establish
+                    if (enable) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
                     loadConfig();
                 }
             } catch (error) {

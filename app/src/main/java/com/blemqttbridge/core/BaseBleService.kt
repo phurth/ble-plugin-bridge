@@ -635,10 +635,10 @@ class BaseBleService : Service() {
             Log.i(TAG, "Continuing without output plugin for BLE testing")
             _mqttConnected.value = false
         } else {
-            // Set up connection status listener for real-time UI updates
+            // Set up connection status listener BEFORE initialize so we catch connection state changes
             outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                 override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
                     _mqttConnected.value = connected
                 }
             })
@@ -710,10 +710,10 @@ class BaseBleService : Service() {
             _mqttConnected.value = false
         } else {
             appendServiceLog("Loaded output plugin: $outputPluginId")
-            // Set up connection status listener for real-time UI updates
+            // Set up connection status listener BEFORE initialize so we catch connection state changes
             outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                 override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
                     _mqttConnected.value = connected
                 }
             })
@@ -2811,6 +2811,10 @@ class BaseBleService : Service() {
      */
     suspend fun disconnectMqtt() {
         Log.i(TAG, "MQTT disconnect requested")
+        // Force UI state to reflect disconnect immediately, even if the plugin
+        // never notifies (observed when toggling MQTT via web UI)
+        _mqttConnected.value = false
+        appendServiceLog("MQTT connection status: disconnected (manual disconnect)")
         outputPlugin?.disconnect()
     }
     
