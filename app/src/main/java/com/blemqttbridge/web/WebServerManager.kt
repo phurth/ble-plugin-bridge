@@ -1999,6 +1999,25 @@ class WebServerManager(
             })
         }
         
+        // Mopeka (multi-instance support)
+        val mopekaInstances = ServiceStateManager.getInstancesOfType(context, "mopeka")
+        for (instance in mopekaInstances) {
+            val instanceStatus = statuses[instance.instanceId] ?: BaseBleService.Companion.PluginStatus(instance.instanceId)
+            val mac = instance.deviceMac
+            json.put(instance.instanceId, JSONObject().apply {
+                put("enabled", true)  // Instance exists = enabled
+                put("displayName", instance.displayName)
+                put("macAddresses", JSONArray().apply {
+                    if (mac.isNotBlank()) put(mac)
+                })
+                put("mediumType", instance.config["mediumType"] ?: "propane")
+                put("tankType", instance.config["tankType"] ?: "20lb_v")
+                put("connected", instanceStatus.connected)
+                put("authenticated", instanceStatus.authenticated)
+                put("dataHealthy", instanceStatus.dataHealthy)
+            })
+        }
+        
         // BLE Scanner
         if (statuses.containsKey("blescanner") || settings.bleScannerEnabled.first()) {
             val status = statuses["blescanner"] ?: BaseBleService.Companion.PluginStatus("blescanner")
