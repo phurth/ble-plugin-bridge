@@ -93,7 +93,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
     private var config: PluginConfig? = null
     
     // Configuration from settings
-    private var gatewayMac: String = "24:DC:C3:ED:1E:0A"
+    private var gatewayMac: String = ""
     private var gatewayPin: String = "090336"  // PIN for both BLE bonding and protocol authentication
     private var gatewayCypher: Long = 0x8100080DL
     

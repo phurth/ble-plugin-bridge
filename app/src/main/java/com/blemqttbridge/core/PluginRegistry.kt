@@ -213,7 +213,7 @@ class PluginRegistry {
                                 }
                                 if (instancePlugin.matchesDevice(device, scanRecordObj)) {
                                     Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
-                                    return pluginId
+                                    return instanceId  // Return instance ID, not plugin type
                                 }
                             } catch (e: Exception) {
                                 Log.w(TAG, "Error checking instance $instanceId: ${e.message}")
@@ -410,6 +410,9 @@ class PluginRegistry {
                 }
                 "gopower" -> {
                     configWithDevice["controller_mac"] = instance.deviceMac
+                }
+                "hughes_watchdog" -> {
+                    configWithDevice["watchdog_mac"] = instance.deviceMac
                 }
                 "mopeka" -> {
                     configWithDevice["sensor_mac"] = instance.deviceMac

@@ -734,6 +734,19 @@ class EasyTouchGattCallback(
         }, delayMs)
     }
     
+    // Android 13+ (API 33+) callback with direct value parameter
+    override fun onCharacteristicChanged(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ) {
+        if (characteristic.uuid != EasyTouchConstants.JSON_RETURN_UUID) return
+        
+        handleCharacteristicData(value)
+    }
+    
+    // Older Android versions - deprecated in API 33
+    @Deprecated("Deprecated in API 33")
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic
@@ -741,10 +754,19 @@ class EasyTouchGattCallback(
         if (characteristic.uuid != EasyTouchConstants.JSON_RETURN_UUID) return
         
         val data = characteristic.value
-        if (data == null || data.isEmpty()) return
+        if (data != null) {
+            handleCharacteristicData(data)
+        }
+    }
+    
+    /**
+     * Handle characteristic data for both API 33+ and older Android versions
+     */
+    private fun handleCharacteristicData(data: ByteArray) {
+        if (data.isEmpty()) return
         
         val hex = data.joinToString(" ") { "%02X".format(it) }
-        mqttPublisher.logBleEvent("NOTIFY ${characteristic.uuid}: $hex")
+        mqttPublisher.logBleEvent("NOTIFY ${EasyTouchConstants.JSON_RETURN_UUID}: $hex")
         val chunk = String(data, StandardCharsets.UTF_8)
         DebugLog.d(TAG, "Received chunk: $chunk")
         

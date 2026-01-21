@@ -13,6 +13,7 @@ import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
 import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
+import com.blemqttbridge.plugins.hughes.HughesWatchdogDevicePlugin
 import com.blemqttbridge.plugins.mopeka.MopekaDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.workers.ServiceWatchdogWorker
@@ -59,6 +60,11 @@ class BlePluginBridgeApplication : Application() {
         // GoPower solar charge controller plugin
         registry.registerBlePlugin("gopower") {
             GoPowerDevicePlugin()
+        }
+        
+        // Hughes Power Watchdog surge protector plugin
+        registry.registerBlePlugin("hughes_watchdog") {
+            HughesWatchdogDevicePlugin()
         }
         
         // Mopeka tank sensor plugin (passive BLE scanning)

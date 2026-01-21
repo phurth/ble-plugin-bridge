@@ -796,13 +796,26 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     
     override fun disconnect() {
         try {
-            if (mqttClient?.isConnected == true) {
+            val wasConnected = mqttClient?.isConnected == true
+            if (wasConnected) {
                 Log.i(TAG, "Disconnecting MQTT client")
+                // Publish offline before closing to clear retained LWT if we are healthy
+                try {
+                    val offlineMsg = MqttMessage("offline".toByteArray()).apply {
+                        qos = QOS
+                        isRetained = true
+                    }
+                    mqttClient?.publish("${_topicPrefix}/$AVAILABILITY_TOPIC", offlineMsg)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to publish offline before disconnect", e)
+                }
                 mqttClient?.disconnect()
             }
             mqttClient?.close()
             mqttClient = null
             commandCallbacks.clear()
+            // Ensure listeners and UI get a definitive state update
+            connectionStatusListener?.onConnectionStatusChanged(false)
         } catch (e: Exception) {
             Log.e(TAG, "Error disconnecting MQTT", e)
         }

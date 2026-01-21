@@ -656,6 +656,7 @@ class WebServerManager(
                         <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
                         <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
                         <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
+                        <option value="hughes_watchdog" data-multi="false">Hughes Power Watchdog (Surge protector)</option>
                         <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
                         <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
                     </select>
@@ -841,6 +842,7 @@ class WebServerManager(
             'onecontrol': 'OneControl',
             'easytouch': 'EasyTouch',
             'gopower': 'GoPower',
+            'hughes_watchdog': 'Hughes Watchdog',
             'mopeka': 'Mopeka',
             'blescanner': 'BLE Scanner'
         };
@@ -991,7 +993,7 @@ class WebServerManager(
                         
                         // Passive plugins (mopeka, gopower, blescanner) only need dataHealthy to be green
                         // Active plugins (onecontrol, easytouch) need full connection
-                        const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner';
+                            const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner' || pluginType === 'hughes_watchdog';
                         
                         // If service is stopped, all instances are unhealthy
                         const healthy = serviceRunning ? (isPassive ? dataHealthy : (connected && authenticated && dataHealthy)) : false;
@@ -1007,6 +1009,10 @@ class WebServerManager(
                         } else if (pluginType === 'easytouch') {
                             const hasPassword = instance.config?.password ? 'Set' : 'Not set';
                             configDetails = ${'`'}<div class="instance-detail-line">Password: ${'$'}{hasPassword}</div>${'`'};
+                        } else if (pluginType === 'hughes_watchdog') {
+                            const expectedName = instance.config?.expected_name || 'Any';
+                            const forceVersion = instance.config?.force_version || 'Auto';
+                            configDetails = ${'`'}<div class="instance-detail-line">Name: ${'$'}{expectedName} | Gen: ${'$'}{forceVersion}</div>${'`'};
                         } else if (pluginType === 'mopeka') {
                             const mediumType = instance.config?.medium_type || 'propane';
                             const tankType = instance.config?.tank_type || '20lb_v';
@@ -1204,6 +1210,11 @@ class WebServerManager(
             } else if (pluginType === 'easytouch') {
                 const password = document.getElementById('new-password')?.value.trim();
                 if (password) config.password = password;
+            } else if (pluginType === 'hughes_watchdog') {
+                const expectedName = document.getElementById('new-expected-name')?.value.trim();
+                const forceVersion = document.getElementById('new-force-version')?.value;
+                if (expectedName) config.expected_name = expectedName;
+                if (forceVersion && forceVersion !== 'auto') config.force_version = forceVersion;
             } else if (pluginType === 'mopeka') {
                 const mediumType = document.getElementById('new-medium-type')?.value || 'propane';
                 const tankType = document.getElementById('new-tank-type')?.value || '20lb_v';
@@ -1288,6 +1299,8 @@ class WebServerManager(
             const config = {};
             const pinField = document.getElementById('edit-gateway-pin');
             const passwordField = document.getElementById('edit-password');
+            const expectedNameField = document.getElementById('edit-expected-name');
+            const forceVersionField = document.getElementById('edit-force-version');
             const mediumTypeField = document.getElementById('edit-medium-type');
             const tankTypeField = document.getElementById('edit-tank-type');
             
@@ -1298,6 +1311,14 @@ class WebServerManager(
             if (passwordField) {
                 const password = passwordField.value.trim();
                 if (password) config.password = password;
+            }
+            if (expectedNameField) {
+                const expectedName = expectedNameField.value.trim();
+                if (expectedName) config.expected_name = expectedName;
+            }
+            if (forceVersionField) {
+                const forceVersion = forceVersionField.value;
+                if (forceVersion && forceVersion !== 'auto') config.force_version = forceVersion;
             }
             if (mediumTypeField) {
                 config.medium_type = mediumTypeField.value || 'propane';
@@ -1391,6 +1412,21 @@ class WebServerManager(
                         <input type="password" id="new-password" placeholder="Device password" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                     </div>
                 ${'`'};
+            } else if (pluginType === 'hughes_watchdog') {
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Expected Device Name (optional):</label>
+                        <input type="text" id="new-expected-name" placeholder="e.g., PWS123 (leave empty for any)" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Force Generation (optional):</label>
+                        <select id="new-force-version" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="auto">Auto-detect</option>
+                            <option value="gen1">Gen 1 (E2)</option>
+                            <option value="gen2">Gen 2+ (E3/E4)</option>
+                        </select>
+                    </div>
+                ${'`'};
             } else if (pluginType === 'mopeka') {
                 container.innerHTML = ${'`'}
                     <div style="margin-bottom: 15px;">
@@ -1456,6 +1492,23 @@ class WebServerManager(
                     <div style="margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
                         <input type="password" id="edit-password" value="${'$'}{password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                ${'`'};
+            } else if (pluginType === 'hughes_watchdog') {
+                const expectedName = config?.expected_name || '';
+                const forceVersion = config?.force_version || 'auto';
+                container.innerHTML = ${'`'}
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Expected Device Name (optional):</label>
+                        <input type="text" id="edit-expected-name" value="${'$'}{expectedName}" placeholder="e.g., PWS123 (leave empty for any)" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Force Generation (optional):</label>
+                        <select id="edit-force-version" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="auto" ${'$'}{forceVersion === 'auto' ? 'selected' : ''}>Auto-detect</option>
+                            <option value="gen1" ${'$'}{forceVersion === 'gen1' ? 'selected' : ''}>Gen 1 (E2)</option>
+                            <option value="gen2" ${'$'}{forceVersion === 'gen2' ? 'selected' : ''}>Gen 2+ (E3/E4)</option>
+                        </select>
                     </div>
                 ${'`'};
             } else if (pluginType === 'mopeka') {
@@ -1646,6 +1699,11 @@ class WebServerManager(
                     loadStatus();
                     loadConfig();
                 } else {
+                    // When enabling MQTT, service restarts and needs time to reconnect
+                    // Wait 2 seconds before refreshing UI to allow connection to establish
+                    if (enable) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
                     loadConfig();
                 }
             } catch (error) {
@@ -1938,6 +1996,25 @@ class WebServerManager(
                 put("connected", status.connected)
                 put("authenticated", status.authenticated)
                 put("dataHealthy", status.dataHealthy)
+            })
+        }
+        
+        // Mopeka (multi-instance support)
+        val mopekaInstances = ServiceStateManager.getInstancesOfType(context, "mopeka")
+        for (instance in mopekaInstances) {
+            val instanceStatus = statuses[instance.instanceId] ?: BaseBleService.Companion.PluginStatus(instance.instanceId)
+            val mac = instance.deviceMac
+            json.put(instance.instanceId, JSONObject().apply {
+                put("enabled", true)  // Instance exists = enabled
+                put("displayName", instance.displayName)
+                put("macAddresses", JSONArray().apply {
+                    if (mac.isNotBlank()) put(mac)
+                })
+                put("mediumType", instance.config["mediumType"] ?: "propane")
+                put("tankType", instance.config["tankType"] ?: "20lb_v")
+                put("connected", instanceStatus.connected)
+                put("authenticated", instanceStatus.authenticated)
+                put("dataHealthy", instanceStatus.dataHealthy)
             })
         }
         
@@ -2434,7 +2511,7 @@ class WebServerManager(
             }
 
             // Validate plugin type
-            val validTypes = setOf("onecontrol", "easytouch", "gopower", "mopeka", "blescanner")
+            val validTypes = setOf("onecontrol", "easytouch", "gopower", "mopeka", "hughes_watchdog", "blescanner")
             if (!validTypes.contains(pluginType)) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
@@ -2455,8 +2532,9 @@ class WebServerManager(
 
             // Save to ServiceStateManager
             ServiceStateManager.saveInstance(context, instance)
-            // Enable the instance
-            ServiceStateManager.enableBlePlugin(context, instanceId)
+            // NOTE: Do NOT call enableBlePlugin() here - instances are loaded via getAllInstances(),
+            // not the legacy enabled_ble_plugins set. Calling enableBlePlugin would add the instanceId
+            // to the legacy set, causing the service to try loading it as both an instance AND a legacy plugin.
             Log.i(TAG, "Instance added via web UI: $instanceId (${instance.pluginType})")
             
             newFixedLengthResponse(

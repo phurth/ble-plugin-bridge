@@ -635,10 +635,10 @@ class BaseBleService : Service() {
             Log.i(TAG, "Continuing without output plugin for BLE testing")
             _mqttConnected.value = false
         } else {
-            // Set up connection status listener for real-time UI updates
+            // Set up connection status listener BEFORE initialize so we catch connection state changes
             outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                 override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
                     _mqttConnected.value = connected
                 }
             })
@@ -710,10 +710,10 @@ class BaseBleService : Service() {
             _mqttConnected.value = false
         } else {
             appendServiceLog("Loaded output plugin: $outputPluginId")
-            // Set up connection status listener for real-time UI updates
+            // Set up connection status listener BEFORE initialize so we catch connection state changes
             outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                 override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "MQTT connection status changed: $connected")
+                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
                     _mqttConnected.value = connected
                 }
             })
@@ -767,8 +767,12 @@ class BaseBleService : Service() {
                     if (plugin != null) {
                         // Track instance -> plugin type mapping for connectToDevice lookup
                         instancePluginTypes[instanceId] = instance.pluginType
-                        // Update status for this instance
-                        _pluginStatuses.value = _pluginStatuses.value + (instanceId to PluginStatus(instanceId, false, false, false))
+                        // Update status for this instance (store under both instance ID and plugin type for backward compat)
+                        val initialStatus = PluginStatus(instanceId, false, false, false)
+                        val newStatuses = _pluginStatuses.value.toMutableMap()
+                        newStatuses[instanceId] = initialStatus
+                        newStatuses[instance.pluginType] = initialStatus  // Also store under plugin type
+                        _pluginStatuses.value = newStatuses
                         appendServiceLog("✓ Loaded instance: $instanceId (${instance.pluginType})")
                         loadedCount++
                         // Keep reference to last one for backward compat
@@ -795,16 +799,27 @@ class BaseBleService : Service() {
         
         memoryManager.logMemoryUsage()
         
+        // Cleanup: Remove plugin types from enabled_ble_plugins that should only be instances
+        // The enabled set should ONLY contain instanceIds, not plugin types
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext).toMutableSet()
+        val pluginTypes = setOf("onecontrol", "onecontrol_v2", "easytouch", "gopower", "mopeka", "hughes_watchdog", "blescanner")
+        val removedPluginTypes = enabledPlugins.filter { it in pluginTypes }
+        if (removedPluginTypes.isNotEmpty()) {
+            Log.i(TAG, "🔄 Cleanup: Removing legacy plugin types from enabled set: $removedPluginTypes")
+            enabledPlugins.removeAll(pluginTypes)
+            ServiceStateManager.setEnabledBlePlugins(applicationContext, enabledPlugins)
+        }
+        
         // Migration: Ensure all loaded instances are in the enabled plugins list
         // (for instances added before multi-instance support was finalized)
-        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
+        val currentEnabled = ServiceStateManager.getEnabledBlePlugins(applicationContext)
         val needsUpdate = allInstances.keys.any { instanceId ->
-            !enabledPlugins.contains(instanceId)
+            !currentEnabled.contains(instanceId)
         }
         if (needsUpdate) {
             Log.i(TAG, "🔄 Migration: Auto-enabling discovered plugin instances")
             for (instanceId in allInstances.keys) {
-                if (!enabledPlugins.contains(instanceId)) {
+                if (!currentEnabled.contains(instanceId)) {
                     ServiceStateManager.enableBlePlugin(applicationContext, instanceId)
                     Log.i(TAG, "✓ Auto-enabled instance: $instanceId")
                 }
@@ -1386,11 +1401,14 @@ class BaseBleService : Service() {
                 
                 // Load plugin and connect to device
                 serviceScope.launch {
+                    // pluginId might be an instance ID, extract the base plugin type for legacy check
+                    val basePluginType = instancePluginTypes[pluginId] ?: pluginId.substringBefore('_')
+                    
                     // Check if plugin can be loaded (either legacy BlePluginInterface or new BleDevicePlugin)
-                    val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
+                    val legacyPlugin = pluginRegistry.getBlePlugin(basePluginType, applicationContext, emptyMap())
                     
                     if (legacyPlugin != null || devicePlugin != null) {
-                        connectToDevice(device, pluginId)
+                        connectToDevice(device, instanceId)  // Use instanceId for connection
                     } else {
                         Log.e(TAG, "Failed to load plugin $pluginId for device ${device.address}")
                         appendServiceLog("ERROR: Failed to load plugin $pluginId for device ${device.address}")
@@ -2104,10 +2122,14 @@ class BaseBleService : Service() {
         // Create a copy to avoid ConcurrentModificationException
         for ((_, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
-            try {
-                gatt.disconnect()
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied for disconnect", e)
+            if (gatt != null) {
+                try {
+                    gatt.disconnect()
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Permission denied for disconnect", e)
+                }
+            } else {
+                Log.w(TAG, "disconnectAll: gatt was null, skipping disconnect")
             }
         }
         
@@ -2678,12 +2700,16 @@ class BaseBleService : Service() {
                 out.appendLine("")
                 
                 out.appendLine("Plugin Statuses:")
-                _pluginStatuses.value.forEach { (pluginId, status) ->
-                    out.appendLine("  $pluginId:")
-                    out.appendLine("    Connected: ${status.connected}")
-                    out.appendLine("    Authenticated: ${status.authenticated}")
-                    out.appendLine("    Data Healthy: ${status.dataHealthy}")
-                }
+                // Deduplicate aliases: if an instance is present, skip the legacy plugin-type alias
+                val instanceTypesWithInstances = instancePluginTypes.values.toSet()
+                _pluginStatuses.value
+                    .filterNot { (pluginId, _) -> instanceTypesWithInstances.contains(pluginId) }
+                    .forEach { (pluginId, status) ->
+                        out.appendLine("  $pluginId:")
+                        out.appendLine("    Connected: ${status.connected}")
+                        out.appendLine("    Authenticated: ${status.authenticated}")
+                        out.appendLine("    Data Healthy: ${status.dataHealthy}")
+                    }
                 out.appendLine("")
                 
                 out.appendLine("Active Plugins:")
@@ -2730,12 +2756,15 @@ class BaseBleService : Service() {
             appendLine("")
             
             appendLine("Plugin Statuses:")
-            _pluginStatuses.value.forEach { (pluginId, status) ->
-                appendLine("  $pluginId:")
-                appendLine("    Connected: ${status.connected}")
-                appendLine("    Authenticated: ${status.authenticated}")
-                appendLine("    Data Healthy: ${status.dataHealthy}")
-            }
+            val instanceTypesWithInstances = instancePluginTypes.values.toSet()
+            _pluginStatuses.value
+                .filterNot { (pluginId, _) -> instanceTypesWithInstances.contains(pluginId) }
+                .forEach { (pluginId, status) ->
+                    appendLine("  $pluginId:")
+                    appendLine("    Connected: ${status.connected}")
+                    appendLine("    Authenticated: ${status.authenticated}")
+                    appendLine("    Data Healthy: ${status.dataHealthy}")
+                }
             appendLine("")
             
             appendLine("Active Plugins:")
@@ -2782,6 +2811,10 @@ class BaseBleService : Service() {
      */
     suspend fun disconnectMqtt() {
         Log.i(TAG, "MQTT disconnect requested")
+        // Force UI state to reflect disconnect immediately, even if the plugin
+        // never notifies (observed when toggling MQTT via web UI)
+        _mqttConnected.value = false
+        appendServiceLog("MQTT connection status: disconnected (manual disconnect)")
         outputPlugin?.disconnect()
     }
     
