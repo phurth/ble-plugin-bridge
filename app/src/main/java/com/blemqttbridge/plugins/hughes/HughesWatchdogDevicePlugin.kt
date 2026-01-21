@@ -292,12 +292,36 @@ class HughesGattCallback(
         }
     }
     
+    // Android 13+ (API 33+) callback with direct value parameter
+    override fun onCharacteristicChanged(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ) {
+        if (characteristic.uuid != HughesConstants.NOTIFY_CHARACTERISTIC_UUID) {
+            return
+        }
+        
+        handleCharacteristicData(value)
+    }
+    
+    // Older Android versions - deprecated in API 33
+    @Deprecated("Deprecated in API 33")
     override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         if (characteristic.uuid != HughesConstants.NOTIFY_CHARACTERISTIC_UUID) {
             return
         }
         
         val data = characteristic.value
+        if (data != null) {
+            handleCharacteristicData(data)
+        }
+    }
+    
+    /**
+     * Handle characteristic data for both API 33+ and older Android versions
+     */
+    private fun handleCharacteristicData(data: ByteArray) {
         if (data.size != HughesConstants.CHUNK_SIZE) {
             Log.w(TAG, "Unexpected chunk size: ${data.size} (expected ${HughesConstants.CHUNK_SIZE})")
             return

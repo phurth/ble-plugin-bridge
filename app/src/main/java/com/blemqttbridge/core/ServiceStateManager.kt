@@ -297,7 +297,7 @@ object ServiceStateManager {
      * It reads the old enabled_ble_plugins string and plugin configs, converts them to PluginInstance objects,
      * and saves them in the new format.
      * 
-     * The old format is preserved for rollback purposes.
+     * CRITICAL: Also removes old plugin IDs from enabled_ble_plugins to prevent duplicate loading.
      */
     fun migrateToInstances(context: Context) {
         if (!needsMigration(context)) {
@@ -306,6 +306,7 @@ object ServiceStateManager {
         
         try {
             val enabledPlugins = getEnabledBlePlugins(context)
+            val createdInstanceIds = mutableSetOf<String>()
             
             enabledPlugins.forEach { pluginType ->
                 // Read existing config from AppConfig
@@ -325,15 +326,21 @@ object ServiceStateManager {
                         config = config
                     )
                     saveInstance(context, instance)
+                    createdInstanceIds.add(instanceId)
                 }
             }
+            
+            // CRITICAL: Replace old plugin IDs with new instance IDs in enabled_ble_plugins
+            // This prevents duplicate loading (both old "onecontrol" and new "onecontrol_15e252")
+            setEnabledBlePlugins(context, createdInstanceIds)
             
             // Mark migration complete to prevent re-running
             setMigrationComplete(context)
             
             android.util.Log.i(
                 "ServiceStateManager",
-                "Migration complete: ${enabledPlugins.size} plugins converted to instances"
+                "Migration complete: ${enabledPlugins.size} plugins converted to ${createdInstanceIds.size} instances. " +
+                "Removed old plugin IDs: $enabledPlugins"
             )
         } catch (e: Exception) {
             android.util.Log.e("ServiceStateManager", "Migration failed", e)
@@ -352,6 +359,7 @@ object ServiceStateManager {
             "onecontrol_v2" -> config["gateway_mac"]
             "gopower" -> config["controller_mac"]
             "mopeka" -> config["sensor_mac"]
+            "hughes_watchdog" -> config["watchdog_mac"]
             else -> null
         }
     }

@@ -213,7 +213,7 @@ class PluginRegistry {
                                 }
                                 if (instancePlugin.matchesDevice(device, scanRecordObj)) {
                                     Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
-                                    return pluginId
+                                    return instanceId  // Return instance ID, not plugin type
                                 }
                             } catch (e: Exception) {
                                 Log.w(TAG, "Error checking instance $instanceId: ${e.message}")

@@ -2508,8 +2508,9 @@ class WebServerManager(
 
             // Save to ServiceStateManager
             ServiceStateManager.saveInstance(context, instance)
-            // Enable the instance
-            ServiceStateManager.enableBlePlugin(context, instanceId)
+            // NOTE: Do NOT call enableBlePlugin() here - instances are loaded via getAllInstances(),
+            // not the legacy enabled_ble_plugins set. Calling enableBlePlugin would add the instanceId
+            // to the legacy set, causing the service to try loading it as both an instance AND a legacy plugin.
             Log.i(TAG, "Instance added via web UI: $instanceId (${instance.pluginType})")
             
             newFixedLengthResponse(
