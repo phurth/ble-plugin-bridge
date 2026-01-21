@@ -467,8 +467,11 @@ fun SettingsScreen(
                                 }
                                 
                                 val status = pluginStatuses[instance.instanceId]
+                                // Passive plugins (mopeka, gopower, blescanner, hughes_watchdog) only need dataHealthy
+                                // Active plugins (onecontrol, easytouch) need full connection status
+                                val isPassivePlugin = listOf("mopeka", "gopower", "blescanner", "hughes_watchdog").contains(instance.pluginType)
                                 val isHealthy = status?.let { 
-                                    it.connected && it.authenticated && it.dataHealthy 
+                                    if (isPassivePlugin) it.dataHealthy else (it.connected && it.authenticated && it.dataHealthy)
                                 } ?: false
                                 
                                 Row(
