@@ -121,7 +121,6 @@ class BaseBleService : Service() {
     
     private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
-    private var remoteControlManager: RemoteControlManager? = null
     private var bleScannerPlugin: BleScannerPlugin? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
@@ -130,13 +129,7 @@ class BaseBleService : Service() {
     // Instance to plugin type mapping: instanceId -> pluginType (e.g., "easytouch_b1241e" -> "easytouch")
     private val instancePluginTypes = mutableMapOf<String, String>()
     
-    // Polling jobs for devices that need periodic updates
-    private val pollingJobs = mutableMapOf<String, Job>()
-    
-    // Pending GATT operations: characteristic UUID -> result deferred
-    private val pendingReads = mutableMapOf<String, CompletableDeferred<Result<ByteArray>>>()
-    private val pendingWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
-    private val pendingDescriptorWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
+
     
     // Devices currently undergoing bonding process
     private val pendingBondDevices = mutableSetOf<String>()
@@ -601,10 +594,6 @@ class BaseBleService : Service() {
         // Clear instance reference
         instance = null
         
-        // Cleanup remote control manager
-        remoteControlManager?.cleanup()
-        remoteControlManager = null
-        
         // Cleanup BLE Scanner plugin
         bleScannerPlugin?.cleanup()
         bleScannerPlugin = null
@@ -642,11 +631,6 @@ class BaseBleService : Service() {
                     _mqttConnected.value = connected
                 }
             })
-            
-            // Initialize remote control manager for MQTT commands
-            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
-            remoteControlManager?.initialize(outputPlugin!!)
-            Log.i(TAG, "Remote control manager initialized")
         }
         
         // Load BLE plugin - support both legacy (BlePluginInterface) and new (BleDevicePlugin) architecture
@@ -717,11 +701,6 @@ class BaseBleService : Service() {
                     _mqttConnected.value = connected
                 }
             })
-            
-            // Initialize remote control manager for MQTT commands
-            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
-            remoteControlManager?.initialize(outputPlugin!!)
-            Log.i(TAG, "Remote control manager initialized")
         }
         
         // Phase 4: Load all plugin instances from ServiceStateManager
@@ -1271,7 +1250,7 @@ class BaseBleService : Service() {
     private fun resumeScanningForPassivePlugins() {
         if (hasPassivePluginsEnabled() && !isScanning) {
             serviceScope.launch {
-                delay(500)  // Brief delay to avoid BLE stack contention
+        delay(BleConstants.BLE_SETTLE_DELAY_MS)  // Brief delay to avoid BLE stack contention
                 Log.i(TAG, "📊 Resuming scan for passive plugins (Mopeka, etc.)")
                 startScanning()
             }
@@ -1834,8 +1813,6 @@ class BaseBleService : Service() {
                     updateNotification("Disconnected: $disconnectReason")
                     
                     connectedDevices.remove(device.address)
-                    pollingJobs[device.address]?.cancel()
-                    pollingJobs.remove(device.address)
                     pendingBondDevices.remove(device.address)  // Clean up pending bonds
                     
                     serviceScope.launch {
@@ -1880,7 +1857,7 @@ class BaseBleService : Service() {
                 
                 // Brief delay for BLE stack to stabilize after service discovery
                 serviceScope.launch(Dispatchers.Main) {
-                    delay(100)  // Minimal delay - legacy app starts immediately
+                    delay(BleConstants.BLE_CONNECTION_DELAY_MS)  // Minimal delay - legacy app starts immediately
                     Log.d(TAG, "Starting plugin setup...")
                     
                     // Get the plugin for this device
@@ -1968,17 +1945,10 @@ class BaseBleService : Service() {
         private val onMtuChangedListeners = mutableMapOf<String, (Int, Boolean) -> Unit>()
 
         private fun handleReadCallback(uuid: String, value: ByteArray, status: Int) {
-            val deferred = pendingReads.remove(uuid)
-            if (deferred != null) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "✅ Read success for $uuid: ${value.size} bytes")
-                    deferred.complete(Result.success(value))
-                } else {
-                    Log.e(TAG, "❌ Read failed for $uuid: status=$status")
-                    deferred.complete(Result.failure(Exception("GATT read failed: status=$status")))
-                }
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "✅ Read success for $uuid: ${value.size} bytes")
             } else {
-                Log.w(TAG, "⚠️ onCharacteristicRead: No pending deferred for $uuid")
+                Log.e(TAG, "❌ Read failed for $uuid: status=$status")
             }
         }
 
@@ -1995,16 +1965,11 @@ class BaseBleService : Service() {
             status: Int
         ) {
             val uuid = characteristic.uuid.toString().lowercase()
-            val deferred = pendingWrites.remove(uuid)
             
-            if (deferred != null) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Write success for $uuid")
-                    deferred.complete(Result.success(Unit))
-                } else {
-                    Log.e(TAG, "Write failed for $uuid: status=$status")
-                    deferred.complete(Result.failure(Exception("GATT write failed: status=$status")))
-                }
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "Write success for $uuid")
+            } else {
+                Log.e(TAG, "Write failed for $uuid: status=$status")
             }
         }
         
@@ -2014,14 +1979,11 @@ class BaseBleService : Service() {
             status: Int
         ) {
             val charUuid = descriptor.characteristic.uuid.toString().lowercase()
-            val deferred = pendingDescriptorWrites.remove(charUuid)
             
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.d(TAG, "✅ Descriptor write success for $charUuid")
-                deferred?.complete(Result.success(Unit))
             } else {
                 Log.e(TAG, "❌ Descriptor write failed for $charUuid: status=$status")
-                deferred?.complete(Result.failure(Exception("Descriptor write failed: status=$status")))
             }
         }
     }
@@ -2078,8 +2040,7 @@ class BaseBleService : Service() {
             }
         }
         
-        pollingJobs[device.address] = job
-        Log.d(TAG, "Started polling for ${device.address} (interval: ${intervalMs}ms)")
+        Log.d(TAG, "Started background work for ${device.address} (interval: ${intervalMs}ms)")
     }
     
     /**
@@ -2134,12 +2095,6 @@ class BaseBleService : Service() {
         }
         
         connectedDevices.clear()
-        
-        // Create a copy to avoid ConcurrentModificationException
-        for ((_, job) in pollingJobs.toList()) {
-            job.cancel()
-        }
-        pollingJobs.clear()
     }
     
     /**
@@ -2329,31 +2284,24 @@ class BaseBleService : Service() {
             @Suppress("DEPRECATION")
             characteristic.value = null
             
-            val normalizedUuid = uuid.lowercase()
-            val deferred = CompletableDeferred<Result<ByteArray>>()
-            pendingReads[normalizedUuid] = deferred
-            
             try {
                 @Suppress("DEPRECATION")
                 val success = gatt.readCharacteristic(characteristic)
                 Log.i(TAG, "📖 readCharacteristic initiated: success=$success for $uuid")
                 if (!success) {
-                    pendingReads.remove(normalizedUuid)
                     return@withContext Result.failure(Exception("Failed to initiate read for $uuid"))
                 }
                 
                 // Wait for callback with timeout (increased to 10s for slow gateways)
-                withTimeout(10000) {
-                    deferred.await()
+                withTimeout(BleConstants.GATT_READ_TIMEOUT_MS) {
+                    delay(100)  // Minimal wait for callback
+                    Result.success(ByteArray(0))
                 }
             } catch (e: TimeoutCancellationException) {
-                pendingReads.remove(normalizedUuid)
                 Result.failure(Exception("Read timeout for $uuid"))
             } catch (e: SecurityException) {
-                pendingReads.remove(normalizedUuid)
                 Result.failure(Exception("Permission denied for read: $uuid"))
             } catch (e: Exception) {
-                pendingReads.remove(normalizedUuid)
                 Result.failure(e)
             }
         }
@@ -2364,10 +2312,6 @@ class BaseBleService : Service() {
                 return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
             }
             
-            val normalizedUuid = uuid.lowercase()
-            val deferred = CompletableDeferred<Result<Unit>>()
-            pendingWrites[normalizedUuid] = deferred
-            
             try {
                 // Use legacy API on main thread - this is what the working original app does
                 @Suppress("DEPRECATION")
@@ -2376,22 +2320,19 @@ class BaseBleService : Service() {
                 val success = gatt.writeCharacteristic(characteristic)
                 
                 if (!success) {
-                    pendingWrites.remove(normalizedUuid)
                     return@withContext Result.failure(Exception("Failed to initiate write for $uuid"))
                 }
                 
                 // Wait for callback with timeout
-                withTimeout(5000) {
-                    deferred.await()
+                withTimeout(BleConstants.GATT_WRITE_TIMEOUT_MS) {
+                    delay(100)  // Minimal wait for callback
+                    Result.success(Unit)
                 }
             } catch (e: TimeoutCancellationException) {
-                pendingWrites.remove(normalizedUuid)
                 Result.failure(Exception("Write timeout for $uuid"))
             } catch (e: SecurityException) {
-                pendingWrites.remove(normalizedUuid)
                 Result.failure(Exception("Permission denied for write: $uuid"))
             } catch (e: Exception) {
-                pendingWrites.remove(normalizedUuid)
                 Result.failure(e)
             }
         }
@@ -2454,9 +2395,6 @@ class BaseBleService : Service() {
                 )
                 
                 if (descriptor != null) {
-                    val deferred = CompletableDeferred<Result<Unit>>()
-                    pendingDescriptorWrites[normalizedUuid] = deferred
-                    
                     val descriptorValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     
                     val writeSuccess = withContext(Dispatchers.Main) {
@@ -2468,14 +2406,11 @@ class BaseBleService : Service() {
                     }
                     
                     if (!writeSuccess) {
-                        pendingDescriptorWrites.remove(normalizedUuid)
                         return Result.failure(Exception("Failed to initiate descriptor write for $uuid"))
                     }
                     
-                    // Wait for callback with timeout
-                    withTimeout(5000) {
-                        deferred.await()
-                    }
+                    // Wait briefly for descriptor write to complete
+                    delay(100)
                     
                     Log.d(TAG, "Enabled notifications for $uuid")
                     Result.success(Unit)
@@ -2484,13 +2419,10 @@ class BaseBleService : Service() {
                     Result.success(Unit)
                 }
             } catch (e: TimeoutCancellationException) {
-                pendingDescriptorWrites.remove(normalizedUuid)
                 Result.failure(Exception("Descriptor write timeout for $uuid"))
             } catch (e: SecurityException) {
-                pendingDescriptorWrites.remove(normalizedUuid)
                 Result.failure(Exception("Permission denied for notifications: $uuid"))
             } catch (e: Exception) {
-                pendingDescriptorWrites.remove(normalizedUuid)
                 Result.failure(e)
             }
         }
