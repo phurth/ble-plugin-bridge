@@ -192,6 +192,7 @@ class PluginRegistry {
                                     }
                                     "onecontrol", "onecontrol_v2" -> configMap["gateway_mac"] = instance.deviceMac
                                     "gopower" -> configMap["controller_mac"] = instance.deviceMac
+                                    "hughes_watchdog" -> configMap["watchdog_mac"] = instance.deviceMac
                                     "mopeka" -> configMap["sensor_mac"] = instance.deviceMac
                                 }
                                 
