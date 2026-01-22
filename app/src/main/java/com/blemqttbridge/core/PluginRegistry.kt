@@ -220,9 +220,27 @@ class PluginRegistry {
                             }
                         }
                     } else {
-                        // Single-instance plugin: Skip legacy initialize call
-                        // These plugins should already be loaded via createPluginInstance
-                        Log.d(TAG, "Skipping legacy initialize for plugin: $pluginId (should use instances)")
+                        // Single-instance plugin: Still need to match against stored instances
+                        // These plugins should already be loaded via createPluginInstance,
+                        // but we still need to check if the device MAC matches the configured instance
+                        if (context != null) {
+                            val allInstances = ServiceStateManager.getAllInstances(context)
+                            val matchingInstances = allInstances.filter { (_, instance) -> 
+                                instance.pluginType == pluginId 
+                            }
+                            
+                            for ((instanceId, instance) in matchingInstances) {
+                                // For single-instance plugins, match by device MAC address
+                                if (device.address.equals(instance.deviceMac, ignoreCase = true)) {
+                                    Log.d(TAG, "Device ${device.address} matches single-instance plugin: $instanceId (plugin: $pluginId)")
+                                    return instanceId  // Return instance ID for single-instance plugin
+                                }
+                            }
+                            
+                            Log.d(TAG, "Skipping single-instance plugin $pluginId - no MAC match for device ${device.address}")
+                        } else {
+                            Log.d(TAG, "Skipping single-instance plugin $pluginId - no context available for instance lookup")
+                        }
                     }
                 }
                 // Check if it's a legacy BlePluginInterface
