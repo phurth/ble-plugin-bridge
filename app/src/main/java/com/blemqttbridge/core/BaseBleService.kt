@@ -30,6 +30,8 @@ import kotlinx.coroutines.flow.first
 import java.util.UUID
 import java.util.Collections
 import java.util.concurrent.ConcurrentLinkedDeque
+import com.blemqttbridge.core.BleConstants
+import com.blemqttbridge.core.DiagnosticsConstants
 
 /**
  * Base BLE service with plugin hooks.
@@ -2391,7 +2393,7 @@ class BaseBleService : Service() {
                 
                 // Write descriptor to enable notifications on remote device
                 val descriptor = characteristic.getDescriptor(
-                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb") // Client Characteristic Configuration
+                    UUID.fromString(BleConstants.CCCD_UUID) // Client Characteristic Configuration
                 )
                 
                 if (descriptor != null) {
@@ -2437,7 +2439,7 @@ class BaseBleService : Service() {
                 gatt.setCharacteristicNotification(characteristic, false)
                 
                 val descriptor = characteristic.getDescriptor(
-                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+                    UUID.fromString(BleConstants.CCCD_UUID)
                 )
                 
                 if (descriptor != null) {
