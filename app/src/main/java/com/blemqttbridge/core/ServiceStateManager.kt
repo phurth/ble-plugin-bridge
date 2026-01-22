@@ -35,8 +35,23 @@ object ServiceStateManager {
     private const val KEY_PLUGIN_INSTANCES = "plugin_instances"
     private const val KEY_MIGRATION_COMPLETE = "migration_complete_v2_6_0"
     
+    // Instance cache (v2.5.14+): Debounce repeated getAllInstances() calls
+    // The BLE scan loop can call getAllInstances() many times per second (once per scan callback).
+    // Since SharedPreferences parsing is expensive, cache the result and invalidate after 500ms.
+    // Cache is also invalidated when instances are saved/removed.
+    private data class InstancesCacheEntry(
+        val instances: Map<String, PluginInstance>,
+        val timestamp: Long
+    )
+    private var instancesCache: InstancesCacheEntry? = null
+    private const val CACHE_VALIDITY_MS = 500L  // Invalidate cache after 500ms
+    
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+    
+    private fun invalidateInstancesCache() {
+        instancesCache = null
     }
     
     // ============================================================================
@@ -175,16 +190,28 @@ object ServiceStateManager {
     /**
      * Get all plugin instances (both enabled and disabled).
      * Returns a map of instanceId -> PluginInstance
+     * 
+     * PERFORMANCE: Results are cached for 500ms to avoid expensive SharedPreferences JSON parsing
+     * on every BLE scan callback. Cache is invalidated when instances are saved/removed.
      */
     fun getAllInstances(context: Context): Map<String, PluginInstance> {
+        // Check if cache is still valid
+        val now = System.currentTimeMillis()
+        instancesCache?.let { cache ->
+            if (now - cache.timestamp < CACHE_VALIDITY_MS) {
+                return cache.instances  // Return cached result
+            }
+        }
+        
         val prefs = getPrefs(context)
         val jsonString = prefs.getString(KEY_PLUGIN_INSTANCES, "") ?: ""
         
         if (jsonString.isEmpty()) {
+            instancesCache = InstancesCacheEntry(emptyMap(), now)
             return emptyMap()
         }
         
-        return try {
+        val result = try {
             val json = org.json.JSONObject(jsonString)
             val instances = mutableMapOf<String, PluginInstance>()
             
@@ -202,6 +229,10 @@ object ServiceStateManager {
             Log.e(TAG, "Error loading instances", e)
             emptyMap()
         }
+        
+        // Cache the result
+        instancesCache = InstancesCacheEntry(result, now)
+        return result
     }
 
     /**
@@ -234,6 +265,9 @@ object ServiceStateManager {
         prefs.edit()
             .putString(KEY_PLUGIN_INSTANCES, json.toString())
             .apply()
+        
+        // Invalidate cache since instances have changed
+        invalidateInstancesCache()
     }
 
     /**
@@ -254,6 +288,9 @@ object ServiceStateManager {
             prefs.edit()
                 .putString(KEY_PLUGIN_INSTANCES, json.toString())
                 .apply()
+            
+            // Invalidate cache since instances have changed
+            invalidateInstancesCache()
         } catch (e: Exception) {
             // Invalid JSON, ignore
         }
