@@ -551,6 +551,8 @@ class OneControlGattCallback(
                         // Reset retry counter on successful connection
                         gatt133RetryCount = 0
                         mqttPublisher.updateBleStatus(connected = true, paired = false)
+                        // Publish online availability status
+                        publishAvailability(true)
                         
                         // Discover services
                         gatt.discoverServices()
@@ -2849,6 +2851,8 @@ class OneControlGattCallback(
         isConnected = false
         isAuthenticated = false
         mqttPublisher.updateBleStatus(connected = false, paired = false)
+        // Publish offline availability status when disconnected
+        publishAvailability(false)
         publishDiagnosticsState()  // Update diagnostic sensors on disconnect
         notificationsEnableStarted = false
         servicesDiscovered = false
@@ -2856,6 +2860,17 @@ class OneControlGattCallback(
         seedValue = null
         currentGatt = null
         gatewayInfoReceived = false
+    }
+    
+    /**
+     * Publish availability status for Home Assistant
+     * Called when device connects (online) or disconnects (offline)
+     */
+    private fun publishAvailability(online: Boolean) {
+        val baseTopic = "onecontrol/${device.address}"
+        val message = if (online) "online" else "offline"
+        mqttPublisher.publishState("$baseTopic/availability", message, true)
+        Log.d(TAG, "📡 Published availability: $baseTopic/availability = $message")
     }
     
     // ==================== DIAGNOSTIC SENSORS ====================
