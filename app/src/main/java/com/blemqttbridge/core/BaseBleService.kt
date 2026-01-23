@@ -60,6 +60,10 @@ class BaseBleService : Service() {
         // Keepalive interval for Doze mode prevention (30 minutes)
         private const val KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000L // 30 minutes
         
+        // BLE timing constants
+        private const val BLE_RECONNECT_DELAY_MS = 2000L
+        private const val GATT_SETTLE_DELAY_MS = 500L
+        
         const val EXTRA_PLUGIN_ID = "plugin_id"
         
         const val EXTRA_BLE_PLUGIN_ID = "ble_plugin_id"
@@ -69,6 +73,7 @@ class BaseBleService : Service() {
         
         // Debug and trace limits
         private const val MAX_DEBUG_LOG_LINES = 2000
+        private const val MAX_BLE_TRACE_LINES = 1000
         private const val TRACE_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
         private const val TRACE_MAX_DURATION_MS = 10 * 60 * 1000L  // 10 minutes
         
@@ -753,7 +758,7 @@ class BaseBleService : Service() {
         
         // Give BLE stack time to fully release any previous connections
         // Without this, writeCharacteristicNoResponse may fail with result=false
-        delay(500)
+        delay(GATT_SETTLE_DELAY_MS)
         
         val bleConfig = AppConfig.getBlePluginConfig(applicationContext, internalPluginId)
         Log.i(TAG, "Plugin config: $bleConfig")
@@ -764,7 +769,7 @@ class BaseBleService : Service() {
             devicePlugin.initialize(applicationContext, config)
             Log.i(TAG, "✓ Dynamically loaded device plugin: $internalPluginId (target MACs: ${devicePlugin.getConfiguredDevices()})")
             serviceScope.launch {
-                delay(2000)
+                delay(BLE_RECONNECT_DELAY_MS)
                 Log.i(TAG, "🔄 Attempting reconnection for newly added plugin: $internalPluginId")
                 connectToPluginDevices(internalPluginId)
             }
@@ -908,7 +913,7 @@ class BaseBleService : Service() {
             Log.i(TAG, "📊 Passive scan plugins detected - starting BLE scanning for advertisements")
             serviceScope.launch {
                 // Give active plugins time to establish GATT connections first
-                delay(2000)
+                delay(BLE_RECONNECT_DELAY_MS)
                 startScanning()
             }
         }
@@ -1093,7 +1098,7 @@ class BaseBleService : Service() {
     private fun resumeScanningForPassivePlugins() {
         if (hasPassivePluginsEnabled() && !isScanning) {
             serviceScope.launch {
-                delay(500)  // Brief delay to avoid BLE stack contention
+                delay(GATT_SETTLE_DELAY_MS)  // Brief delay to avoid BLE stack contention
                 Log.i(TAG, "📊 Resuming scan for passive plugins (Mopeka, etc.)")
                 startScanning()
             }
@@ -1135,7 +1140,7 @@ class BaseBleService : Service() {
                 
                 // Wait a bit for BT stack to stabilize, then reconnect
                 serviceScope.launch {
-                    delay(2000)
+                    delay(BLE_RECONNECT_DELAY_MS)
                     Log.i(TAG, "Attempting to reconnect devices after BT restore")
                     reconnectToBondedDevices()
                 }
@@ -1266,7 +1271,7 @@ class BaseBleService : Service() {
                 Log.e(TAG, "Error closing existing GATT", e)
             }
             connectedDevices.remove(device.address)
-            delay(500) // Brief delay after closing
+            delay(GATT_SETTLE_DELAY_MS) // Brief delay after closing
         }
         
         updateNotification("Connecting to ${device.address}...")
@@ -1423,7 +1428,7 @@ class BaseBleService : Service() {
         // Always resume scanning to reconnect any missing configured devices
         // This ensures devices like EasyTouch (not bonded) can reconnect automatically
         serviceScope.launch {
-            delay(2000)  // Brief delay to avoid immediate churn
+            delay(BLE_RECONNECT_DELAY_MS)  // Brief delay to avoid immediate churn
             Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
             startScanning()
         }
@@ -1496,7 +1501,7 @@ class BaseBleService : Service() {
                                 val gatt = connectedDevices[it.address]?.first
                                 if (gatt != null) {
                                     serviceScope.launch {
-                                        delay(500) // Brief settle delay (matches working app)
+                                        delay(GATT_SETTLE_DELAY_MS) // Brief settle delay (matches working app)
                                         try {
                                             Log.i(TAG, "Starting service discovery after bonding")
                                             gatt.discoverServices()
@@ -1990,7 +1995,7 @@ class BaseBleService : Service() {
             // Disconnect first
             currentPlugin.disconnect()
             // Small delay
-            kotlinx.coroutines.delay(500)
+            kotlinx.coroutines.delay(GATT_SETTLE_DELAY_MS)
             // Re-initialize with same config
             val settings = AppSettings(applicationContext)
             val config = mapOf(

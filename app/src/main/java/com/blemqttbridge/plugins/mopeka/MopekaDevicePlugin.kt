@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.le.ScanRecord
 import android.content.Context
+import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
@@ -12,7 +13,6 @@ import com.blemqttbridge.core.discovery.HomeAssistantDiscoveryBuilder
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaConstants
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaAdvertisementParser
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaSensorData
-import com.blemqttbridge.util.DebugLog
 
 /**
  * Mopeka Tank Sensor Plugin
@@ -28,6 +28,7 @@ import com.blemqttbridge.util.DebugLog
 class MopekaDevicePlugin : BleDevicePlugin {
     
     companion object {
+        private const val TAG = "Mopeka"
         const val PLUGIN_ID = "mopeka"
         const val PLUGIN_VERSION = "1.0.0"
         const val PLUGIN_DISPLAY_NAME = "Mopeka Tank Sensor"
@@ -67,13 +68,13 @@ class MopekaDevicePlugin : BleDevicePlugin {
         tankType = MopekaConstants.TankType.fromId(tankTypeId)
         minimumQuality = config["minimum_quality"]?.toIntOrNull() ?: MopekaConstants.QualityThresholds.ZERO
         
-        DebugLog.i("Mopeka", "Initializing instance: $instanceId (MAC: $configuredMacAddress, medium: $mediumType, tank: $tankType, minQuality: $minimumQuality)")
+        Log.i(TAG, "Initializing instance: $instanceId (MAC: $configuredMacAddress, medium: $mediumType, tank: $tankType, minQuality: $minimumQuality)")
     }
     
     override fun initialize(context: Context?, config: PluginConfig) {
         this.context = context
         
-        DebugLog.d("Mopeka", "initialize() called with config parameters: ${config.parameters}")
+        Log.d(TAG, "initialize() called with config parameters: ${config.parameters}")
         
         // Parse configuration (legacy path)
         configuredMacAddress = config.getString("sensor_mac", "").ifEmpty { null }
@@ -83,7 +84,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
         tankType = MopekaConstants.TankType.fromId(tankTypeId)
         minimumQuality = config.getInt("minimum_quality", MopekaConstants.QualityThresholds.ZERO)
         
-        DebugLog.i("Mopeka", "Initialized: MAC=$configuredMacAddress, medium=$mediumType, tank=$tankType, minQuality=$minimumQuality")
+        Log.i(TAG, "Initialized: MAC=$configuredMacAddress, medium=$mediumType, tank=$tankType, minQuality=$minimumQuality")
     }
     
     /**
@@ -92,9 +93,9 @@ class MopekaDevicePlugin : BleDevicePlugin {
      */
     fun setMqttPublisher(publisher: MqttPublisher) {
         this.mqttPublisher = publisher
-        DebugLog.d("Mopeka", "MQTT publisher set for instance $instanceId")
+        Log.d(TAG, "MQTT publisher set for instance $instanceId")
     }    override fun destroy() {
-        DebugLog.i("Mopeka", "Destroyed")
+        Log.i(TAG, "Destroyed")
     }
     
     /**
@@ -108,13 +109,13 @@ class MopekaDevicePlugin : BleDevicePlugin {
         // If MAC is configured, match only that specific sensor
         if (!configuredMacAddress.isNullOrBlank()) {
             val matches = device.address.equals(configuredMacAddress, ignoreCase = true)
-            DebugLog.d("Mopeka", "matchesDevice: Configured MAC=$configuredMacAddress, device=${device.address}, match=$matches")
+            Log.d(TAG, "matchesDevice: Configured MAC=$configuredMacAddress, device=${device.address}, match=$matches")
             return matches
         }
         
         // No MAC configured - detect any Mopeka sensor by manufacturer ID
         if (scanRecord == null) {
-            DebugLog.d("Mopeka", "matchesDevice: No scan record for ${device.address}")
+            Log.d(TAG, "matchesDevice: No scan record for ${device.address}")
             return false
         }
         
@@ -123,9 +124,9 @@ class MopekaDevicePlugin : BleDevicePlugin {
         val isMopeka = manufacturerData != null
         
         if (isMopeka) {
-            DebugLog.i("Mopeka", "✅ Detected Mopeka sensor: ${device.address} (mfgId=0x${MopekaConstants.MANUFACTURER_ID.toString(16)})")
+            Log.i(TAG, "✅ Detected Mopeka sensor: ${device.address} (mfgId=0x${MopekaConstants.MANUFACTURER_ID.toString(16)})")
         } else {
-            DebugLog.d("Mopeka", "matchesDevice: ${device.address} is not a Mopeka sensor")
+            Log.d(TAG, "matchesDevice: ${device.address} is not a Mopeka sensor")
         }
         
         return isMopeka
@@ -208,7 +209,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_battery",
                 displayName = "Battery",
-                stateTopic = "homeassistant/$baseTopic/battery",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/battery",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "%",
@@ -226,7 +227,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_temperature",
                 displayName = "Temperature",
-                stateTopic = "homeassistant/$baseTopic/temperature",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/temperature",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "°C",
@@ -244,7 +245,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_tank_level",
                 displayName = "Tank Level",
-                stateTopic = "homeassistant/$baseTopic/tank_level",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/tank_level",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "%",
@@ -262,7 +263,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_quality",
                 displayName = "Read Quality",
-                stateTopic = "homeassistant/$baseTopic/quality",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/quality",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = null,
@@ -279,7 +280,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
     
     override fun onDeviceDisconnected(device: BluetoothDevice) {
         // Clean up device-specific state if needed
-        DebugLog.d("Mopeka", "Device disconnected: ${device.address}")
+        Log.d(TAG, "Device disconnected: ${device.address}")
     }
     
     /**
@@ -287,7 +288,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
      * This would be called from the BLE scan handler when a Mopeka device is detected
      */
     fun handleScanResult(device: BluetoothDevice, scanRecord: ScanRecord?) {
-        DebugLog.d("Mopeka", "📥 handleScanResult called for ${device.address}, scanRecord=${scanRecord != null}")
+        Log.d(TAG, "📥 handleScanResult called for ${device.address}, scanRecord=${scanRecord != null}")
         
         // Update last-seen timestamp for this device
         val currentTime = System.currentTimeMillis()
@@ -296,36 +297,36 @@ class MopekaDevicePlugin : BleDevicePlugin {
         // If device was previously offline, mark it as back online
         if (offlineDevices.contains(device.address)) {
             offlineDevices.remove(device.address)
-            DebugLog.i("Mopeka", "✅ Device ${device.address} back online after timeout")
+            Log.i(TAG, "✅ Device ${device.address} back online after timeout")
         }
         
         // Check for devices that have timed out (no advertisements in 30 minutes)
         checkForOfflineDevices(currentTime)
         
         val data = scanRecord?.bytes ?: run {
-            DebugLog.d("Mopeka", "⚠️ No scan record data")
+            Log.d(TAG, "⚠️ No scan record data")
             return
         }
-        DebugLog.d("Mopeka", "📄 Scan record data length: ${data.size} bytes")
+        Log.d(TAG, "📄 Scan record data length: ${data.size} bytes")
         val manufacturerData = parseManufacturerData(data, MopekaConstants.MANUFACTURER_ID)
             ?: run {
-                DebugLog.d("Mopeka", "⚠️ No manufacturer data for ID ${MopekaConstants.MANUFACTURER_ID}")
+                Log.d(TAG, "⚠️ No manufacturer data for ID ${MopekaConstants.MANUFACTURER_ID}")
                 return
             }
-        DebugLog.d("Mopeka", "✅ Found manufacturer data: ${manufacturerData.size} bytes")
+        Log.d(TAG, "✅ Found manufacturer data: ${manufacturerData.size} bytes")
         
         var sensorData = MopekaAdvertisementParser.parse(device.address, manufacturerData) ?: run {
-            DebugLog.d("Mopeka", "⚠️ Failed to parse sensor data")
+            Log.d(TAG, "⚠️ Failed to parse sensor data")
             return
         }
-        DebugLog.d("Mopeka", "✅ Parsed sensor data: temp=${sensorData.temperature}°C, quality=${sensorData.quality}")
+        Log.d(TAG, "✅ Parsed sensor data: temp=${sensorData.temperature}°C, quality=${sensorData.quality}")
         
         // Quality check
         if (sensorData.quality < minimumQuality) {
-            DebugLog.d("Mopeka", "Skipping ${device.address}: quality ${sensorData.quality} < $minimumQuality")
+            Log.d(TAG, "Skipping ${device.address}: quality ${sensorData.quality} < $minimumQuality")
             return
         }
-        DebugLog.d("Mopeka", "✅ Quality check passed (${sensorData.quality} >= $minimumQuality)")
+        Log.d(TAG, "✅ Quality check passed (${sensorData.quality} >= $minimumQuality)")
         
         // Extract raw temperature for temperature compensation (before -40 conversion)
         val rawTemp = (manufacturerData[MopekaConstants.AdvertisementLayout.TEMPERATURE_AND_BUTTON_INDEX].toInt() and 0x7F)
@@ -336,16 +337,16 @@ class MopekaDevicePlugin : BleDevicePlugin {
             rawTemp,
             mediumType
         )
-        DebugLog.d("Mopeka", "🌡️ Temperature compensation: raw=${sensorData.distanceRaw}mm, compensated=${compensatedDistance}mm (temp_raw=$rawTemp)")
+        Log.d(TAG, "🌡️ Temperature compensation: raw=${sensorData.distanceRaw}mm, compensated=${compensatedDistance}mm (temp_raw=$rawTemp)")
         
         // Calculate tank level percentage using geometric formulas (from HA community)
         // Uses precise volume calculations for vertical/horizontal tank shapes
         val tankPercentage = MopekaConstants.calculateTankPercentage(tankType, compensatedDistance.toDouble())
-        DebugLog.d("Mopeka", "📊 Tank percentage: ${String.format("%.1f", tankPercentage)}% (${compensatedDistance}mm, tank=${tankType.displayName})")
+        Log.d(TAG, "📊 Tank percentage: ${String.format("%.1f", tankPercentage)}% (${compensatedDistance}mm, tank=${tankType.displayName})")
         
         // Store percentage as tank level (not mm anymore)
         val tankLevel = tankPercentage.toFloat()
-        DebugLog.d("Mopeka", "✅ Tank level (percentage): ${String.format("%.1f", tankLevel)}% (medium=$mediumType)")
+        Log.d(TAG, "✅ Tank level (percentage): ${String.format("%.1f", tankLevel)}% (medium=$mediumType)")
         
         // Update with calculated tank level and compensated distance
         sensorData = sensorData.copy(
@@ -357,13 +358,13 @@ class MopekaDevicePlugin : BleDevicePlugin {
         // Publish Home Assistant discovery on first detection
         if (!discoveredDevices.contains(device.address)) {
             mqttPublisher?.let { publisher ->
-                DebugLog.i("Mopeka", "📢 Publishing Home Assistant discovery for ${device.address}")
+                Log.i(TAG, "📢 Publishing Home Assistant discovery for ${device.address}")
                 publishDiscovery(device.address, publisher)
                 discoveredDevices.add(device.address)
             }
         }
         
-        DebugLog.d("Mopeka", "📡 Publishing to MQTT...")
+        Log.d(TAG, "📡 Publishing to MQTT...")
         publishToMqtt(sensorData)
         
         // Update plugin status to show green health indicator
@@ -393,14 +394,14 @@ class MopekaDevicePlugin : BleDevicePlugin {
      * Additional data (quality, model, distance, etc.) available in the combined state JSON.
      */
     private fun publishToMqtt(sensorData: MopekaSensorData) {
-        DebugLog.d("Mopeka", "publishToMqtt called, mqttPublisher=$mqttPublisher")
+        Log.d(TAG, "publishToMqtt called, mqttPublisher=$mqttPublisher")
         val publisher = mqttPublisher ?: run {
-            DebugLog.w("Mopeka", "⚠️ mqttPublisher is null! Cannot publish to MQTT")
+            Log.w(TAG, "⚠️ mqttPublisher is null! Cannot publish to MQTT")
             return
         }
         
         val actualBaseTopic = "mopeka/${sensorData.macAddress}"
-        DebugLog.d("Mopeka", "Publishing to topic: $actualBaseTopic")
+        Log.d(TAG, "Publishing to topic: $actualBaseTopic")
         
         // Publish the primary sensor values
         // Battery percentage
@@ -433,7 +434,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
         // Publish availability (always online while we're receiving advertisements)
         publisher.publishAvailability("$actualBaseTopic/availability", true)
         
-        DebugLog.d("Mopeka", "Published: $actualBaseTopic - Tank: ${String.format("%.1f", sensorData.tankLevel)}%, Temp: ${sensorData.temperature}°C, Battery: ${sensorData.batteryLevel}%")
+        Log.d(TAG, "Published: $actualBaseTopic - Tank: ${String.format("%.1f", sensorData.tankLevel)}%, Temp: ${sensorData.temperature}°C, Battery: ${sensorData.batteryLevel}%")
     }
     
     /**
@@ -463,7 +464,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_battery",
                 displayName = "Battery",
-                stateTopic = "homeassistant/$baseTopic/battery",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/battery",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "%",
@@ -481,7 +482,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_temperature",
                 displayName = "Temperature",
-                stateTopic = "homeassistant/$baseTopic/temperature",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/temperature",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "°C",
@@ -499,7 +500,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_tank_level",
                 displayName = "Tank Level",
-                stateTopic = "homeassistant/$baseTopic/tank_level",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/tank_level",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = "%",
@@ -508,7 +509,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
                 deviceClass = null,
                 valueTemplate = "{{ value_json.value }}",
                 jsonAttributes = true
-            ).also { DebugLog.d("Mopeka", "Tank Level discovery JSON: $it") }.toString()
+            ).also { Log.d(TAG, "Tank Level discovery JSON: $it") }.toString()
         )
         
         // Quality
@@ -517,7 +518,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             builder.buildSensor(
                 uniqueId = "mopeka_${cleanMac}_quality",
                 displayName = "Read Quality",
-                stateTopic = "homeassistant/$baseTopic/quality",
+                stateTopic = "${mqttPublisher?.topicPrefix}/$baseTopic/quality",
                 baseTopic = baseTopic,
                 deviceIdentifier = deviceId,
                 unitOfMeasurement = null,
@@ -529,7 +530,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
             ).toString()
         )
         
-        DebugLog.i("Mopeka", "Discovery published for $macAddress (medium: ${mediumType.displayName})")
+        Log.i(TAG, "Discovery published for $macAddress (medium: ${mediumType.displayName})")
     }
     
     /**
@@ -588,7 +589,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
         for (deviceMac in devicesToMarkOffline) {
             offlineDevices.add(deviceMac)
             val topic = "mopeka/$deviceMac/availability"
-            DebugLog.w("Mopeka", "📡 Device $deviceMac timed out - publishing offline")
+            Log.w(TAG, "📡 Device $deviceMac timed out - publishing offline")
             mqttPublisher?.publishAvailability(topic, false)
         }
     }}

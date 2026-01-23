@@ -1,6 +1,6 @@
 package com.blemqttbridge.core.discovery
 
-import com.blemqttbridge.util.DebugLog
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -22,6 +22,31 @@ class HomeAssistantDiscoveryBuilder(
     private val deviceManufacturer: String,
     private val appVersion: String? = null
 ) : DiscoveryBuilder {
+    companion object {
+        private const val TAG = "HA Discovery"
+        
+        /**
+         * Build a discovery topic for an entity
+         */
+        fun buildDiscoveryTopic(
+            component: String,
+            nodeId: String,
+            entityId: String
+        ): String {
+            return "homeassistant/$component/$nodeId/$entityId/config"
+        }
+        
+        /**
+         * Sanitize a name for use as part of a topic/ID
+         */
+        fun sanitizeName(name: String): String {
+            return name.lowercase()
+                .replace(Regex("[^a-z0-9_]"), "_")
+                .replace(Regex("_+"), "_")
+                .trim('_')
+        }
+    }
+    
     private val macNormalized = deviceMac.replace(":", "").lowercase()
     private val macClean = deviceMac.replace(":", "").uppercase()
     
@@ -85,7 +110,7 @@ class HomeAssistantDiscoveryBuilder(
                 put("state_class", stateClass)
             }
             if (valueTemplate != null) {
-                DebugLog.d("HA Discovery", "Adding value_template: $valueTemplate")
+                Log.d(TAG, "Adding value_template: $valueTemplate")
                 put("value_template", valueTemplate)
             }
             if (jsonAttributes) {
@@ -228,29 +253,6 @@ class HomeAssistantDiscoveryBuilder(
             }
             
             put("availability", buildAvailability(baseTopic))
-        }
-    }
-    
-    companion object {
-        /**
-         * Build a discovery topic for an entity
-         */
-        fun buildDiscoveryTopic(
-            component: String,
-            nodeId: String,
-            entityId: String
-        ): String {
-            return "homeassistant/$component/$nodeId/$entityId/config"
-        }
-        
-        /**
-         * Sanitize a name for use as part of a topic/ID
-         */
-        fun sanitizeName(name: String): String {
-            return name.lowercase()
-                .replace(Regex("[^a-z0-9_]"), "_")
-                .replace(Regex("_+"), "_")
-                .trim('_')
         }
     }
 

@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
-import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.easytouch.protocol.EasyTouchConstants
@@ -88,7 +87,7 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
         
         val deviceAddress = device.address
         if (deviceAddress.equals(thermostatMac, ignoreCase = true)) {
-            DebugLog.d(TAG, "Device matched by configured MAC: $deviceAddress")
+            Log.d(TAG, "Device matched by configured MAC: $deviceAddress")
             return true
         }
         
@@ -237,11 +236,11 @@ class EasyTouchGattCallback(
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isAuthenticated) {
-                DebugLog.d(TAG, "Polling stopped: active=$isPollingActive, auth=$isAuthenticated")
+                Log.d(TAG, "Polling stopped: active=$isPollingActive, auth=$isAuthenticated")
                 return
             }
             
-            DebugLog.d(TAG, "Polling status...")
+            Log.d(TAG, "Polling status...")
             requestStatus(zone = 0)
             
             // Schedule next poll in 4 seconds (same as official app)
@@ -458,7 +457,7 @@ class EasyTouchGattCallback(
      */
     private fun startStatusPolling() {
         if (isPollingActive) {
-            DebugLog.d(TAG, "Polling already active")
+            Log.d(TAG, "Polling already active")
             return
         }
         
@@ -497,11 +496,11 @@ class EasyTouchGattCallback(
      * Matches official app's "StartIgnoreStatus" behavior.
      */
     private fun suppressStatusUpdates(durationMs: Long) {
-        DebugLog.d(TAG, "Suppressing status updates for ${durationMs}ms")
+        Log.d(TAG, "Suppressing status updates for ${durationMs}ms")
         isStatusSuppressed = true
         mainHandler.postDelayed({
             isStatusSuppressed = false
-            DebugLog.d(TAG, "Status updates resumed")
+            Log.d(TAG, "Status updates resumed")
         }, durationMs)
     }
     
@@ -532,7 +531,7 @@ class EasyTouchGattCallback(
         val uuid = characteristic.uuid
         val hex = characteristic.value?.joinToString(" ") { "%02X".format(it) } ?: "(null)"
         mqttPublisher.logBleEvent("WRITE $uuid: $hex (status=$status)")
-        DebugLog.d(TAG, "Characteristic write complete: $uuid, status=$status")
+        Log.d(TAG, "Characteristic write complete: $uuid, status=$status")
         
         when (uuid) {
             EasyTouchConstants.PASSWORD_CMD_UUID -> {
@@ -550,7 +549,7 @@ class EasyTouchGattCallback(
             }
             EasyTouchConstants.JSON_CMD_UUID -> {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    DebugLog.d(TAG, "JSON command written successfully")
+                    Log.d(TAG, "JSON command written successfully")
                     // Read response after a short delay (no notifications available)
                     mainHandler.postDelayed({
                         readJsonResponse()
@@ -570,7 +569,7 @@ class EasyTouchGattCallback(
         val char = jsonReturnChar ?: return
         val g = gatt ?: return
         
-        DebugLog.d(TAG, "Reading jsonReturn characteristic...")
+        Log.d(TAG, "Reading jsonReturn characteristic...")
         if (!g.readCharacteristic(char)) {
             Log.e(TAG, "Failed to initiate read on jsonReturn")
         }
@@ -648,12 +647,12 @@ class EasyTouchGattCallback(
      */
     private fun processReceivedData(data: ByteArray?) {
         if (data == null || data.isEmpty()) {
-            DebugLog.d(TAG, "Empty response from jsonReturn")
+            Log.d(TAG, "Empty response from jsonReturn")
             return
         }
         
         val chunk = String(data, StandardCharsets.UTF_8)
-        DebugLog.d(TAG, "Received data: $chunk")
+        Log.d(TAG, "Received data: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -666,7 +665,7 @@ class EasyTouchGattCallback(
             handleJsonResponse(json)
         } catch (e: Exception) {
             // Incomplete JSON - might need another read
-            DebugLog.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
+            Log.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
             // Schedule another read to get more data
             mainHandler.postDelayed({
                 readJsonResponse()
@@ -720,7 +719,7 @@ class EasyTouchGattCallback(
             val success = g.writeCharacteristic(char)
             
             if (success) {
-                DebugLog.d(TAG, "Writing JSON command (attempt ${retryCount + 1}): $jsonString")
+                Log.d(TAG, "Writing JSON command (attempt ${retryCount + 1}): $jsonString")
             } else {
                 Log.e(TAG, "Failed to write JSON command (attempt ${retryCount + 1})")
                 // Retry up to 2 more times with increasing delays
@@ -768,7 +767,7 @@ class EasyTouchGattCallback(
         val hex = data.joinToString(" ") { "%02X".format(it) }
         mqttPublisher.logBleEvent("NOTIFY ${EasyTouchConstants.JSON_RETURN_UUID}: $hex")
         val chunk = String(data, StandardCharsets.UTF_8)
-        DebugLog.d(TAG, "Received chunk: $chunk")
+        Log.d(TAG, "Received chunk: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -781,12 +780,12 @@ class EasyTouchGattCallback(
             handleJsonResponse(json)
         } catch (e: Exception) {
             // Incomplete JSON, wait for more data
-            DebugLog.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
+            Log.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
         }
     }
     
     private fun handleJsonResponse(json: JSONObject) {
-        DebugLog.d(TAG, "Received JSON: ${json.toString().take(200)}...")
+        Log.d(TAG, "Received JSON: ${json.toString().take(200)}...")
         
         val type = json.optString("Type", "")
         val responseType = json.optString("RT", "")  // Response type field
@@ -806,7 +805,7 @@ class EasyTouchGattCallback(
                 
                 // Skip publishing if status updates are suppressed (command in progress)
                 if (isStatusSuppressed) {
-                    DebugLog.d(TAG, "Status update suppressed (command in progress)")
+                    Log.d(TAG, "Status update suppressed (command in progress)")
                 } else {
                     publishState(state)
                     Log.i(TAG, "Status update received and published")
@@ -990,7 +989,7 @@ class EasyTouchGattCallback(
         } else {
             true  // Default to on if PRM not present
         }
-        DebugLog.d(TAG, "System power: $systemPower (PRM[1]=${prmArray?.optInt(1, 0) ?: "N/A"})")
+        Log.d(TAG, "System power: $systemPower (PRM[1]=${prmArray?.optInt(1, 0) ?: "N/A"})")
         
         val availableZones = mutableListOf<Int>()
         val zones = mutableMapOf<Int, ZoneState>()
@@ -1127,7 +1126,7 @@ class EasyTouchGattCallback(
         val action = getAction(state)
         mqttPublisher.publishState("$zoneTopic/state/action", action, true)
         
-        DebugLog.d(TAG, "Published zone $zoneNum: temp=${state.ambientTemperature}°F, mode=$mode, fan=$fanMode, action=$action")
+        Log.d(TAG, "Published zone $zoneNum: temp=${state.ambientTemperature}°F, mode=$mode, fan=$fanMode, action=$action")
     }
     
     private fun fanValueToString(value: Int, isFanOnly: Boolean): String {
@@ -1164,7 +1163,7 @@ class EasyTouchGattCallback(
         // Use publishState for per-device availability (publishAvailability is for global status)
         val payload = if (online) "online" else "offline"
         mqttPublisher.publishState("$baseTopic/availability", payload, true)
-        DebugLog.d(TAG, "Published availability: $payload to $baseTopic/availability")
+        Log.d(TAG, "Published availability: $payload to $baseTopic/availability")
     }
     
     // ===== DISCOVERY PUBLISHING =====
@@ -1253,7 +1252,7 @@ class EasyTouchGattCallback(
                 put("availability_topic", "$fullBaseTopic/availability")
             }
             
-            val discoveryTopic = "homeassistant/climate/$uniqueId/config"
+            val discoveryTopic = "${mqttPublisher.topicPrefix}/climate/$uniqueId/config"
             mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
             Log.i(TAG, "Published discovery for zone $zone: $discoveryTopic")
         }
@@ -1279,7 +1278,7 @@ class EasyTouchGattCallback(
         
         // Extract zone from topic
         val zone = extractZoneFromTopic(commandTopic)
-        DebugLog.d(TAG, "Command for zone $zone: $commandTopic = $payload")
+        Log.d(TAG, "Command for zone $zone: $commandTopic = $payload")
         
         return try {
             when {
@@ -1627,7 +1626,7 @@ class EasyTouchGattCallback(
             dataHealthy = dataHealthy
         )
         
-        DebugLog.d(TAG, "Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
+        Log.d(TAG, "Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
     }
     
     /**

@@ -31,6 +31,7 @@ class WebServerManager(
 
     companion object {
         private const val TAG = "WebServerManager"
+        private const val SERVICE_RESTART_DELAY_MS = 500L  // Delay for service restart
     }
     
     private val appSettings = AppSettings(context)
@@ -536,7 +537,7 @@ class WebServerManager(
                     context.startService(stopIntent)
                     
                     // Wait for service to stop
-                    Thread.sleep(500)
+                    Thread.sleep(SERVICE_RESTART_DELAY_MS)
                     
                     // Start service with MQTT enabled
                     val startIntent = android.content.Intent(context, BaseBleService::class.java).apply {
