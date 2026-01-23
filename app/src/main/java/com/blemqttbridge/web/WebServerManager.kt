@@ -182,9 +182,15 @@ class WebServerManager(
             
             var html = loadRawResource(resourceId)
             
-            // Inject version information
-            html = html.replace("id=\"app-version\"", "id=\"app-version\">v${BuildConfig.VERSION_NAME}<")
-            html = html.replace("id=\"app-code\"", "id=\"app-code\">${BuildConfig.VERSION_CODE}<")
+            // Inject version information into the span contents
+            html = html.replace(
+                "<span id=\"app-version\">Loading...</span>",
+                "<span id=\"app-version\">v${BuildConfig.VERSION_NAME}</span>"
+            )
+            html = html.replace(
+                "<span id=\"app-code\">Loading...</span>",
+                "<span id=\"app-code\">${BuildConfig.VERSION_CODE}</span>"
+            )
             
             return newFixedLengthResponse(Response.Status.OK, "text/html", html)
         } catch (e: Exception) {
