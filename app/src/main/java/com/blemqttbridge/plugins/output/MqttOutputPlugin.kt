@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
+import com.blemqttbridge.core.MemoryManager
 import com.blemqttbridge.core.discovery.DiscoveryBuilder
 import com.blemqttbridge.core.discovery.DiscoveryBuilderFactory
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
@@ -30,7 +31,10 @@ import kotlin.coroutines.resumeWithException
  * MQTT output plugin using Eclipse Paho client.
  * Implements OutputPluginInterface for MQTT broker connectivity.
  */
-class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
+class MqttOutputPlugin(
+    private val context: Context,
+    private val memoryManager: MemoryManager? = null
+) : OutputPluginInterface {
 
     companion object {
         private const val TAG = "MqttOutputPlugin"
@@ -681,27 +685,39 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
 
     private fun getMemoryUsedPercent(): Int {
-        return try {
-            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val memInfo = ActivityManager.MemoryInfo()
-            activityManager.getMemoryInfo(memInfo)
-            val used = memInfo.totalMem - memInfo.availMem
-            ((used.toDouble() / memInfo.totalMem) * 100).toInt()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error getting memory usage", e)
-            -1
+        // Use MemoryManager if available (single source of truth)
+        return memoryManager?.let {
+            it.memoryInfo.value.usagePercentage
+        } ?: run {
+            // Fallback to local calculation if MemoryManager not provided
+            try {
+                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val memInfo = ActivityManager.MemoryInfo()
+                activityManager.getMemoryInfo(memInfo)
+                val used = memInfo.totalMem - memInfo.availMem
+                ((used.toDouble() / memInfo.totalMem) * 100).toInt()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error getting memory usage", e)
+                -1
+            }
         }
     }
 
     private fun getMemoryAvailableMB(): Long {
-        return try {
-            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val memInfo = ActivityManager.MemoryInfo()
-            activityManager.getMemoryInfo(memInfo)
-            memInfo.availMem / (1024 * 1024)
-        } catch (e: Exception) {
-            Log.w(TAG, "Error getting available memory", e)
-            -1
+        // Use MemoryManager if available (single source of truth)
+        return memoryManager?.let {
+            it.memoryInfo.value.freeMemoryMb
+        } ?: run {
+            // Fallback to local calculation if MemoryManager not provided
+            try {
+                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val memInfo = ActivityManager.MemoryInfo()
+                activityManager.getMemoryInfo(memInfo)
+                memInfo.availMem / (1024 * 1024)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error getting available memory", e)
+                -1
+            }
         }
     }
 
