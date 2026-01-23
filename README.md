@@ -5,6 +5,7 @@ Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQ
 - Micro-Air EasyTouch RV Thermostat
 - GoPower Solar Controller
 - Mopeka Pro Check Fluid Sensors
+- Hughes Power Watchdog EPO
 - Basic BLE scanner plugin
 
 Note: I'm able to build and test these plugins since they are components I have in my RV. There's a good chance your RV is different and adjustments will need to be made. Pleaase help other users by submitting an issue or feature request if you encounter problems.
@@ -216,6 +217,35 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 - **No data received:** Ensure controller is in BLE range (within ~30 feet)
 - **Connection drops:** Verify no other device is connected to the controller
+
+---
+
+### 🔌 Hughes Power Watchdog EPO
+
+The Hugjes plugin connects to Hughes Power Watchdog EPO surge protectors (e.g., WD30EPO, PWD50EPO) commonly found in RVs. This is an unofficial, community-developed integration not affiliated with or supported by Hughes, and is provided "as-is" without warranty—use at your own risk.
+
+#### Configuration
+
+- Make sure the main service toggle is off (you won't be able to make changes while it's running)
+- Add the plugin
+- Enter the **Device MAC Address** (you can get this from the Advertisement Monitor in Home Aassistant) 
+- Toggle the service on
+- Plugin status indicators should turn green: Connection → Data
+
+**Note:** PWD devices do not require pairing or authentication.
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **No Authentication** | Connects without pairing or password |
+| **Real-Time Data** | ~1 second update rate |
+
+
+#### Troubleshooting
+
+- **No data received:** Ensure device is in BLE range (within ~30 feet)
+- **Connection drops:** Verify no other device is connected to the controller and that the device is in range
 
 ---
 
