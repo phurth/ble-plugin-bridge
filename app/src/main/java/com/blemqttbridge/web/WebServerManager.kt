@@ -9,6 +9,7 @@ import com.blemqttbridge.core.ConfigBackupManager
 import com.blemqttbridge.core.PluginInstance
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
+import com.blemqttbridge.util.ConfigValidator
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -593,6 +594,25 @@ class WebServerManager(
                 )
             }
 
+            // Validate input based on field type
+            val (isValid, errorMessage) = when (field) {
+                "broker" -> ConfigValidator.validateBrokerHost(value)
+                "port" -> ConfigValidator.validatePort(value)
+                "topicPrefix" -> ConfigValidator.validateTopicPrefix(value)
+                "username" -> ConfigValidator.validateUsername(value)
+                "password" -> ConfigValidator.validatePassword(value)
+                else -> Pair(false, "Unknown field: $field")
+            }
+            
+            if (!isValid) {
+                Log.w(TAG, "MQTT config validation failed for $field: $errorMessage")
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"$errorMessage"}"""
+                )
+            }
+
             // Update the appropriate MQTT setting
             runBlocking {
                 when (field) {
@@ -601,11 +621,6 @@ class WebServerManager(
                     "topicPrefix" -> settings.setMqttTopicPrefix(value)
                     "username" -> settings.setMqttUsername(value)
                     "password" -> settings.setMqttPassword(value)
-                    else -> return@runBlocking newFixedLengthResponse(
-                        Response.Status.BAD_REQUEST,
-                        "application/json",
-                        """{"success":false,"error":"Unknown field: $field"}"""
-                    )
                 }
             }
 

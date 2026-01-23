@@ -31,6 +31,7 @@ class MopekaDevicePlugin : BleDevicePlugin {
         const val PLUGIN_ID = "mopeka"
         const val PLUGIN_VERSION = "1.0.0"
         const val PLUGIN_DISPLAY_NAME = "Mopeka Tank Sensor"
+        const val OFFLINE_TIMEOUT_MS = 30 * 60 * 1000L  // 30 minutes
     }
     
     override val pluginId: String = PLUGIN_ID
@@ -50,6 +51,10 @@ class MopekaDevicePlugin : BleDevicePlugin {
     
     // Track which devices have had discovery published (to avoid republishing)
     private val discoveredDevices = mutableSetOf<String>()
+    
+    // Track device offline status with timeout (30 minutes = 1800000 ms)
+    private val lastSeenTimestamp = mutableMapOf<String, Long>()
+    private val offlineDevices = mutableSetOf<String>()
     
     override fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
         this.instanceId = instanceId
@@ -283,6 +288,20 @@ class MopekaDevicePlugin : BleDevicePlugin {
      */
     fun handleScanResult(device: BluetoothDevice, scanRecord: ScanRecord?) {
         DebugLog.d("Mopeka", "📥 handleScanResult called for ${device.address}, scanRecord=${scanRecord != null}")
+        
+        // Update last-seen timestamp for this device
+        val currentTime = System.currentTimeMillis()
+        lastSeenTimestamp[device.address] = currentTime
+        
+        // If device was previously offline, mark it as back online
+        if (offlineDevices.contains(device.address)) {
+            offlineDevices.remove(device.address)
+            DebugLog.i("Mopeka", "✅ Device ${device.address} back online after timeout")
+        }
+        
+        // Check for devices that have timed out (no advertisements in 30 minutes)
+        checkForOfflineDevices(currentTime)
+        
         val data = scanRecord?.bytes ?: run {
             DebugLog.d("Mopeka", "⚠️ No scan record data")
             return
@@ -548,4 +567,28 @@ class MopekaDevicePlugin : BleDevicePlugin {
     private fun isValidSyncByte(syncByte: Int): Boolean {
         return syncByte in 0x03..0x0C
     }
-}
+    
+    /**
+     * Check for devices that haven't been seen recently and publish offline status
+     * Called periodically to detect when devices stop advertising
+     */
+    private fun checkForOfflineDevices(currentTime: Long) {
+        val devicesToMarkOffline = mutableListOf<String>()
+        
+        for ((deviceMac, lastSeen) in lastSeenTimestamp) {
+            val timeSinceLastSeen = currentTime - lastSeen
+            
+            // If device hasn't been seen in 30 minutes and isn't already marked offline
+            if (timeSinceLastSeen > OFFLINE_TIMEOUT_MS && !offlineDevices.contains(deviceMac)) {
+                devicesToMarkOffline.add(deviceMac)
+            }
+        }
+        
+        // Publish offline status for devices that timed out
+        for (deviceMac in devicesToMarkOffline) {
+            offlineDevices.add(deviceMac)
+            val topic = "mopeka/$deviceMac/availability"
+            DebugLog.w("Mopeka", "📡 Device $deviceMac timed out - publishing offline")
+            mqttPublisher?.publishAvailability(topic, false)
+        }
+    }}

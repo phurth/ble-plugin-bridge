@@ -555,5 +555,7 @@ class HughesGattCallback(
         isConnected = false
         chunk1 = null
         mainHandler.removeCallbacksAndMessages(null)
+        // Publish offline status when disconnected
+        publishAvailability(false)
     }
 }

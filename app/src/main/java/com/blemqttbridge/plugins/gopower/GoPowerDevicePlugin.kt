@@ -806,6 +806,7 @@ class GoPowerGattCallback(
         val appVersion = try {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to get app version for discovery: ${e.message}", e)
             "unknown"
         }
         
