@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLE-MQTT Plugin Bridge</title>
+    <link rel="stylesheet" href="/web_ui.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-content">
+                <h1>BLE-MQTT Plugin Bridge</h1>
+                <div class="version">Version <span id="app-version">Loading...</span> (<span id="app-code">Loading...</span>)</div>
+            </div>
+            <button id="theme-toggle" class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
+        </div>
+
+        <div class="card">
+            <h2>Service Status</h2>
+            <div id="service-status" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>MQTT Configuration</h2>
+            <div class="section-helper">Note: MQTT service must be stopped to edit the MQTT configuration</div>
+            <div id="config-info" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>Plugin Instances</h2>
+            <div class="section-helper">Note: Service must be stopped to add/remove/edit plugin instances</div>
+            <button id="add-instance-btn" class="add-instance-btn" onclick="showAddInstanceDialog()" disabled style="margin-bottom: 15px;">+ Add Plugin Instance</button>
+            <div id="plugin-status" class="loading">Loading...</div>
+        </div>
+
+        <!-- Add Instance Modal -->
+        <div id="addInstanceModal" class="modal">
+            <div class="modal-content">
+                <h3>Add Plugin Instance</h3>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Plugin Type:</label>
+                    <select id="new-plugin-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="">-- Select Plugin Type --</option>
+                        <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
+                        <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
+                        <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
+                        <option value="hughes_watchdog" data-multi="false">Hughes Power Watchdog (Surge protector)</option>
+                        <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
+                        <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
+                    </select>
+                    <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
+                        ⚠️ This plugin type already exists and does not support multiple instances.
+                    </div>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                    <input type="text" id="new-display-name" placeholder="e.g., Living Room Thermostat" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="new-mac-container" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                    <input type="text" id="new-device-mac" placeholder="e.g., AA:BB:CC:DD:EE:FF" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="plugin-specific-fields"></div>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeAddInstanceDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-primary" onclick="confirmAddInstance()">Add Instance</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edit Instance Modal -->
+        <div id="editInstanceModal" class="modal">
+            <div class="modal-content">
+                <h3>Edit Instance</h3>
+                <input type="hidden" id="edit-instance-id">
+                <input type="hidden" id="edit-plugin-type">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                    <input type="text" id="edit-display-name" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="edit-mac-container" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                    <input type="text" id="edit-device-mac" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div id="edit-plugin-specific-fields"></div>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeEditInstanceDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-primary" onclick="confirmEditInstance()">Save Changes</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Confirm Remove Modal -->
+        <div id="confirmRemoveModal" class="modal">
+            <div class="modal-content">
+                <h3>Remove Instance</h3>
+                <p id="remove-message">Are you sure you want to remove this instance?</p>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeRemoveDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-danger" onclick="confirmRemove()">Remove</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration Backup/Restore -->
+        <div class="card">
+            <h2>Configuration Backup & Restore</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 15px; font-size: 14px;">
+                Export all settings and plugin configurations to a JSON file, or restore from a previous backup.
+            </p>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                <button onclick="exportConfig()" style="background: #4caf50; color: white; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                    📥 Export Configuration
+                </button>
+                <button onclick="document.getElementById('importFile').click()" style="background: #2196f3; color: white; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                    📤 Import Configuration
+                </button>
+            </div>
+            
+            <input type="file" id="importFile" accept=".json" style="display: none;" onchange="handleFileImport(event)">
+            
+            <div id="importStatus" style="display: none; margin-top: 15px; padding: 12px; border-radius: 4px; font-size: 14px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>Debug Log</h2>
+            <button onclick="loadDebugLog()">Load/Refresh Debug Log</button>
+            <button onclick="downloadDebugLog()">Download Debug Log</button>
+            <div id="debug-log" class="log-container" style="display:none; margin-top: 15px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>BLE Trace</h2>
+            <button onclick="loadBleTrace()">Load/Refresh BLE Trace</button>
+            <button onclick="downloadBleTrace()">Download BLE Trace</button>
+            <div id="ble-trace" class="log-container" style="display:none; margin-top: 15px;"></div>
+        </div>
+
+        <!-- Android TV Power Fix Section -->
+        <div class="card">
+            <div style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" onclick="toggleTvFixSection()">
+                <h2 style="margin: 0;">Android TV Power Fix</h2>
+                <span id="tv-fix-toggle" style="font-size: 20px; transition: transform 0.3s;">▶</span>
+            </div>
+            <div id="tv-fix-content" style="display: none; margin-top: 20px;">
+                <h3 style="margin-top: 0; margin-bottom: 10px;">HDMI-CEC Auto Device Off</h3>
+                
+                <p style="line-height: 1.6; margin-bottom: 15px;">
+                    When enabled, the TV can put this device to sleep via HDMI-CEC, which kills the service. 
+                    Disable this to keep the service running when the TV powers off.
+                </p>
+                
+                <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 15px; border-radius: 4px;">
+                    <div style="font-weight: 500; color: #856404; margin-bottom: 5px;">
+                        ⚠️ CEC Auto-Off Enabled
+                    </div>
+                    <div style="color: #856404; font-size: 14px;">
+                        Service will be killed when TV sleeps
+                    </div>
+                </div>
+                
+                <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 20px; border-radius: 4px;">
+                    <div style="font-weight: 500; color: #856404; margin-bottom: 10px;">
+                        ⚠️ Permission Required
+                    </div>
+                    <div style="color: #856404; font-size: 14px; line-height: 1.6;">
+                        To enable automatic CEC control, grant WRITE_SECURE_SETTINGS via ADB (one-time setup):
+                    </div>
+                </div>
+                
+                <div style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; position: relative; margin-bottom: 15px; overflow-x: auto;">
+                    <button onclick="copyToClipboard('adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS')" 
+                            style="position: absolute; right: 10px; top: 10px; background: #007acc; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                        Copy
+                    </button>
+                    <div style="padding-right: 70px; word-wrap: break-word;">adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS</div>
+                </div>
+                
+                <p style="line-height: 1.6; margin-bottom: 10px; font-size: 14px; color: #666;">
+                    After granting permission, restart the app. The service will automatically disable CEC auto-off on startup.
+                </p>
+                
+                <h4 style="margin-top: 25px; margin-bottom: 10px;">Alternative: Disable CEC directly via ADB:</h4>
+                
+                <div style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; position: relative; overflow-x: auto;">
+                    <button onclick="copyToClipboard('adb shell settings put global hdmi_control_auto_device_off_enabled 0')" 
+                            style="position: absolute; right: 10px; top: 10px; background: #007acc; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                        Copy
+                    </button>
+                    <div style="padding-right: 70px; word-wrap: break-word;">adb shell settings put global hdmi_control_auto_device_off_enabled 0</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/web_ui.js"></script>
+</body>
+</html>
