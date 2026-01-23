@@ -8,10 +8,10 @@ import android.content.Context
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
+import com.blemqttbridge.core.discovery.HomeAssistantDiscoveryBuilder
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaConstants
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaAdvertisementParser
 import com.blemqttbridge.plugins.mopeka.protocol.MopekaSensorData
-import com.blemqttbridge.plugins.mopeka.protocol.MopekaHomeAssistantDiscovery
 import com.blemqttbridge.util.DebugLog
 
 /**
@@ -179,12 +179,97 @@ class MopekaDevicePlugin : BleDevicePlugin {
     
     override fun getDiscoveryPayloads(device: BluetoothDevice): List<Pair<String, String>> {
         val baseTopic = getMqttBaseTopic(device)
-        val discoveries = MopekaHomeAssistantDiscovery.generateAllDiscoveryPayloads(
-            device.address,
-            mediumType,
-            baseTopic
+        val macAddress = device.address
+        val cleanMac = macAddress.replace(":", "").uppercase()
+        val appVersion = try {
+            context?.packageManager?.getPackageInfo(context?.packageName ?: "", 0)?.versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        
+        val builder = HomeAssistantDiscoveryBuilder(
+            deviceMac = macAddress,
+            deviceName = "Mopeka Tank Sensor $macAddress",
+            deviceManufacturer = "Mopeka",
+            appVersion = appVersion
         )
-        return discoveries.toList()
+        
+        val deviceId = "mopeka_$cleanMac"
+        val discoveries = mutableListOf<Pair<String, String>>()
+        
+        // Battery percentage (diagnostic)
+        discoveries.add(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "battery") to
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_battery",
+                displayName = "Battery",
+                stateTopic = "homeassistant/$baseTopic/battery",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "%",
+                deviceClass = "battery",
+                stateClass = "measurement",
+                icon = "mdi:battery",
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
+        
+        // Temperature (Celsius)
+        discoveries.add(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "temperature") to
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_temperature",
+                displayName = "Temperature",
+                stateTopic = "homeassistant/$baseTopic/temperature",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "°C",
+                deviceClass = "temperature",
+                stateClass = "measurement",
+                icon = "mdi:thermometer",
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
+        
+        // Tank Level (%)
+        discoveries.add(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "tank_level") to
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_tank_level",
+                displayName = "Tank Level",
+                stateTopic = "homeassistant/$baseTopic/tank_level",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "%",
+                deviceClass = null,
+                icon = "mdi:propane-tank",
+                stateClass = "measurement",
+                valueTemplate = "{{ value_json.value }}",
+                jsonAttributes = true
+            ).toString()
+        )
+        
+        // Quality (0-3 diagnostic)
+        discoveries.add(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "quality") to
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_quality",
+                displayName = "Read Quality",
+                stateTopic = "homeassistant/$baseTopic/quality",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = null,
+                deviceClass = null,
+                stateClass = "measurement",
+                icon = "mdi:signal",
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
+        
+        return discoveries
     }
     
     override fun onDeviceDisconnected(device: BluetoothDevice) {
@@ -337,16 +422,93 @@ class MopekaDevicePlugin : BleDevicePlugin {
      */
     private fun publishDiscovery(macAddress: String, publisher: MqttPublisher) {
         val baseTopic = "mopeka/$macAddress"
-        val discoveries = MopekaHomeAssistantDiscovery.generateAllDiscoveryPayloads(
-            macAddress,
-            mediumType,
-            baseTopic
+        val cleanMac = macAddress.replace(":", "").uppercase()
+        val appVersion = try {
+            context?.packageManager?.getPackageInfo(context?.packageName ?: "", 0)?.versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        
+        val builder = HomeAssistantDiscoveryBuilder(
+            deviceMac = macAddress,
+            deviceName = "Mopeka Tank Sensor $macAddress",
+            deviceManufacturer = "Mopeka",
+            appVersion = appVersion
         )
         
-        for ((discoveryTopic, payload) in discoveries) {
-            publisher.publishDiscovery(discoveryTopic, payload)
-            DebugLog.d("Mopeka", "Published discovery: $discoveryTopic")
-        }
+        val deviceId = "mopeka_$cleanMac"
+        
+        // Battery
+        publisher.publishDiscovery(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "battery"),
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_battery",
+                displayName = "Battery",
+                stateTopic = "homeassistant/$baseTopic/battery",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "%",
+                deviceClass = "battery",
+                stateClass = "measurement",
+                icon = "mdi:battery",
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
+        
+        // Temperature
+        publisher.publishDiscovery(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "temperature"),
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_temperature",
+                displayName = "Temperature",
+                stateTopic = "homeassistant/$baseTopic/temperature",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "°C",
+                deviceClass = "temperature",
+                stateClass = "measurement",
+                icon = null,
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
+        
+        // Tank Level
+        publisher.publishDiscovery(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "tank_level"),
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_tank_level",
+                displayName = "Tank Level",
+                stateTopic = "homeassistant/$baseTopic/tank_level",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = "%",
+                icon = "mdi:propane-tank",
+                stateClass = "measurement",
+                deviceClass = null,
+                valueTemplate = "{{ value_json.value }}",
+                jsonAttributes = true
+            ).also { DebugLog.d("Mopeka", "Tank Level discovery JSON: $it") }.toString()
+        )
+        
+        // Quality
+        publisher.publishDiscovery(
+            HomeAssistantDiscoveryBuilder.buildDiscoveryTopic("sensor", deviceId, "quality"),
+            builder.buildSensor(
+                uniqueId = "mopeka_${cleanMac}_quality",
+                displayName = "Read Quality",
+                stateTopic = "homeassistant/$baseTopic/quality",
+                baseTopic = baseTopic,
+                deviceIdentifier = deviceId,
+                unitOfMeasurement = null,
+                deviceClass = null,
+                stateClass = "measurement",
+                icon = "mdi:signal",
+                valueTemplate = null,
+                jsonAttributes = false
+            ).toString()
+        )
         
         DebugLog.i("Mopeka", "Discovery published for $macAddress (medium: ${mediumType.displayName})")
     }
