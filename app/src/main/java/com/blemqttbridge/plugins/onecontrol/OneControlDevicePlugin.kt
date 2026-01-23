@@ -550,7 +550,7 @@ class OneControlGattCallback(
                         currentGatt = gatt
                         // Reset retry counter on successful connection
                         gatt133RetryCount = 0
-                        mqttPublisher.updateBleStatus(connected = true, paired = false)
+                        mqttPublisher.updatePluginStatus(instanceId, true, isAuthenticated, false)
                         // Publish online availability status
                         publishAvailability(true)
                         
@@ -1021,7 +1021,7 @@ class OneControlGattCallback(
         
         // Mark as authenticated for Data Service gateway (no TEA auth needed)
         isAuthenticated = true
-        mqttPublisher.updateBleStatus(connected = true, paired = true)
+        mqttPublisher.updatePluginStatus(instanceId, true, true, false)
         
         // Start stream reading thread
         startActiveStreamReading()
@@ -1394,7 +1394,7 @@ class OneControlGattCallback(
             if (!isAuthenticated) {
                 Log.i(TAG, "✅ Setting isAuthenticated=true (receiving data proves auth)")
                 isAuthenticated = true
-                mqttPublisher.updateBleStatus(connected = true, paired = true)
+                mqttPublisher.updatePluginStatus(instanceId, true, true, true)
             }
             
             // Trigger GetDevicesMetadata for friendly names
@@ -2850,7 +2850,7 @@ class OneControlGattCallback(
         
         isConnected = false
         isAuthenticated = false
-        mqttPublisher.updateBleStatus(connected = false, paired = false)
+        mqttPublisher.updatePluginStatus(instanceId, false, false, false)
         // Publish offline availability status when disconnected
         publishAvailability(false)
         publishDiagnosticsState()  // Update diagnostic sensors on disconnect
