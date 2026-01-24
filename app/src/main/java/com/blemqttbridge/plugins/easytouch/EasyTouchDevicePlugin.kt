@@ -194,6 +194,8 @@ class EasyTouchGattCallback(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isAuthenticated = false
     private var discoveryPublished = false
+    private val lastPublishedFanModesPerZone = mutableMapOf<Int, Int>()  // Track last mode per zone to republish discovery on change
+    private val currentZoneStates = mutableMapOf<Int, ZoneState>()  // Current state per zone for fan mode filtering
     
     // GATT 133 retry tracking
     private var gatt133RetryCount = 0
@@ -710,6 +712,7 @@ class EasyTouchGattCallback(
         }
         
         val jsonString = json.toString()
+        Log.d(TAG, "📝 Queuing JSON write (attempt ${retryCount + 1}, delay=${if (retryCount == 0) 100L else (200L * (retryCount + 1))}ms): $jsonString")
         
         // Add small delay before write to improve reliability (like HACS integration does)
         val delayMs = if (retryCount == 0) 100L else (200L * (retryCount + 1))
@@ -863,6 +866,19 @@ class EasyTouchGattCallback(
         val zone = cfg.optInt("Zone", configRequestedZone)
         val mav = cfg.optInt("MAV", 0)  // Mode Available bitmask
         
+        // Parse fan array (FA - fan capabilities per mode, 16 bytes, one per mode 0-15)
+        val faArray = mutableListOf<Int>()
+        val fa = cfg.optJSONArray("FA")
+        if (fa != null) {
+            for (i in 0 until minOf(fa.length(), 16)) {
+                faArray.add(fa.optInt(i, 0))
+            }
+        }
+        // Pad with zeros if needed
+        while (faArray.size < 16) {
+            faArray.add(0)
+        }
+        
         // Parse setpoint limits (SPL array: [minCool, maxCool, minHeat, maxHeat])
         val splArray = cfg.optJSONArray("SPL")
         val minCool = splArray?.optInt(0) ?: EasyTouchConstants.MIN_TEMP_F
@@ -873,6 +889,7 @@ class EasyTouchGattCallback(
         val config = ZoneConfiguration(
             zone = zone,
             availableModesBitmask = mav,
+            fanArray = faArray,
             minCoolSetpoint = minCool,
             maxCoolSetpoint = maxCool,
             minHeatSetpoint = minHeat,
@@ -886,6 +903,7 @@ class EasyTouchGattCallback(
         Log.i(TAG, "Zone $zone config: MAV=0x${mav.toString(16)} (${mav.toString(2).padStart(16, '0')})")
         Log.i(TAG, "   Supported modes: $supportedModes")
         Log.i(TAG, "   Setpoint limits: cool=$minCool-$maxCool, heat=$minHeat-$maxHeat")
+        Log.i(TAG, "   FA Array (mode fan capabilities): ${faArray.mapIndexed { idx, v -> "M$idx=0x${v.toString(16)}" }.joinToString(", ")}")
         
         // Request config for next zone (up to zone 3) or start polling
         if (zone < 3) {
@@ -925,6 +943,112 @@ class EasyTouchGattCallback(
         }
         
         return modes
+    }
+    
+    /**
+     * Get available preset modes from MAV bitmask.
+     * Only returns heat type presets that the device supports.
+     */
+    private fun getPresetModesFromBitmask(mav: Int): List<String> {
+        if (mav == 0) return emptyList()
+        
+        val presets = mutableListOf<String>()
+        
+        // Check each heat mode preset
+        for ((presetName, modeNum) in EasyTouchConstants.HEAT_TYPE_PRESETS) {
+            if ((mav and (1 shl modeNum)) != 0) {
+                presets.add(presetName)
+            }
+        }
+        
+        return presets
+    }
+    
+    /**
+     * Get available fan modes for a specific HVAC mode based on device FA array.
+     * FA array contains bitmasks indicating fan speed capabilities per mode.
+     * Based on HACS integration (Spuds/ha_EasyTouchRV_MicroAir_MZ) analysis:
+     * 
+     * FA bitmask structure:
+     * - Bits 0-3 (0x0F):    max_speed (number of manual fan speeds)
+     * - Bit 4   (0x10):     fixed_speed (fan speed is fixed, not controllable)
+     * - Bit 5   (0x20):     allow_off (fan can be turned off)
+     * - Bit 6   (0x40):     allow_manual_auto (cycled low/high modes available)
+     * - Bit 7   (0x80):     allow_full_auto (full auto mode available)
+     * 
+     * Logic: Build available modes based on capabilities:
+     * - If max_speed > 0: add "low" and "high" modes
+     * - If allow_full_auto: add "auto" mode
+     * - If allow_manual_auto: could add cycled variants (but HA doesn't distinguish)
+     * - If fixed_speed and max_speed=0: fan is autonomous/locked, return empty
+     */
+    private fun getAvailableFanModesForMode(zoneConfig: ZoneConfiguration?, modeNum: Int): List<String> {
+        // Furnace modes (3=Gas Furnace, 4=Furnace/AquaHot) have autonomous fans that aren't user-controllable
+        // Even though FA array may indicate fan speeds, the actual hardware is binary on/off
+        // Show only "auto" to indicate device-controlled fan (matches official app's X'ed out fan icon)
+        if (modeNum == EasyTouchConstants.DeviceMode.HEAT || 
+            modeNum == EasyTouchConstants.DeviceMode.FURNACE ||
+            modeNum == EasyTouchConstants.DeviceMode.GAS_HEAT) {
+            Log.d(TAG, "   Mode $modeNum is furnace/gas heat - fan is autonomous (not user-controllable)")
+            return listOf("auto")
+        }
+        
+        if (zoneConfig == null || modeNum < 0 || modeNum >= zoneConfig.fanArray.size) {
+            // Fallback to all modes if config not available
+            return EasyTouchConstants.SUPPORTED_FAN_MODES
+        }
+        
+        val faBitmask = zoneConfig.fanArray[modeNum]
+        Log.d(TAG, "   FA bitmask for mode $modeNum: 0x${faBitmask.toString(16).padStart(2, '0')} = 0b${faBitmask.toString(2).padStart(8, '0')}")
+        
+        if (faBitmask == 0) {
+            // Mode has no fan control, no options available
+            Log.d(TAG, "   Mode $modeNum has no fan configuration (FA=0), fan locked out")
+            return emptyList()
+        }
+        
+        val validModes = mutableListOf<String>()
+        
+        // Extract capability flags from FA bitmask
+        val maxSpeed = faBitmask and 0x0F              // Bits 0-3
+        val fixedSpeed = (faBitmask and 0x10) != 0     // Bit 4
+        val allowOff = (faBitmask and 0x20) != 0       // Bit 5
+        val allowManualAuto = (faBitmask and 0x40) != 0 // Bit 6
+        val allowFullAuto = (faBitmask and 0x80) != 0   // Bit 7
+        
+        Log.d(TAG, "   Mode $modeNum FA decode: maxSpeed=$maxSpeed fixedSpeed=$fixedSpeed allowOff=$allowOff allowManualAuto=$allowManualAuto allowFullAuto=$allowFullAuto")
+        
+        // If fan speed is fixed and max is 0, fan is locked (like furnace modes)
+        if (fixedSpeed && maxSpeed == 0) {
+            Log.d(TAG, "   Mode $modeNum has autonomous/locked fan (fixed_speed with max_speed=0)")
+            return emptyList()
+        }
+        
+        // Add manual low/high if we have multiple speeds available
+        if (maxSpeed >= 2) {
+            validModes.add("low")
+            validModes.add("high")
+        } else if (maxSpeed == 1) {
+            validModes.add("low")
+        }
+        
+        // Add auto mode if available
+        if (allowFullAuto || allowManualAuto) {
+            validModes.add("auto")
+        }
+        
+        Log.d(TAG, "   Mode $modeNum available fan modes: $validModes")
+        
+        return validModes
+    }
+    
+    /**
+     * Get available fan modes for a zone.
+     * Returns all standard fan modes. The device firmware handles mode-specific filtering.
+     * Home Assistant will allow any combination; device will reject if invalid for current mode.
+     */
+    private fun getAvailableFanModesForZone(): List<String> {
+        return EasyTouchConstants.SUPPORTED_FAN_MODES
     }
     
     // ===== STATE PARSING (Multi-Zone) =====
@@ -1061,6 +1185,28 @@ class EasyTouchGattCallback(
     
     private fun publishZoneState(zoneNum: Int, state: ZoneState, systemPower: Boolean) {
         val zoneTopic = "$baseTopic/zone_$zoneNum"
+        val zoneConfig = zoneConfigs[zoneNum]
+        
+        // Store current state
+        currentZoneStates[zoneNum] = state
+        
+        // Check if mode changed - if so, republish discovery with mode-specific fan modes
+        val lastMode = lastPublishedFanModesPerZone[zoneNum]
+        if (lastMode == null || lastMode != state.modeNum) {
+            lastPublishedFanModesPerZone[zoneNum] = state.modeNum
+            
+            // IMPORTANT: If switching TO a furnace mode, publish fan_mode="auto" BEFORE discovery
+            // This prevents HA validation error when discovery shows fan_modes=["auto"] but
+            // state still has old value like "low" or "high"
+            if (state.modeNum == EasyTouchConstants.DeviceMode.HEAT ||
+                state.modeNum == EasyTouchConstants.DeviceMode.FURNACE ||
+                state.modeNum == EasyTouchConstants.DeviceMode.GAS_HEAT) {
+                mqttPublisher.publishState("$zoneTopic/state/fan_mode", "auto", true)
+            }
+            
+            // Republish discovery with updated fan modes for this mode
+            publishDiscovery(listOf(zoneNum))
+        }
         
         // When systemPower is off, report mode as "off" regardless of actual mode setting
         // This matches official EasyTouch app behavior
@@ -1110,17 +1256,48 @@ class EasyTouchGattCallback(
         }
         
         // Fan mode - use appropriate fan speed based on current mode
-        // Note: Fan mode setting persists even when system is off, so we report the actual fan setting
-        val fanMode = when (mode) {
-            "fan_only" -> fanValueToString(state.fanOnlySpeed, isFanOnly = true)
-            "cool" -> fanValueToString(state.coolFanSpeed, isFanOnly = false)
-            "heat" -> fanValueToString(state.electricFanSpeed, isFanOnly = false)  // or gasFanSpeed depending on unit
-            "auto" -> fanValueToString(state.autoFanSpeed, isFanOnly = false)
-            else -> fanValueToString(state.autoFanSpeed, isFanOnly = false)  // When off, use auto fan speed setting
+        // Check available fan modes for current mode to handle locked fan situations
+        val availableFanModes = getAvailableFanModesForMode(zoneConfig, state.modeNum)
+        
+        val fanMode = if (availableFanModes.size == 1 && availableFanModes.contains("auto")) {
+            // Fan is locked to auto (fixed_speed mode) - always report "auto"
+            "auto"
+        } else {
+            when (mode) {
+                "fan_only" -> fanValueToString(state.fanOnlySpeed, isFanOnly = true)
+                "cool" -> fanValueToString(state.coolFanSpeed, isFanOnly = false)
+                "heat" -> {
+                    // Use correct fan speed field based on heat mode type
+                    val fanSpeed = when (state.modeNum) {
+                        EasyTouchConstants.DeviceMode.HEAT_PUMP,
+                        EasyTouchConstants.DeviceMode.HEAT_STRIP,
+                        EasyTouchConstants.DeviceMode.ELECTRIC_HEAT -> state.electricFanSpeed
+                        EasyTouchConstants.DeviceMode.HEAT,
+                        EasyTouchConstants.DeviceMode.FURNACE,
+                        EasyTouchConstants.DeviceMode.GAS_HEAT -> state.gasFanSpeed
+                        else -> state.electricFanSpeed  // Default to electric fan
+                    }
+                    fanValueToString(fanSpeed, isFanOnly = false)
+                }
+                "auto" -> fanValueToString(state.autoFanSpeed, isFanOnly = false)
+                else -> fanValueToString(state.autoFanSpeed, isFanOnly = false)  // When off, use auto fan speed setting
+            }
         }
         // Only publish fan_mode if it's a valid value (not "off")
         val validFanMode = if (fanMode == "off") "auto" else fanMode
         mqttPublisher.publishState("$zoneTopic/state/fan_mode", validFanMode, true)
+        
+        // Preset mode - show actual preset for heat/auto, "none" for other modes
+        // Using lowercase "none" which HA recognizes as the standard no-preset value
+        val heatPresets = getPresetModesFromBitmask(zoneConfigs[zoneNum]?.availableModesBitmask ?: 0)
+        if (heatPresets.isNotEmpty()) {
+            val preset = if (mode == "heat" || mode == "auto") {
+                EasyTouchConstants.HEAT_TYPE_REVERSE[state.modeNum] ?: heatPresets[0]
+            } else {
+                "none"
+            }
+            mqttPublisher.publishState("$zoneTopic/state/preset_mode", preset, true)
+        }
         
         // Action (what's currently happening)
         val action = getAction(state)
@@ -1223,7 +1400,6 @@ class EasyTouchGattCallback(
                     put("connections", JSONArray().put(JSONArray().put("mac").put(device.address)))
                 })
                 put("modes", JSONArray(supportedModes))  // Use actual device capabilities
-                put("fan_modes", JSONArray(EasyTouchConstants.SUPPORTED_FAN_MODES))
                 put("temperature_unit", "F")
                 put("temp_step", EasyTouchConstants.TEMP_STEP)
                 put("min_temp", minTemp)
@@ -1245,16 +1421,78 @@ class EasyTouchGattCallback(
                 put("temperature_low_command_topic", "$fullZoneTopic/command/temperature_low")
                 put("fan_mode_command_topic", "$fullZoneTopic/command/fan_mode")
                 
+                // Preset mode support for heat source selection
+                // Only include actual heat presets - HA handles "none" state automatically
+                val heatPresets = getPresetModesFromBitmask(zoneConfig?.availableModesBitmask ?: 0)
+                if (heatPresets.isNotEmpty()) {
+                    put("preset_mode_command_topic", "$fullZoneTopic/command/preset_mode")
+                    put("preset_mode_state_topic", "$fullZoneTopic/state/preset_mode")
+                    put("preset_modes", JSONArray(heatPresets))
+                }
+                
+                // Fan modes - use device FA array to get valid modes for CURRENT HVAC mode
+                // When mode changes, discovery is republished with new mode's fan options
+                // This provides dynamic fan mode filtering despite MQTT's static discovery
+                var fanModesToPublish: List<String> = EasyTouchConstants.SUPPORTED_FAN_MODES
+                
+                if (zoneConfig != null && zoneConfig.availableModesBitmask != 0) {
+                    // Get current state for this zone to know what mode is selected
+                    // Default to mode 0 (off) if state not yet known
+                    val currentState = currentZoneStates[zone]
+                    val modeNum = if (currentState != null && currentState.modeNum >= 0) currentState.modeNum else 0
+                    val validForCurrentMode = getAvailableFanModesForMode(zoneConfig, modeNum)
+                    // Sort for consistent ordering; empty list = fan locked/autonomous
+                    fanModesToPublish = listOf("low", "high", "auto").filter { it in validForCurrentMode }
+                    // If fan is locked (empty list), HA still needs at least one mode to display
+                    // Use "auto" as a placeholder for autonomous fan control
+                    if (fanModesToPublish.isEmpty()) {
+                        fanModesToPublish = listOf("auto")
+                        Log.d(TAG, "   Mode $modeNum has locked fan, using 'auto' placeholder")
+                    }
+                }
+                
+                put("fan_modes", JSONArray(fanModesToPublish))
+                
                 // Optimistic mode - assume command succeeds immediately to prevent UI bounce
                 put("optimistic", true)
                 
                 // Availability (full path including prefix)
                 put("availability_topic", "$fullBaseTopic/availability")
+                
+                // Log what we're publishing for this zone
+                if (zoneConfig != null) {
+                    val currentState = currentZoneStates[zone]
+                    val currentModeNum = currentState?.modeNum ?: -1
+                    val currentModeName = if (currentModeNum >= 0) EasyTouchConstants.DEVICE_TO_HA_MODE[currentModeNum] ?: "unknown" else "unknown"
+                    Log.i(TAG, "   Zone $zone current mode: $currentModeName (mode num $currentModeNum), fan_modes: $fanModesToPublish")
+                }
             }
             
-            val discoveryTopic = "${mqttPublisher.topicPrefix}/climate/$uniqueId/config"
+            // Publish the climate discovery config
+            val discoveryTopic = "$prefix/climate/easytouch_${mac}_zone_$zone/config"
+            
+            // CRITICAL: Publish fan_mode state BEFORE discovery to prevent HA validation errors
+            // When discovery has fan_modes=["auto"], the current fan_mode state must be "auto"
+            // Otherwise HA throws "Fan mode is not valid" error
+            val currentState = currentZoneStates[zone]
+            val currentModeNum = currentState?.modeNum ?: 0
+            if (currentModeNum == EasyTouchConstants.DeviceMode.HEAT ||
+                currentModeNum == EasyTouchConstants.DeviceMode.FURNACE ||
+                currentModeNum == EasyTouchConstants.DeviceMode.GAS_HEAT ||
+                currentModeNum == EasyTouchConstants.DeviceMode.OFF) {
+                // Furnace modes and Off mode: fan is locked to auto
+                mqttPublisher.publishState("$zoneTopic/state/fan_mode", "auto", true)
+            }
+            
             mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
-            Log.i(TAG, "Published discovery for zone $zone: $discoveryTopic")
+            
+            // Publish initial preset_mode state if presets are available
+            // This prevents HA from adding "None" as a pseudo-option
+            val heatPresets = getPresetModesFromBitmask(zoneConfig?.availableModesBitmask ?: 0)
+            if (heatPresets.isNotEmpty()) {
+                // Publish first available preset as initial state
+                mqttPublisher.publishState("$zoneTopic/state/preset_mode", heatPresets[0], true)
+            }
         }
     }
     
@@ -1284,6 +1522,7 @@ class EasyTouchGattCallback(
             when {
                 commandTopic.endsWith("/command/reboot") -> handleRebootCommand(payload)
                 commandTopic.endsWith("/command/mode") -> handleModeCommand(zone, payload)
+                commandTopic.endsWith("/command/preset_mode") -> handlePresetModeCommand(zone, payload)
                 commandTopic.endsWith("/command/temperature") -> handleTemperatureCommand(zone, payload)
                 commandTopic.endsWith("/command/temperature_high") -> handleTemperatureHighCommand(zone, payload)
                 commandTopic.endsWith("/command/temperature_low") -> handleTemperatureLowCommand(zone, payload)
@@ -1297,8 +1536,26 @@ class EasyTouchGattCallback(
     }
     
     private fun handleModeCommand(zone: Int, payload: String): Result<Unit> {
-        val modeValue = EasyTouchConstants.HA_MODE_TO_DEVICE[payload]
+        var modeValue = EasyTouchConstants.HA_MODE_TO_DEVICE[payload]
             ?: return Result.failure(Exception("Unknown mode: $payload"))
+        
+        // For "heat" mode only, use the first available heat preset for this zone
+        // This ensures we select an actual heat source (e.g., Furnace) rather than
+        // defaulting to Heat Pump which may not be available
+        // Note: Don't do this for "auto" mode - auto should use actual AUTO device mode
+        if (payload == "heat") {
+            val zoneConfig = zoneConfigs[zone]
+            val heatPresets = getPresetModesFromBitmask(zoneConfig?.availableModesBitmask ?: 0)
+            if (heatPresets.isNotEmpty()) {
+                // Use the first available heat preset
+                val firstPreset = heatPresets[0]
+                val presetModeNum = EasyTouchConstants.HEAT_TYPE_PRESETS[firstPreset]
+                if (presetModeNum != null) {
+                    modeValue = presetModeNum
+                    Log.i(TAG, "Heat mode requested - using first available preset: $firstPreset (mode $modeValue)")
+                }
+            }
+        }
         
         // HACS integration sends power: 0 for OFF, power: 1 for other modes
         // This is required for the thermostat to accept mode changes
@@ -1316,9 +1573,62 @@ class EasyTouchGattCallback(
         Log.i(TAG, "📤 Sending mode command: zone=$zone, power=$powerValue, mode=$modeValue (HA mode: $payload)")
         writeJsonCommand(command)
         
-        // Suppress status updates for 8 seconds to let thermostat process command
+        // Optimistic update: If switching to a furnace mode (3, 4, 13), publish fan_mode="auto"
+        // immediately to prevent HA validation error (Furnace modes only allow "auto")
+        if (modeValue == EasyTouchConstants.DeviceMode.HEAT ||
+            modeValue == EasyTouchConstants.DeviceMode.FURNACE ||
+            modeValue == EasyTouchConstants.DeviceMode.GAS_HEAT) {
+            val zoneTopic = "$baseTopic/zone_$zone"
+            mqttPublisher.publishState("$zoneTopic/state/fan_mode", "auto", true)
+            Log.d(TAG, "   Published optimistic fan_mode=auto for furnace mode $modeValue")
+        }
+        
+        // Suppress status updates for 4 seconds to let thermostat process command
         // (prevents UI bounce-back from stale status)
-        suppressStatusUpdates(8000)
+        suppressStatusUpdates(4000)
+        
+        return Result.success(Unit)
+    }
+    
+    private fun handlePresetModeCommand(zone: Int, payload: String): Result<Unit> {
+        // Get the device mode number for this preset
+        val modeNum = EasyTouchConstants.HEAT_TYPE_PRESETS[payload]
+            ?: return Result.failure(Exception("Unknown preset: $payload"))
+        
+        // Check if this mode is available for this zone
+        val zoneConfig = zoneConfigs[zone]
+        if (zoneConfig != null) {
+            val bitMask = 1 shl modeNum
+            if ((zoneConfig.availableModesBitmask and bitMask) == 0) {
+                return Result.failure(Exception("Preset $payload not available for zone $zone"))
+            }
+        }
+        
+        // Send mode change command with power=1
+        val command = JSONObject().apply {
+            put("Type", "Change")
+            put("Changes", JSONObject().apply {
+                put("zone", zone)
+                put("power", 1)
+                put("mode", modeNum)
+            })
+        }
+        
+        Log.i(TAG, "📤 Sending preset mode command: zone=$zone, preset=$payload, mode=$modeNum")
+        writeJsonCommand(command)
+        
+        // Optimistic update: If switching to a furnace preset (modes 3, 4, 13), publish fan_mode="auto"
+        // immediately to prevent HA validation error (Furnace modes only allow "auto")
+        if (modeNum == EasyTouchConstants.DeviceMode.HEAT ||
+            modeNum == EasyTouchConstants.DeviceMode.FURNACE ||
+            modeNum == EasyTouchConstants.DeviceMode.GAS_HEAT) {
+            val zoneTopic = "$baseTopic/zone_$zone"
+            mqttPublisher.publishState("$zoneTopic/state/fan_mode", "auto", true)
+            Log.d(TAG, "   Published optimistic fan_mode=auto for furnace preset $payload")
+        }
+        
+        // Suppress status updates for 4 seconds
+        suppressStatusUpdates(4000)
         
         return Result.success(Unit)
     }
@@ -1353,7 +1663,7 @@ class EasyTouchGattCallback(
             writeJsonCommand(command)
             
             // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
-            suppressStatusUpdates(8000)
+            suppressStatusUpdates(4000)
             
             // Verify after device has time to process
             mainHandler.postDelayed({
@@ -1384,7 +1694,7 @@ class EasyTouchGattCallback(
         writeJsonCommand(command)
         
         // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
-        suppressStatusUpdates(8000)
+        suppressStatusUpdates(4000)
         
         // Verify after device has time to process
         mainHandler.postDelayed({
@@ -1414,7 +1724,7 @@ class EasyTouchGattCallback(
         writeJsonCommand(command)
         
         // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
-        suppressStatusUpdates(8000)
+        suppressStatusUpdates(4000)
         
         // Verify after device has time to process
         mainHandler.postDelayed({
@@ -1439,7 +1749,11 @@ class EasyTouchGattCallback(
         when (mode) {
             "fan_only" -> changes.put("fanOnly", fanValue)
             "cool" -> changes.put("coolFan", fanValue)
-            "heat" -> changes.put("heatFan", fanValue)
+            "heat" -> {
+                // Use correct fan field based on heat mode type
+                val fanField = EasyTouchConstants.getFanFieldForMode(state.modeNum)
+                changes.put(fanField, fanValue)
+            }
             "auto" -> changes.put("autoFan", fanValue)
         }
         
@@ -1450,7 +1764,7 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "📤 Sending fan mode command: zone=$zone, fan=$fanValue for mode=$mode")
         writeJsonCommand(command)
-        suppressStatusUpdates(8000)
+        suppressStatusUpdates(4000)
         return Result.success(Unit)
     }
     
@@ -1688,6 +2002,7 @@ class EasyTouchGattCallback(
 data class ZoneConfiguration(
     val zone: Int,
     val availableModesBitmask: Int,  // MAV - bitmask of supported modes
+    val fanArray: List<Int>,         // FA - fan capabilities per mode
     val minCoolSetpoint: Int,
     val maxCoolSetpoint: Int,
     val minHeatSetpoint: Int,
