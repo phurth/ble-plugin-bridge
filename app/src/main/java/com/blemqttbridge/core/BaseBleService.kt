@@ -15,7 +15,6 @@ import androidx.core.app.NotificationCompat
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.R
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
-import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
@@ -27,8 +26,6 @@ import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.utils.AndroidTvHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
-import java.util.UUID
-import java.util.Collections
 import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
@@ -63,6 +60,10 @@ class BaseBleService : Service() {
         // Keepalive interval for Doze mode prevention (30 minutes)
         private const val KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000L // 30 minutes
         
+        // BLE timing constants
+        private const val BLE_RECONNECT_DELAY_MS = 2000L
+        private const val GATT_SETTLE_DELAY_MS = 500L
+        
         const val EXTRA_PLUGIN_ID = "plugin_id"
         
         const val EXTRA_BLE_PLUGIN_ID = "ble_plugin_id"
@@ -72,6 +73,7 @@ class BaseBleService : Service() {
         
         // Debug and trace limits
         private const val MAX_DEBUG_LOG_LINES = 2000
+        private const val MAX_BLE_TRACE_LINES = 1000
         private const val TRACE_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
         private const val TRACE_MAX_DURATION_MS = 10 * 60 * 1000L  // 10 minutes
         
@@ -119,9 +121,7 @@ class BaseBleService : Service() {
     private var alarmManager: AlarmManager? = null
     private var keepAlivePendingIntent: PendingIntent? = null
     
-    private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
-    private var remoteControlManager: RemoteControlManager? = null
     private var bleScannerPlugin: BleScannerPlugin? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
@@ -129,14 +129,6 @@ class BaseBleService : Service() {
     
     // Instance to plugin type mapping: instanceId -> pluginType (e.g., "easytouch_b1241e" -> "easytouch")
     private val instancePluginTypes = mutableMapOf<String, String>()
-    
-    // Polling jobs for devices that need periodic updates
-    private val pollingJobs = mutableMapOf<String, Job>()
-    
-    // Pending GATT operations: characteristic UUID -> result deferred
-    private val pendingReads = mutableMapOf<String, CompletableDeferred<Result<ByteArray>>>()
-    private val pendingWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
-    private val pendingDescriptorWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
     
     // Devices currently undergoing bonding process
     private val pendingBondDevices = mutableSetOf<String>()
@@ -214,11 +206,13 @@ class BaseBleService : Service() {
             return outputPlugin?.isConnected() ?: false
         }
         
+        @Suppress("OVERRIDE_DEPRECATION")
         override fun updateDiagnosticStatus(dataHealthy: Boolean) {
             // Deprecated - plugins should use updatePluginStatus instead
             Log.w(TAG, "⚠️ updateDiagnosticStatus called (deprecated) - use updatePluginStatus instead")
         }
         
+        @Suppress("OVERRIDE_DEPRECATION")
         override fun updateBleStatus(connected: Boolean, paired: Boolean) {
             // Deprecated - plugins should use updatePluginStatus instead
             Log.w(TAG, "⚠️ updateBleStatus called (deprecated) - use updatePluginStatus instead")
@@ -294,7 +288,6 @@ class BaseBleService : Service() {
         bluetoothAdapter = bluetoothManager.adapter
         bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
         
-        // Check if BLE is available
         if (bluetoothLeScanner == null) {
             Log.e(TAG, "BLE Scanner not available - device may not support Bluetooth Low Energy")
             appendServiceLog("ERROR: BLE Scanner not available - device may not support Bluetooth Low Energy")
@@ -310,29 +303,22 @@ class BaseBleService : Service() {
         })
         memoryManager.initialize()
         
-        // Register bond state receiver
         val bondFilter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         registerReceiver(bondStateReceiver, bondFilter)
         Log.d(TAG, "Bond state receiver registered")
         
-        // Register pairing request receiver with high priority to intercept before system dialog
         val pairingFilter = IntentFilter(BluetoothDevice.ACTION_PAIRING_REQUEST)
         pairingFilter.priority = IntentFilter.SYSTEM_HIGH_PRIORITY
         registerReceiver(pairingRequestReceiver, pairingFilter)
         Log.d(TAG, "Pairing request receiver registered with high priority")
         
-        // Register Bluetooth state receiver
         val btStateFilter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         registerReceiver(bluetoothStateReceiver, btStateFilter)
         bluetoothEnabled = bluetoothAdapter.isEnabled
         Log.d(TAG, "Bluetooth state receiver registered (BT currently ${if (bluetoothEnabled) "ON" else "OFF"})")
         
-        // Initialize AlarmManager for keepalive
         alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         
-        // Apply Android TV power fix if applicable
-        // This disables HDMI-CEC auto device off to prevent service from being killed
-        // when TV enters standby mode
         if (AndroidTvHelper.applyRecommendedSettings(this)) {
             Log.i(TAG, "📺 Android TV: Applied HDMI-CEC fix for service reliability")
         }
@@ -340,8 +326,6 @@ class BaseBleService : Service() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
         
-        // Schedule keepalive as backup (in case onStartCommand doesn't get ACTION_START_SCAN)
-        // This ensures keepalive is always active regardless of startup path
         if (isKeepAliveEnabled()) {
             Log.i(TAG, "⏰ Scheduling keepalive from onCreate() (backup path)")
             scheduleKeepAlive()
@@ -349,14 +333,13 @@ class BaseBleService : Service() {
             Log.i(TAG, "⏰ Keepalive is disabled, skipping schedule")
         }
     }
-    
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "⚙️ onStartCommand: action=${intent?.action ?: "null"}, startId=$startId")
         appendServiceLog("onStartCommand: action=${intent?.action ?: "null"}")
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
-                // Check if already initializing to prevent race condition
                 synchronized(initializationLock) {
                     if (isInitializing) {
                         Log.i(TAG, "⚙️ Skipping ACTION_START_SCAN - already initializing")
@@ -365,27 +348,17 @@ class BaseBleService : Service() {
                     isInitializing = true
                 }
                 
-                // Mark service as running
                 ServiceStateManager.setServiceRunning(applicationContext, true)
                 _serviceRunning.value = true
                 Log.i(TAG, "Service marked as running")
                 
-                // Get ALL enabled BLE plugins from ServiceStateManager
                 val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
                 val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
-                
-                Log.i(TAG, "Enabled BLE plugins: $enabledBlePlugins")
-                
-                // Load output config
                 val outputConfig = AppConfig.getMqttConfig(applicationContext)
                 
                 serviceScope.launch {
                     try {
                         initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
-                        // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
-                        // either connects to bonded devices or falls back to scanning
-                        
-                        // Schedule keepalive if enabled (redundant with onCreate but ensures it's set)
                         if (isKeepAliveEnabled()) {
                             Log.i(TAG, "⏰ Scheduling keepalive from ACTION_START_SCAN (primary path)")
                             scheduleKeepAlive()
@@ -397,14 +370,10 @@ class BaseBleService : Service() {
                     }
                 }
             }
-            
             null, "START_WEB_SERVER" -> {
-                // Service started without explicit scan action (e.g., from MainActivity, web server, or system restart)
                 Log.i(TAG, "⚙️ Service started with action=${intent?.action ?: "null"} - checking if service should auto-start")
                 
-                // Check if service was previously enabled - if so, auto-start scanning
                 serviceScope.launch {
-                    // Check if already initializing to prevent race condition
                     synchronized(initializationLock) {
                         if (isInitializing) {
                             Log.i(TAG, "⚙️ Skipping auto-start - already initializing from another path")
@@ -416,7 +385,6 @@ class BaseBleService : Service() {
                     val serviceEnabled = settings.serviceEnabled.first()
                     
                     if (serviceEnabled) {
-                        // Double-check we're not racing with ACTION_START_SCAN
                         synchronized(initializationLock) {
                             if (isInitializing) {
                                 Log.i(TAG, "⚙️ Skipping auto-start - initialization started by another path")
@@ -429,22 +397,15 @@ class BaseBleService : Service() {
                             Log.i(TAG, "⚙️ Service was enabled in settings - auto-starting BLE scanning")
                             appendServiceLog("Auto-starting BLE scanning (serviceEnabled=true in settings)")
                             
-                            // Mark service as running
                             ServiceStateManager.setServiceRunning(applicationContext, true)
                             _serviceRunning.value = true
                             
-                            // Get ALL enabled BLE plugins from ServiceStateManager
                             val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
                             val outputPluginId = "mqtt"
-                            
-                            Log.i(TAG, "Enabled BLE plugins: $enabledBlePlugins")
-                            
-                            // Load output config
                             val outputConfig = AppConfig.getMqttConfig(applicationContext)
                             
                             initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
                             
-                            // Schedule keepalive if enabled
                             if (isKeepAliveEnabled()) {
                                 Log.i(TAG, "⏰ Scheduling keepalive from auto-start path")
                                 scheduleKeepAlive()
@@ -456,7 +417,6 @@ class BaseBleService : Service() {
                         Log.i(TAG, "⚙️ Service not enabled in settings - web server only mode")
                         appendServiceLog("Service not enabled in settings - running web server only")
                         
-                        // Ensure keepalive is scheduled (onCreate already did this, but be explicit)
                         if (isKeepAliveEnabled() && keepAlivePendingIntent == null) {
                             Log.i(TAG, "⏰ Keepalive not yet scheduled, scheduling now")
                             scheduleKeepAlive()
@@ -464,25 +424,20 @@ class BaseBleService : Service() {
                     }
                 }
             }
-            
             ACTION_STOP_SCAN -> {
                 stopScanning()
             }
-            
-
-            
             ACTION_STOP_SERVICE -> {
                 Log.i(TAG, "Stopping service...")
                 stopScanning()
                 disconnectAll()
+                @Suppress("DEPRECATION")
                 stopForeground(true)
                 stopSelf()
             }
-            
             ACTION_DISCONNECT -> {
                 disconnectAll()
             }
-            
             ACTION_REMOVE_PLUGIN -> {
                 val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
                 if (pluginId != null) {
@@ -492,7 +447,6 @@ class BaseBleService : Service() {
                     Log.w(TAG, "REMOVE_PLUGIN action missing plugin_id extra")
                 }
             }
-            
             ACTION_ADD_PLUGIN -> {
                 val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
                 if (pluginId != null) {
@@ -502,7 +456,6 @@ class BaseBleService : Service() {
                     Log.w(TAG, "ADD_PLUGIN action missing plugin_id extra")
                 }
             }
-            
             ACTION_CLEAR_PLUGIN_DISCOVERY -> {
                 val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
                 if (pluginId != null) {
@@ -514,7 +467,6 @@ class BaseBleService : Service() {
                     Log.w(TAG, "CLEAR_PLUGIN_DISCOVERY action missing plugin_id extra")
                 }
             }
-            
             ACTION_EXPORT_DEBUG_LOG -> {
                 val file = exportDebugLog()
                 if (file != null && file.exists()) {
@@ -523,7 +475,6 @@ class BaseBleService : Service() {
                     android.widget.Toast.makeText(this, "Could not create debug log", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
-            
             ACTION_START_TRACE -> {
                 val file = startBleTrace()
                 if (file != null) {
@@ -532,7 +483,6 @@ class BaseBleService : Service() {
                     android.widget.Toast.makeText(this, "Failed to start trace", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
-            
             ACTION_STOP_TRACE -> {
                 val file = stopBleTrace("user stop")
                 if (file != null && file.exists()) {
@@ -541,7 +491,6 @@ class BaseBleService : Service() {
                     android.widget.Toast.makeText(this, "Trace stopped (no file created)", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
-            
             ACTION_KEEPALIVE_PING -> {
                 Log.d(TAG, "⏰ Keepalive ping received")
                 serviceScope.launch {
@@ -560,10 +509,8 @@ class BaseBleService : Service() {
         Log.i(TAG, "Service destroyed")
         appendServiceLog("Service destroyed")
         
-        // Mark service as stopped
         ServiceStateManager.setServiceRunning(applicationContext, false)
         _serviceRunning.value = false
-        // Clear plugin statuses
         _pluginStatuses.value = emptyMap()
         _mqttConnected.value = false
         Log.i(TAG, "Service marked as stopped")
@@ -571,7 +518,6 @@ class BaseBleService : Service() {
         stopScanning()
         disconnectAll()
         
-        // Unregister bond state receiver
         try {
             unregisterReceiver(bondStateReceiver)
             Log.d(TAG, "Bond state receiver unregistered")
@@ -579,7 +525,6 @@ class BaseBleService : Service() {
             Log.w(TAG, "Bond state receiver not registered")
         }
         
-        // Unregister pairing request receiver
         try {
             unregisterReceiver(pairingRequestReceiver)
             Log.d(TAG, "Pairing request receiver unregistered")
@@ -587,7 +532,6 @@ class BaseBleService : Service() {
             Log.w(TAG, "Pairing request receiver not registered")
         }
         
-        // Unregister Bluetooth state receiver
         try {
             unregisterReceiver(bluetoothStateReceiver)
             Log.d(TAG, "Bluetooth state receiver unregistered")
@@ -595,23 +539,14 @@ class BaseBleService : Service() {
             Log.w(TAG, "Bluetooth state receiver not registered")
         }
         
-        // Cancel keepalive alarm
         cancelKeepAlive()
-        
-        // Clear instance reference
         instance = null
-        
-        // Cleanup remote control manager
-        remoteControlManager?.cleanup()
-        remoteControlManager = null
-        
-        // Cleanup BLE Scanner plugin
-        bleScannerPlugin?.cleanup()
-        bleScannerPlugin = null
         
         serviceScope.launch {
             pluginRegistry.cleanup()
-            serviceScope.cancel()
+            outputPlugin?.disconnect()
+            outputPlugin = null
+            memoryManager.logMemoryUsage()
         }
     }
     
@@ -621,7 +556,7 @@ class BaseBleService : Service() {
     private suspend fun initializePlugins(
         blePluginId: String,
         outputPluginId: String,
-        bleConfig: Map<String, String>,
+        _bleConfig: Map<String, String>,
         outputConfig: Map<String, String>
     ) {
         Log.i(TAG, "Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
@@ -642,30 +577,18 @@ class BaseBleService : Service() {
                     _mqttConnected.value = connected
                 }
             })
-            
-            // Initialize remote control manager for MQTT commands
-            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
-            remoteControlManager?.initialize(outputPlugin!!)
-            Log.i(TAG, "Remote control manager initialized")
         }
         
-        // Load BLE plugin - support both legacy (BlePluginInterface) and new (BleDevicePlugin) architecture
-        blePlugin = pluginRegistry.getBlePlugin(blePluginId, applicationContext, bleConfig)
-        if (blePlugin == null) {
-            // Plugin might be a BleDevicePlugin (new architecture) - check if it exists
-            val devicePlugin = pluginRegistry.getDevicePlugin(blePluginId, applicationContext)
-            if (devicePlugin == null) {
-                Log.e(TAG, "Failed to load BLE plugin: $blePluginId (not found in registry)")
-                appendServiceLog("ERROR: Failed to load BLE plugin: $blePluginId (not found in registry)")
-                updateNotification("Error: BLE plugin failed to load")
-                return
-            } else {
-                Log.i(TAG, "Loaded device plugin: $blePluginId (new architecture - plugin-owned GATT callback)")
-                appendServiceLog("Loaded BLE plugin: $blePluginId (device plugin)")
-            }
+        // Load BLE device plugin (new architecture)
+        val devicePlugin = pluginRegistry.getDevicePlugin(blePluginId, applicationContext)
+        if (devicePlugin == null) {
+            Log.e(TAG, "Failed to load BLE plugin: $blePluginId (not found in registry)")
+            appendServiceLog("ERROR: Failed to load BLE plugin: $blePluginId (not found in registry)")
+            updateNotification("Error: BLE plugin failed to load")
+            return
         } else {
-            Log.i(TAG, "Loaded legacy plugin: $blePluginId (BlePluginInterface - forwarding callback)")
-            appendServiceLog("Loaded BLE plugin: $blePluginId (legacy plugin)")
+            Log.i(TAG, "Loaded device plugin: $blePluginId (plugin-owned GATT callback)")
+            appendServiceLog("Loaded BLE plugin: $blePluginId (device plugin)")
         }
         
         Log.i(TAG, "Plugins initialized successfully")
@@ -682,7 +605,7 @@ class BaseBleService : Service() {
      * Performs migration if needed, then creates instance-based plugins.
      */
     private suspend fun initializeMultiplePlugins(
-        enabledBlePlugins: Set<String>,
+        _enabledBlePlugins: Set<String>,
         outputPluginId: String,
         outputConfig: Map<String, String>
     ) {
@@ -718,10 +641,6 @@ class BaseBleService : Service() {
                 }
             })
             
-            // Initialize remote control manager for MQTT commands
-            remoteControlManager = RemoteControlManager(applicationContext, serviceScope, pluginRegistry)
-            remoteControlManager?.initialize(outputPlugin!!)
-            Log.i(TAG, "Remote control manager initialized")
         }
         
         // Phase 4: Load all plugin instances from ServiceStateManager
@@ -729,17 +648,10 @@ class BaseBleService : Service() {
         Log.i(TAG, "📦 Found ${allInstances.size} plugin instance(s) to load")
         
         if (allInstances.isEmpty()) {
-            Log.w(TAG, "No plugin instances configured - checking for legacy enabled plugins...")
-            // Fallback: If no instances exist, try loading from old enabled_ble_plugins format
-            if (enabledBlePlugins.isNotEmpty()) {
-                Log.i(TAG, "Loading ${enabledBlePlugins.size} legacy enabled plugins...")
-                loadLegacyPlugins(enabledBlePlugins)
-            } else {
-                Log.e(TAG, "No plugins were loaded!")
-                appendServiceLog("ERROR: No plugins were loaded!")
-                updateNotification("Error: No plugins loaded")
-                return
-            }
+            Log.e(TAG, "No plugin instances configured - cannot start service")
+            appendServiceLog("ERROR: No plugin instances configured")
+            updateNotification("Error: No plugins loaded")
+            return
         } else {
             // Load all instances via PluginRegistry
             var loadedCount = 0
@@ -775,8 +687,6 @@ class BaseBleService : Service() {
                         _pluginStatuses.value = newStatuses
                         appendServiceLog("✓ Loaded instance: $instanceId (${instance.pluginType})")
                         loadedCount++
-                        // Keep reference to last one for backward compat
-                        blePlugin = plugin as? BlePluginInterface
                     } else {
                         Log.w(TAG, "✗ Failed to create instance: $instanceId")
                         appendServiceLog("✗ Failed to load instance: $instanceId")
@@ -831,51 +741,6 @@ class BaseBleService : Service() {
     }
     
     /**
-     * Fallback: Load legacy plugins from enabled_ble_plugins set.
-     * Used when no instances exist (pre-migration or legacy setup).
-     */
-    private suspend fun loadLegacyPlugins(enabledBlePlugins: Set<String>) {
-        Log.i(TAG, "⚠️ Loading legacy plugins (no instances found)")
-        var loadedCount = 0
-        
-        for (pluginId in enabledBlePlugins) {
-            val bleConfig = AppConfig.getBlePluginConfig(applicationContext, pluginId)
-            Log.i(TAG, "Loading legacy plugin: $pluginId with config: $bleConfig")
-            
-            // Try legacy interface first
-            val legacyPlugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, bleConfig)
-            if (legacyPlugin != null) {
-                // For legacy plugins, we keep the last one in blePlugin (for backward compat)
-                blePlugin = legacyPlugin
-                Log.i(TAG, "✓ Loaded legacy plugin: $pluginId")
-                loadedCount++
-                continue
-            }
-            
-            // Try new BleDevicePlugin architecture
-            val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
-            if (devicePlugin != null) {
-                // Initialize with config using PluginConfig data class
-                val config = PluginConfig(parameters = bleConfig)
-                devicePlugin.initialize(applicationContext, config)
-                Log.i(TAG, "✓ Loaded device plugin: $pluginId (target MACs: ${devicePlugin.getConfiguredDevices()})")
-                loadedCount++
-            } else {
-                Log.w(TAG, "✗ Failed to load plugin: $pluginId (not found in registry)")
-            }
-        }
-        
-        if (loadedCount == 0) {
-            Log.e(TAG, "No legacy plugins were loaded!")
-            appendServiceLog("ERROR: No legacy plugins were loaded!")
-            updateNotification("Error: No plugins loaded")
-            return
-        }
-        
-        Log.i(TAG, "✓ Loaded $loadedCount/${enabledBlePlugins.size} legacy plugins successfully")
-    }
-    
-    /**
      * Load a single plugin dynamically without restarting the service.
      * Used when user adds a plugin from the UI.
      */
@@ -893,34 +758,18 @@ class BaseBleService : Service() {
         
         // Give BLE stack time to fully release any previous connections
         // Without this, writeCharacteristicNoResponse may fail with result=false
-        delay(500)
+        delay(GATT_SETTLE_DELAY_MS)
         
         val bleConfig = AppConfig.getBlePluginConfig(applicationContext, internalPluginId)
         Log.i(TAG, "Plugin config: $bleConfig")
         
-        // Try legacy interface first
-        val legacyPlugin = pluginRegistry.getBlePlugin(internalPluginId, applicationContext, bleConfig)
-        if (legacyPlugin != null) {
-            blePlugin = legacyPlugin
-            Log.i(TAG, "✓ Dynamically loaded legacy plugin: $internalPluginId")
-            // Schedule reconnection after delay to let BLE stack fully reset
-            serviceScope.launch {
-                delay(2000) // Give BLE stack time to fully release previous connection
-                Log.i(TAG, "🔄 Attempting reconnection for newly added plugin: $internalPluginId")
-                connectToPluginDevices(internalPluginId)
-            }
-            return
-        }
-        
-        // Try new BleDevicePlugin architecture
         val devicePlugin = pluginRegistry.getDevicePlugin(internalPluginId, applicationContext)
         if (devicePlugin != null) {
             val config = PluginConfig(parameters = bleConfig)
             devicePlugin.initialize(applicationContext, config)
             Log.i(TAG, "✓ Dynamically loaded device plugin: $internalPluginId (target MACs: ${devicePlugin.getConfiguredDevices()})")
-            // Schedule reconnection after delay to let BLE stack fully reset
             serviceScope.launch {
-                delay(2000) // Give BLE stack time to fully release previous connection
+                delay(BLE_RECONNECT_DELAY_MS)
                 Log.i(TAG, "🔄 Attempting reconnection for newly added plugin: $internalPluginId")
                 connectToPluginDevices(internalPluginId)
             }
@@ -1064,7 +913,7 @@ class BaseBleService : Service() {
             Log.i(TAG, "📊 Passive scan plugins detected - starting BLE scanning for advertisements")
             serviceScope.launch {
                 // Give active plugins time to establish GATT connections first
-                delay(2000)
+                delay(BLE_RECONNECT_DELAY_MS)
                 startScanning()
             }
         }
@@ -1096,28 +945,6 @@ class BaseBleService : Service() {
             val pluginType = instanceId.substringBefore("_")
             enabledPlugins.contains(instanceId) || enabledPlugins.contains(pluginType)
         }.toSet()
-        
-        // Get target MAC addresses from loaded BlePluginInterface plugins (legacy)
-        for ((pluginId, plugin) in pluginRegistry.getLoadedBlePlugins()) {
-            // Skip disabled plugins
-            if (!enabledPlugins.contains(pluginId)) continue
-            
-            val targetMacs = plugin.getTargetDeviceAddresses()
-            for (mac in targetMacs) {
-                if (addedMacs.add(mac.uppercase())) {
-                    Log.d(TAG, "Adding scan filter for MAC: $mac (plugin: $pluginId)")
-                    scanFilters.add(
-                        ScanFilter.Builder()
-                            .setDeviceAddress(mac)
-                            .build()
-                    )
-                }
-            }
-        }
-        
-        // REMOVED: Old loop that called initialize() on every registered plugin
-        // This was creating temporary plugin instances and logging "No MAC configured!" warnings
-        // Multi-instance architecture handles scan filters via the instance loop below
         
         // For multi-instance plugins, process each enabled instance
         var hasMopekaInstances = false
@@ -1271,7 +1098,7 @@ class BaseBleService : Service() {
     private fun resumeScanningForPassivePlugins() {
         if (hasPassivePluginsEnabled() && !isScanning) {
             serviceScope.launch {
-                delay(500)  // Brief delay to avoid BLE stack contention
+                delay(GATT_SETTLE_DELAY_MS)  // Brief delay to avoid BLE stack contention
                 Log.i(TAG, "📊 Resuming scan for passive plugins (Mopeka, etc.)")
                 startScanning()
             }
@@ -1313,7 +1140,7 @@ class BaseBleService : Service() {
                 
                 // Wait a bit for BT stack to stabilize, then reconnect
                 serviceScope.launch {
-                    delay(2000)
+                    delay(BLE_RECONNECT_DELAY_MS)
                     Log.i(TAG, "Attempting to reconnect devices after BT restore")
                     reconnectToBondedDevices()
                 }
@@ -1401,14 +1228,10 @@ class BaseBleService : Service() {
                 
                 // Load plugin and connect to device
                 serviceScope.launch {
-                    // pluginId might be an instance ID, extract the base plugin type for legacy check
-                    val basePluginType = instancePluginTypes[pluginId] ?: pluginId.substringBefore('_')
-                    
-                    // Check if plugin can be loaded (either legacy BlePluginInterface or new BleDevicePlugin)
-                    val legacyPlugin = pluginRegistry.getBlePlugin(basePluginType, applicationContext, emptyMap())
-                    
-                    if (legacyPlugin != null || devicePlugin != null) {
+                    if (devicePlugin != null) {
                         connectToDevice(device, instanceId)  // Use instanceId for connection
+                        // After kicking off a GATT connection, restart scanning so passive plugins (e.g., Mopeka) keep receiving advertisements
+                        resumeScanningForPassivePlugins()
                     } else {
                         Log.e(TAG, "Failed to load plugin $pluginId for device ${device.address}")
                         appendServiceLog("ERROR: Failed to load plugin $pluginId for device ${device.address}")
@@ -1448,7 +1271,7 @@ class BaseBleService : Service() {
                 Log.e(TAG, "Error closing existing GATT", e)
             }
             connectedDevices.remove(device.address)
-            delay(500) // Brief delay after closing
+            delay(GATT_SETTLE_DELAY_MS) // Brief delay after closing
         }
         
         updateNotification("Connecting to ${device.address}...")
@@ -1457,23 +1280,24 @@ class BaseBleService : Service() {
             // Check if this is a new-style BleDevicePlugin
             // pluginId might be an instanceId (e.g., "easytouch_b1241e"), so look up the actual plugin instance
             val devicePlugin = pluginRegistry.getPluginInstance(pluginId)
-            
-            val callback = if (devicePlugin != null) {
-                // NEW: Plugin instance provides its own callback
-                Log.i(TAG, "Using plugin-owned GATT callback for ${device.address}")
-                
-                // Plugin was already initialized by createPluginInstance - no need to reinitialize
-                
-                val onDisconnect: (BluetoothDevice, Int) -> Unit = { dev, status ->
-                    handleDeviceDisconnect(dev, status, pluginId)
-                }
-                
-                devicePlugin.createGattCallback(device, applicationContext, mqttPublisher, onDisconnect)
-            } else {
-                // LEGACY: Use old forwarding callback
-                Log.i(TAG, "Using legacy forwarding GATT callback for ${device.address}")
-                gattCallback
+            if (devicePlugin == null) {
+                Log.e(TAG, "No plugin instance found for $pluginId; cannot connect to ${device.address}")
+                appendServiceLog("ERROR: No plugin instance for $pluginId (device ${device.address})")
+                updateNotification("Error: Plugin $pluginId not initialized")
+                startScanning()
+                return
             }
+            
+            // NEW: Plugin instance provides its own callback
+            Log.i(TAG, "Using plugin-owned GATT callback for ${device.address}")
+            
+            // Plugin was already initialized by createPluginInstance - no need to reinitialize
+            
+            val onDisconnect: (BluetoothDevice, Int) -> Unit = { dev, status ->
+                handleDeviceDisconnect(dev, status, pluginId)
+            }
+            
+            val callback = devicePlugin.createGattCallback(device, applicationContext, mqttPublisher, onDisconnect)
             
             // Use 'this' (Service context) like the legacy app, not applicationContext
             val gatt = device.connectGatt(
@@ -1486,7 +1310,7 @@ class BaseBleService : Service() {
             connectedDevices[device.address] = Pair(gatt, pluginId)
             
             // Notify plugin of GATT connection
-            devicePlugin?.onGattConnected(device, gatt)
+            devicePlugin.onGattConnected(device, gatt)
             
             // Subscribe to command topics for this device
             subscribeToDeviceCommands(device, pluginId, devicePlugin)
@@ -1504,9 +1328,9 @@ class BaseBleService : Service() {
             // SECURITY: Only call createBond() for explicitly configured devices,
             // not auto-discovered devices. This prevents unwanted pairing in
             // crowded environments like RV parks.
-            val isConfiguredDevice = devicePlugin?.getConfiguredDevices()
-                ?.any { it.equals(device.address, ignoreCase = true) } == true
-            val requiresBonding = devicePlugin?.requiresBonding() == true
+            val isConfiguredDevice = devicePlugin.getConfiguredDevices()
+                .any { it.equals(device.address, ignoreCase = true) }
+            val requiresBonding = devicePlugin.requiresBonding()
             
             if (isConfiguredDevice && requiresBonding && device.bondState == BluetoothDevice.BOND_NONE) {
                 Log.i(TAG, "🔐 Device ${device.address} requires bonding - initiating createBond()")
@@ -1604,7 +1428,7 @@ class BaseBleService : Service() {
         // Always resume scanning to reconnect any missing configured devices
         // This ensures devices like EasyTouch (not bonded) can reconnect automatically
         serviceScope.launch {
-            delay(2000)  // Brief delay to avoid immediate churn
+            delay(BLE_RECONNECT_DELAY_MS)  // Brief delay to avoid immediate churn
             Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
             startScanning()
         }
@@ -1677,7 +1501,7 @@ class BaseBleService : Service() {
                                 val gatt = connectedDevices[it.address]?.first
                                 if (gatt != null) {
                                     serviceScope.launch {
-                                        delay(500) // Brief settle delay (matches working app)
+                                        delay(GATT_SETTLE_DELAY_MS) // Brief settle delay (matches working app)
                                         try {
                                             Log.i(TAG, "Starting service discovery after bonding")
                                             gatt.discoverServices()
@@ -1713,407 +1537,6 @@ class BaseBleService : Service() {
     }
     
     /**
-     * GATT callback for BLE connections.
-     */
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            val device = gatt.device
-            val deviceInfo = connectedDevices[device.address]
-            val pluginId = deviceInfo?.second
-            
-            // Log the full status for debugging bond/connection issues
-            val statusName = when (status) {
-                BluetoothGatt.GATT_SUCCESS -> "GATT_SUCCESS"
-                133 -> "GATT_ERROR(133) - likely stale bond/link key mismatch"
-                8 -> "GATT_CONN_TIMEOUT"
-                19 -> "GATT_CONN_TERMINATE_PEER_USER"
-                22 -> "GATT_CONN_TERMINATE_LOCAL_HOST"
-                34 -> "GATT_CONN_LMP_TIMEOUT"
-                62 -> "GATT_CONN_FAIL_ESTABLISH"
-                else -> "UNKNOWN($status)"
-            }
-            val stateName = when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
-                BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
-                BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
-                BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
-                else -> "UNKNOWN($newState)"
-            }
-            Log.i(TAG, "🔗 onConnectionStateChange: ${device.address} status=$statusName, newState=$stateName")
-            
-            // CRITICAL: Handle stale bond detection (status 133 with BOND_BONDED)
-            // This happens when Android thinks it's bonded but the gateway has forgotten the bond
-            if (status == 133 && device.bondState == BluetoothDevice.BOND_BONDED) {
-                Log.e(TAG, "⚠️ STALE BOND DETECTED for ${device.address}!")
-                Log.e(TAG, "   Android reports BOND_BONDED but connection failed with status 133")
-                Log.e(TAG, "   This means the gateway has forgotten the bond - user must re-pair manually")
-                Log.e(TAG, "   Go to Android Settings > Bluetooth > Forget device, then re-pair")
-                updateNotification("Bond invalid - please re-pair device")
-                
-                // Clean up this connection attempt
-                connectedDevices.remove(device.address)
-                gatt.close()
-                return
-            }
-            
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    // Only proceed if status is success
-                    if (status != BluetoothGatt.GATT_SUCCESS) {
-                            Log.e(TAG, "❌ Connected but with error status: $statusName - closing connection")
-                            appendServiceLog("ERROR: Connected to ${device.address} but with error status: $statusName - closing connection")
-                        gatt.close()
-                        connectedDevices.remove(device.address)
-                        return
-                    }
-                    
-                    Log.i(TAG, "✅ Connected to ${device.address} (plugin: $pluginId)")
-                    updateNotification("Connected to ${device.address}")
-                    
-                    serviceScope.launch {
-                        // Get the plugin for this device
-                        val plugin = if (pluginId != null) {
-                            pluginRegistry.getLoadedBlePlugin(pluginId)
-                        } else null
-                        
-                        // Notify plugin of connection
-                        plugin?.onDeviceConnected(device)
-                        
-                        // Legacy app behavior: Immediately start service discovery
-                        // The BLE stack will handle bonding/encryption automatically when needed
-                        Log.i(TAG, "Starting service discovery (bond state: ${device.bondState})...")
-                        updateNotification("Connected - Discovering services...")
-                        
-                        try {
-                            gatt.discoverServices()
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "Permission denied for service discovery", e)
-                        }
-                        
-                        // Publish availability
-                        publishAvailability(device, true)
-                        
-                        // Resume scanning for passive plugins (Mopeka, etc.)
-                        // GATT connections don't block passive BLE scanning
-                        resumeScanningForPassivePlugins()
-                    }
-                }
-                
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    // Log disconnect reason for debugging
-                    val disconnectReason = when (status) {
-                        BluetoothGatt.GATT_SUCCESS -> "normal disconnect"
-                        8 -> "GATT_CONN_TIMEOUT - connection timed out"
-                        19 -> "GATT_CONN_TERMINATE_PEER_USER - gateway terminated connection"
-                        22 -> "GATT_CONN_TERMINATE_LOCAL_HOST - we terminated connection"
-                        34 -> "GATT_CONN_LMP_TIMEOUT - link manager timeout"
-                        62 -> "GATT_CONN_FAIL_ESTABLISH - failed to establish connection"
-                        133 -> "GATT_ERROR(133) - possible bond/encryption issue"
-                        else -> "status=$status"
-                    }
-                    Log.i(TAG, "🔌 Disconnected from ${device.address}: $disconnectReason")
-                    
-                    // NOTE: Legacy app does NOT have automatic retry logic
-                    // Status 133 usually means stale bond - user must manually re-pair
-                    // Automatic retries can worsen bond instability
-                    if (status == 133) {
-                        Log.e(TAG, "⚠️ GATT_ERROR(133) - This usually means:")
-                        Log.e(TAG, "   - Stale bond info (gateway forgot the bond)")
-                        Log.e(TAG, "   - Go to Android Settings > Bluetooth > Forget device, then re-pair")
-                        updateNotification("Bond error - please re-pair device")
-                    }
-                    
-                    // If gateway terminated with status 19, it might be a protocol issue
-                    if (status == 19) {
-                        Log.w(TAG, "⚠️ Gateway terminated connection - this may indicate:")
-                        Log.w(TAG, "   - Protocol issue (missing heartbeat, wrong commands)")
-                        Log.w(TAG, "   - Authentication/encryption mismatch")
-                        Log.w(TAG, "   - Gateway busy with another client")
-                    }
-                    
-                    updateNotification("Disconnected: $disconnectReason")
-                    
-                    connectedDevices.remove(device.address)
-                    pollingJobs[device.address]?.cancel()
-                    pollingJobs.remove(device.address)
-                    pendingBondDevices.remove(device.address)  // Clean up pending bonds
-                    
-                    serviceScope.launch {
-                        // Get the plugin for this device
-                        val plugin = if (pluginId != null) {
-                            pluginRegistry.getLoadedBlePlugin(pluginId)
-                        } else null
-                        
-                        plugin?.onDeviceDisconnected(device)
-                        publishAvailability(device, false)
-                        
-                        // Note: Plugin remains loaded for quick reconnection
-                        // Plugins only unload on service stop or critical memory pressure
-                    }
-                    
-                    gatt.close()
-                    
-                    // Resume scanning if no devices connected
-                    if (connectedDevices.isEmpty()) {
-                        startScanning()
-                    }
-                }
-            }
-        }
-        
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "✅ Services discovered for ${gatt.device.address}")
-                appendServiceLog("Services discovered for ${gatt.device.address}")
-                
-                // Log all discovered services and characteristics
-                for (service in gatt.services) {
-                    Log.i(TAG, "Service: ${service.uuid}")
-                    for (char in service.characteristics) {
-                        Log.i(TAG, "  Char: ${char.uuid} properties=0x${char.properties.toString(16)}")
-                    }
-                }
-                
-                // NOTE: Legacy app does NOT request MTU - skip MTU negotiation
-                // MTU requests can trigger bond instability on some devices
-                // The default MTU (23 bytes) is sufficient for the OneControl protocol
-                
-                // Brief delay for BLE stack to stabilize after service discovery
-                serviceScope.launch(Dispatchers.Main) {
-                    delay(100)  // Minimal delay - legacy app starts immediately
-                    Log.d(TAG, "Starting plugin setup...")
-                    
-                    // Get the plugin for this device
-                    val deviceInfo = connectedDevices[gatt.device.address]
-                    val pluginId = deviceInfo?.second
-                    val plugin = if (pluginId != null) {
-                        pluginRegistry.getLoadedBlePlugin(pluginId)
-                    } else null
-                    
-                    if (plugin != null) {
-                        // Create GATT operations interface for plugin
-                        val gattOps = GattOperationsImpl(gatt)
-                        
-                        // Call plugin setup (authentication, notification subscription, etc.)
-                        val setupResult = plugin.onServicesDiscovered(gatt.device, gattOps)
-                        if (setupResult.isFailure) {
-                            Log.e(TAG, "Plugin setup failed: ${setupResult.exceptionOrNull()?.message}")
-                        }
-                    }
-                    
-                    // Publish Home Assistant discovery
-                    publishDiscovery(gatt.device)
-                }
-            } else {
-                Log.w(TAG, "Service discovery failed for ${gatt.device.address}: $status")
-            }
-        }
-        
-        // New API 33+ callback - called on Android 13+
-        // CRITICAL: Call plugin DIRECTLY on BLE callback thread (like legacy app)
-        // Do NOT use serviceScope.launch - that causes timing/ordering issues
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            val uuid = characteristic.uuid.toString().lowercase()
-            Log.i(TAG, "📨📨📨 onCharacteristicChanged (API33+) CALLED for $uuid: ${value.size} bytes")
-            // Direct call on BLE thread - matches legacy app behavior
-            handleCharacteristicNotificationDirect(gatt.device, uuid, value)
-        }
-        
-        // Legacy callback for API < 33 (deprecated but still needed for some devices)
-        // CRITICAL: Call plugin DIRECTLY on BLE callback thread (like legacy app)
-        @Deprecated("Deprecated in API 33")
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            val uuid = characteristic.uuid.toString().lowercase()
-            @Suppress("DEPRECATION")
-            val value = characteristic.value ?: byteArrayOf()
-            Log.i(TAG, "📨📨📨 onCharacteristicChanged (legacy) CALLED for $uuid: ${value.size} bytes")
-            // Direct call on BLE thread - matches legacy app behavior
-            handleCharacteristicNotificationDirect(gatt.device, uuid, value)
-        }
-        
-        // Legacy callback for API < 33
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            val uuid = characteristic.uuid.toString().lowercase()
-            @Suppress("DEPRECATION")
-            val value = characteristic.value ?: byteArrayOf()
-            Log.d(TAG, "📖 onCharacteristicRead (legacy) callback: uuid=$uuid, status=$status, ${value.size} bytes")
-            handleReadCallback(uuid, value, status)
-        }
-        
-        // New callback for API 33+
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
-            val uuid = characteristic.uuid.toString().lowercase()
-            Log.d(TAG, "📖 onCharacteristicRead (API33+) callback: uuid=$uuid, status=$status, ${value.size} bytes")
-            handleReadCallback(uuid, value, status)
-        }
-        
-        private val onMtuChangedListeners = mutableMapOf<String, (Int, Boolean) -> Unit>()
-
-        private fun handleReadCallback(uuid: String, value: ByteArray, status: Int) {
-            val deferred = pendingReads.remove(uuid)
-            if (deferred != null) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "✅ Read success for $uuid: ${value.size} bytes")
-                    deferred.complete(Result.success(value))
-                } else {
-                    Log.e(TAG, "❌ Read failed for $uuid: status=$status")
-                    deferred.complete(Result.failure(Exception("GATT read failed: status=$status")))
-                }
-            } else {
-                Log.w(TAG, "⚠️ onCharacteristicRead: No pending deferred for $uuid")
-            }
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            val device = gatt.device
-            val success = status == BluetoothGatt.GATT_SUCCESS
-            Log.i(TAG, "onMtuChanged for ${device.address}: mtu=$mtu, status=$status, success=$success")
-            onMtuChangedListeners[device.address]?.invoke(mtu, success)
-        }
-        
-        override fun onCharacteristicWrite(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            val uuid = characteristic.uuid.toString().lowercase()
-            val deferred = pendingWrites.remove(uuid)
-            
-            if (deferred != null) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Write success for $uuid")
-                    deferred.complete(Result.success(Unit))
-                } else {
-                    Log.e(TAG, "Write failed for $uuid: status=$status")
-                    deferred.complete(Result.failure(Exception("GATT write failed: status=$status")))
-                }
-            }
-        }
-        
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            val charUuid = descriptor.characteristic.uuid.toString().lowercase()
-            val deferred = pendingDescriptorWrites.remove(charUuid)
-            
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "✅ Descriptor write success for $charUuid")
-                deferred?.complete(Result.success(Unit))
-            } else {
-                Log.e(TAG, "❌ Descriptor write failed for $charUuid: status=$status")
-                deferred?.complete(Result.failure(Exception("Descriptor write failed: status=$status")))
-            }
-        }
-    }
-
-    /**
-     * Handle characteristic notification from BLE device.
-     * CRITICAL: Called DIRECTLY on BLE callback thread (not via coroutine) to match legacy app behavior.
-     * Plugin receives notification immediately, can queue work for background processing.
-     */
-    private fun handleCharacteristicNotificationDirect(
-        device: BluetoothDevice,
-        characteristicUuid: String,
-        value: ByteArray
-    ) {
-        // Get the plugin for this device
-        val deviceInfo = connectedDevices[device.address]
-        val pluginId = deviceInfo?.second ?: return
-        val plugin = pluginRegistry.getLoadedBlePlugin(pluginId) ?: return
-        
-        try {
-            // Call plugin directly on BLE thread (like legacy app)
-            val stateUpdates = plugin.onCharacteristicNotification(device, characteristicUuid, value)
-            
-            // Publish state updates asynchronously (MQTT publishing can be async)
-            if (stateUpdates.isNotEmpty()) {
-                val output = outputPlugin ?: return
-                serviceScope.launch {
-                    for ((topicSuffix, payload) in stateUpdates) {
-                        val deviceId = plugin.getDeviceId(device)
-                        output.publishState("device/$deviceId/$topicSuffix", payload, retained = true)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling notification", e)
-        }
-    }
-    
-    /**
-     * Start periodic polling if plugin requires it.
-     */
-    private fun startPollingIfNeeded(device: BluetoothDevice, plugin: BlePluginInterface) {
-        val intervalMs = plugin.getPollingIntervalMs() ?: return
-        
-        val job = serviceScope.launch {
-            while (isActive) {
-                delay(intervalMs)
-                
-                try {
-                    plugin.performPeriodicPoll(device)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error during polling", e)
-                }
-            }
-        }
-        
-        pollingJobs[device.address] = job
-        Log.d(TAG, "Started polling for ${device.address} (interval: ${intervalMs}ms)")
-    }
-    
-    /**
-     * Publish Home Assistant discovery payloads.
-     */
-    private suspend fun publishDiscovery(device: BluetoothDevice) {
-        val output = outputPlugin ?: return
-        
-        // Get the plugin for this device
-        val deviceInfo = connectedDevices[device.address]
-        val pluginId = deviceInfo?.second ?: return
-        val plugin = pluginRegistry.getLoadedBlePlugin(pluginId) ?: return
-        
-        try {
-            val discoveryPayloads = plugin.getDiscoveryPayloads(device)
-            
-            for ((topic, payload) in discoveryPayloads) {
-                output.publishDiscovery(topic, payload)
-            }
-            
-            Log.i(TAG, "Published ${discoveryPayloads.size} discovery payloads for ${device.address}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error publishing discovery", e)
-        }
-    }
-    
-    /**
-     * Publish device availability.
-     */
-    private suspend fun publishAvailability(device: BluetoothDevice, online: Boolean) {
-        outputPlugin?.publishAvailability(online)
-    }
-    
-    /**
      * Disconnect all devices.
      */
     private fun disconnectAll() {
@@ -2122,24 +1545,14 @@ class BaseBleService : Service() {
         // Create a copy to avoid ConcurrentModificationException
         for ((_, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
-            if (gatt != null) {
-                try {
-                    gatt.disconnect()
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "Permission denied for disconnect", e)
-                }
-            } else {
-                Log.w(TAG, "disconnectAll: gatt was null, skipping disconnect")
+            try {
+                gatt.disconnect()
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Permission denied for disconnect", e)
             }
         }
         
         connectedDevices.clear()
-        
-        // Create a copy to avoid ConcurrentModificationException
-        for ((_, job) in pollingJobs.toList()) {
-            job.cancel()
-        }
-        pollingJobs.clear()
     }
     
     /**
@@ -2310,250 +1723,6 @@ class BaseBleService : Service() {
         notificationManager.notify(NOTIFICATION_ID, createNotification(text))
     }
     
-    /**
-     * GATT operations implementation for plugins.
-     * Provides async methods for reading/writing characteristics and managing notifications.
-     */
-    private inner class GattOperationsImpl(private val gatt: BluetoothGatt) : BlePluginInterface.GattOperations {
-        
-        override suspend fun readCharacteristic(uuid: String): Result<ByteArray> = withContext(Dispatchers.Main) {
-            val characteristic = findCharacteristic(uuid)
-            if (characteristic == null) {
-                Log.e(TAG, "❌ readCharacteristic: Characteristic not found: $uuid")
-                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
-            }
-            
-            Log.i(TAG, "📖 readCharacteristic: uuid=$uuid, props=0x${characteristic.properties.toString(16)}")
-            
-            // Clear any cached value (matches legacy app behavior)
-            @Suppress("DEPRECATION")
-            characteristic.value = null
-            
-            val normalizedUuid = uuid.lowercase()
-            val deferred = CompletableDeferred<Result<ByteArray>>()
-            pendingReads[normalizedUuid] = deferred
-            
-            try {
-                @Suppress("DEPRECATION")
-                val success = gatt.readCharacteristic(characteristic)
-                Log.i(TAG, "📖 readCharacteristic initiated: success=$success for $uuid")
-                if (!success) {
-                    pendingReads.remove(normalizedUuid)
-                    return@withContext Result.failure(Exception("Failed to initiate read for $uuid"))
-                }
-                
-                // Wait for callback with timeout (increased to 10s for slow gateways)
-                withTimeout(10000) {
-                    deferred.await()
-                }
-            } catch (e: TimeoutCancellationException) {
-                pendingReads.remove(normalizedUuid)
-                Result.failure(Exception("Read timeout for $uuid"))
-            } catch (e: SecurityException) {
-                pendingReads.remove(normalizedUuid)
-                Result.failure(Exception("Permission denied for read: $uuid"))
-            } catch (e: Exception) {
-                pendingReads.remove(normalizedUuid)
-                Result.failure(e)
-            }
-        }
-        
-        override suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.Main) {
-            val characteristic = findCharacteristic(uuid)
-            if (characteristic == null) {
-                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
-            }
-            
-            val normalizedUuid = uuid.lowercase()
-            val deferred = CompletableDeferred<Result<Unit>>()
-            pendingWrites[normalizedUuid] = deferred
-            
-            try {
-                // Use legacy API on main thread - this is what the working original app does
-                @Suppress("DEPRECATION")
-                characteristic.value = value
-                @Suppress("DEPRECATION")
-                val success = gatt.writeCharacteristic(characteristic)
-                
-                if (!success) {
-                    pendingWrites.remove(normalizedUuid)
-                    return@withContext Result.failure(Exception("Failed to initiate write for $uuid"))
-                }
-                
-                // Wait for callback with timeout
-                withTimeout(5000) {
-                    deferred.await()
-                }
-            } catch (e: TimeoutCancellationException) {
-                pendingWrites.remove(normalizedUuid)
-                Result.failure(Exception("Write timeout for $uuid"))
-            } catch (e: SecurityException) {
-                pendingWrites.remove(normalizedUuid)
-                Result.failure(Exception("Permission denied for write: $uuid"))
-            } catch (e: Exception) {
-                pendingWrites.remove(normalizedUuid)
-                Result.failure(e)
-            }
-        }
-        
-        override suspend fun writeCharacteristicNoResponse(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.Main) {
-            val characteristic = findCharacteristic(uuid)
-            if (characteristic == null) {
-                Log.e(TAG, "❌ writeCharacteristicNoResponse: Characteristic not found: $uuid")
-                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
-            }
-            
-            Log.d(TAG, "📝 writeCharacteristicNoResponse: uuid=$uuid, props=0x${characteristic.properties.toString(16)}, ${value.size} bytes")
-            
-            try {
-                // Use legacy API on main thread - this is what the working original app does
-                @Suppress("DEPRECATION")
-                characteristic.value = value
-                @Suppress("DEPRECATION")
-                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                @Suppress("DEPRECATION")
-                val success = gatt.writeCharacteristic(characteristic)
-                
-                if (success) {
-                    Log.d(TAG, "✅ No-response write initiated for $uuid")
-                    return@withContext Result.success(Unit)
-                } else {
-                    Log.e(TAG, "❌ No-response write returned false for $uuid")
-                    return@withContext Result.failure(Exception("Failed to initiate no-response write for $uuid"))
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ writeCharacteristicNoResponse exception: ${e.message}", e)
-                return@withContext Result.failure(e)
-            }
-        }
-        
-        override suspend fun enableNotifications(uuid: String): Result<Unit> {
-            val characteristic = findCharacteristic(uuid)
-            if (characteristic == null) {
-                return Result.failure(Exception("Characteristic not found: $uuid"))
-            }
-            
-            val normalizedUuid = uuid.lowercase()
-            
-            return try {
-                // First: Enable local notifications on main thread
-                val localSuccess = withContext(Dispatchers.Main) {
-                    gatt.setCharacteristicNotification(characteristic, true)
-                }
-                if (!localSuccess) {
-                    return Result.failure(Exception("Failed to enable local notifications for $uuid"))
-                }
-                
-                // CRITICAL: BLE stack needs time to process setCharacteristicNotification before CCCD write
-                // Without this delay, notifications may not work properly (gateway disconnects)
-                delay(100)
-                
-                // Write descriptor to enable notifications on remote device
-                val descriptor = characteristic.getDescriptor(
-                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb") // Client Characteristic Configuration
-                )
-                
-                if (descriptor != null) {
-                    val deferred = CompletableDeferred<Result<Unit>>()
-                    pendingDescriptorWrites[normalizedUuid] = deferred
-                    
-                    val descriptorValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    
-                    val writeSuccess = withContext(Dispatchers.Main) {
-                        // Use legacy API on main thread
-                        @Suppress("DEPRECATION")
-                        descriptor.value = descriptorValue
-                        @Suppress("DEPRECATION")
-                        gatt.writeDescriptor(descriptor)
-                    }
-                    
-                    if (!writeSuccess) {
-                        pendingDescriptorWrites.remove(normalizedUuid)
-                        return Result.failure(Exception("Failed to initiate descriptor write for $uuid"))
-                    }
-                    
-                    // Wait for callback with timeout
-                    withTimeout(5000) {
-                        deferred.await()
-                    }
-                    
-                    Log.d(TAG, "Enabled notifications for $uuid")
-                    Result.success(Unit)
-                } else {
-                    Log.w(TAG, "No CCCD descriptor found for $uuid - notifications may not work")
-                    Result.success(Unit)
-                }
-            } catch (e: TimeoutCancellationException) {
-                pendingDescriptorWrites.remove(normalizedUuid)
-                Result.failure(Exception("Descriptor write timeout for $uuid"))
-            } catch (e: SecurityException) {
-                pendingDescriptorWrites.remove(normalizedUuid)
-                Result.failure(Exception("Permission denied for notifications: $uuid"))
-            } catch (e: Exception) {
-                pendingDescriptorWrites.remove(normalizedUuid)
-                Result.failure(e)
-            }
-        }
-        
-        override suspend fun disableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.Main) {
-            val characteristic = findCharacteristic(uuid)
-            if (characteristic == null) {
-                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
-            }
-            
-            try {
-                gatt.setCharacteristicNotification(characteristic, false)
-                
-                val descriptor = characteristic.getDescriptor(
-                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-                )
-                
-                if (descriptor != null) {
-                    val descriptorValue = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                    
-                    // Use legacy API on main thread
-                    @Suppress("DEPRECATION")
-                    descriptor.value = descriptorValue
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(descriptor)
-                    
-                    Log.d(TAG, "Disabled notifications for $uuid")
-                }
-                
-                Result.success(Unit)
-            } catch (e: SecurityException) {
-                Result.failure(Exception("Permission denied for notifications: $uuid"))
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        }
-        
-        /**
-         * Find a characteristic by UUID across all services.
-         */
-        private fun findCharacteristic(uuid: String): BluetoothGattCharacteristic? {
-            val targetUuid = UUID.fromString(uuid)
-            for (service in gatt.services) {
-                for (characteristic in service.characteristics) {
-                    if (characteristic.uuid == targetUuid) {
-                        return characteristic
-                    }
-                }
-            }
-            return null
-        }
-        
-        /**
-         * Check if a service exists on the connected device.
-         * This is a non-triggering check that doesn't perform any GATT reads/writes.
-         * IMPORTANT: Used to detect gateway type without triggering encryption!
-         */
-        override fun hasService(uuid: String): Boolean {
-            val targetUuid = UUID.fromString(uuid)
-            return gatt.services.any { it.uuid == targetUuid }
-        }
-    }
-    
     // =====================================================================
     // Debug Logging and Trace Functions
     // =====================================================================
@@ -2713,7 +1882,6 @@ class BaseBleService : Service() {
                 out.appendLine("")
                 
                 out.appendLine("Active Plugins:")
-                blePlugin?.let { out.appendLine("  BLE: ${it.javaClass.simpleName}") }
                 outputPlugin?.let { out.appendLine("  Output: ${it.javaClass.simpleName}") }
                 out.appendLine("")
                 
@@ -2768,7 +1936,6 @@ class BaseBleService : Service() {
             appendLine("")
             
             appendLine("Active Plugins:")
-            blePlugin?.let { appendLine("  BLE: ${it.javaClass.simpleName}") }
             outputPlugin?.let { appendLine("  Output: ${it.javaClass.simpleName}") }
             appendLine("")
             
@@ -2828,7 +1995,7 @@ class BaseBleService : Service() {
             // Disconnect first
             currentPlugin.disconnect()
             // Small delay
-            kotlinx.coroutines.delay(500)
+            kotlinx.coroutines.delay(GATT_SETTLE_DELAY_MS)
             // Re-initialize with same config
             val settings = AppSettings(applicationContext)
             val config = mapOf(

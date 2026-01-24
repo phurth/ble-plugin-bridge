@@ -61,9 +61,17 @@ object EasyTouchConstants {
         const val OFF = 0
         const val FAN_ONLY = 1
         const val COOL = 2
-        const val HEAT = 4
+        const val HEAT = 3              // Generic heat (uses gas fan)
+        const val FURNACE = 4           // AquaHot/Diesel furnace (uses gas fan)
+        const val HEAT_PUMP = 5         // Heat pump (uses electric fan)
         const val DRY = 6
-        const val AUTO = 11
+        const val HEAT_STRIP = 7        // Heat strip (uses electric fan)
+        const val AUTO = 8              // Auto mode
+        const val AUTO_HS = 9           // Auto with heat strip backup
+        const val AUTO_HP = 10          // Auto with heat pump backup
+        const val AUTO_FURNACE = 11     // Auto with furnace backup
+        const val ELECTRIC_HEAT = 12    // Electric heat (uses electric fan)
+        const val GAS_HEAT = 13         // Gas heat (uses gas fan)
     }
     
     /** Map device mode values to Home Assistant mode strings */
@@ -72,8 +80,16 @@ object EasyTouchConstants {
         DeviceMode.FAN_ONLY to "fan_only",
         DeviceMode.COOL to "cool",
         DeviceMode.HEAT to "heat",
+        DeviceMode.FURNACE to "heat",
+        DeviceMode.HEAT_PUMP to "heat",
         DeviceMode.DRY to "dry",
-        DeviceMode.AUTO to "auto"
+        DeviceMode.HEAT_STRIP to "heat",
+        DeviceMode.AUTO to "auto",
+        DeviceMode.AUTO_HS to "auto",
+        DeviceMode.AUTO_HP to "auto",
+        DeviceMode.AUTO_FURNACE to "auto",
+        DeviceMode.ELECTRIC_HEAT to "heat",
+        DeviceMode.GAS_HEAT to "heat"
     )
     
     /** Map Home Assistant mode strings to device mode values */
@@ -81,7 +97,7 @@ object EasyTouchConstants {
         "off" to DeviceMode.OFF,
         "fan_only" to DeviceMode.FAN_ONLY,
         "cool" to DeviceMode.COOL,
-        "heat" to DeviceMode.HEAT,
+        "heat" to DeviceMode.HEAT_PUMP,  // Default to heat pump (most common)
         "dry" to DeviceMode.DRY,
         "auto" to DeviceMode.AUTO
     )
@@ -128,6 +144,41 @@ object EasyTouchConstants {
     
     /** Supported fan modes for Home Assistant discovery */
     val SUPPORTED_FAN_MODES = listOf("auto", "low", "high")
+    
+    // ===== HEAT TYPE PRESET MODES =====
+    // Preset modes allow users to select heat source when in heat mode
+    
+    /** Map preset names to device mode numbers */
+    val HEAT_TYPE_PRESETS = mapOf(
+        "Heat Pump" to DeviceMode.HEAT_PUMP,
+        "Furnace" to DeviceMode.FURNACE,
+        "Heat Strip" to DeviceMode.HEAT_STRIP,
+        "Electric Heat" to DeviceMode.ELECTRIC_HEAT,
+        "Gas Heat" to DeviceMode.GAS_HEAT,
+        "Heat" to DeviceMode.HEAT
+    )
+    
+    /** Reverse map: device mode numbers to preset names */
+    val HEAT_TYPE_REVERSE = mapOf(
+        DeviceMode.HEAT_PUMP to "Heat Pump",
+        DeviceMode.FURNACE to "Furnace",
+        DeviceMode.HEAT_STRIP to "Heat Strip",
+        DeviceMode.ELECTRIC_HEAT to "Electric Heat",
+        DeviceMode.GAS_HEAT to "Gas Heat",
+        DeviceMode.HEAT to "Heat"
+    )
+    
+    /**
+     * Get the correct fan JSON field name for a given heat mode.
+     * Based on official EasyTouch app logic (U_Thermostat.java:807)
+     */
+    fun getFanFieldForMode(modeNum: Int): String {
+        return when (modeNum) {
+            DeviceMode.HEAT_PUMP, DeviceMode.HEAT_STRIP, DeviceMode.ELECTRIC_HEAT -> "eleFan"
+            DeviceMode.HEAT, DeviceMode.FURNACE, DeviceMode.GAS_HEAT -> "gasFan"
+            else -> "coolFan"  // Default for non-heat modes
+        }
+    }
     
     // ===== Z_sts ARRAY INDICES =====
     // Status array indices for thermostat state data

@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
-import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.onecontrol.protocol.TeaEncryption
@@ -550,7 +549,9 @@ class OneControlGattCallback(
                         currentGatt = gatt
                         // Reset retry counter on successful connection
                         gatt133RetryCount = 0
-                        mqttPublisher.updateBleStatus(connected = true, paired = false)
+                        mqttPublisher.updatePluginStatus(instanceId, true, isAuthenticated, false)
+                        // Publish online availability status
+                        publishAvailability(true)
                         
                         // Discover services
                         gatt.discoverServices()
@@ -1019,7 +1020,7 @@ class OneControlGattCallback(
         
         // Mark as authenticated for Data Service gateway (no TEA auth needed)
         isAuthenticated = true
-        mqttPublisher.updateBleStatus(connected = true, paired = true)
+        mqttPublisher.updatePluginStatus(instanceId, true, true, false)
         
         // Start stream reading thread
         startActiveStreamReading()
@@ -1392,7 +1393,7 @@ class OneControlGattCallback(
             if (!isAuthenticated) {
                 Log.i(TAG, "✅ Setting isAuthenticated=true (receiving data proves auth)")
                 isAuthenticated = true
-                mqttPublisher.updateBleStatus(connected = true, paired = true)
+                mqttPublisher.updatePluginStatus(instanceId, true, true, true)
             }
             
             // Trigger GetDevicesMetadata for friendly names
@@ -2848,7 +2849,9 @@ class OneControlGattCallback(
         
         isConnected = false
         isAuthenticated = false
-        mqttPublisher.updateBleStatus(connected = false, paired = false)
+        mqttPublisher.updatePluginStatus(instanceId, false, false, false)
+        // Publish offline availability status when disconnected
+        publishAvailability(false)
         publishDiagnosticsState()  // Update diagnostic sensors on disconnect
         notificationsEnableStarted = false
         servicesDiscovered = false
@@ -2856,6 +2859,17 @@ class OneControlGattCallback(
         seedValue = null
         currentGatt = null
         gatewayInfoReceived = false
+    }
+    
+    /**
+     * Publish availability status for Home Assistant
+     * Called when device connects (online) or disconnects (offline)
+     */
+    private fun publishAvailability(online: Boolean) {
+        val baseTopic = "onecontrol/${device.address}"
+        val message = if (online) "online" else "offline"
+        mqttPublisher.publishState("$baseTopic/availability", message, true)
+        Log.d(TAG, "📡 Published availability: $baseTopic/availability = $message")
     }
     
     // ==================== DIAGNOSTIC SENSORS ====================

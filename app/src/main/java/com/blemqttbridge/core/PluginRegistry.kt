@@ -3,7 +3,6 @@ package com.blemqttbridge.core
 import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.util.Log
-import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import com.blemqttbridge.core.interfaces.PluginConfig
@@ -12,8 +11,8 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Registry for managing BLE device plugins and output plugins.
- * Implements lazy loading to minimize memory usage.
- * Only one BLE plugin is loaded at a time (memory optimization).
+ * All plugins now use the BleDevicePlugin architecture.
+ * Supports multi-instance plugins for managing multiple devices of the same type.
  */
 class PluginRegistry {
     
@@ -31,22 +30,20 @@ class PluginRegistry {
     }
     
     private val mutex = Mutex()
-    private val loadedBlePlugins = mutableMapOf<String, BlePluginInterface>()
     private val loadedDevicePlugins = mutableMapOf<String, BleDevicePlugin>()
     private val pluginInstances = mutableMapOf<String, BleDevicePlugin>()  // v2.6.0+: Multi-instance support
     private var outputPlugin: OutputPluginInterface? = null
     
     // Plugin factory map: pluginId -> factory function
-    // NOTE: Factories can return either BlePluginInterface (legacy) or BleDevicePlugin (new)
-    private val blePluginFactories = mutableMapOf<String, () -> Any>()
+    private val blePluginFactories = mutableMapOf<String, () -> BleDevicePlugin>()
     private val outputPluginFactories = mutableMapOf<String, () -> OutputPluginInterface>()
     
     /**
      * Register a BLE plugin factory.
      * Factory will be called only when plugin is actually needed.
-     * Can return either BlePluginInterface (legacy) or BleDevicePlugin (new architecture).
+     * All plugins must implement BleDevicePlugin interface.
      */
-    fun registerBlePlugin(pluginId: String, factory: () -> Any) {
+    fun registerBlePlugin(pluginId: String, factory: () -> BleDevicePlugin) {
         blePluginFactories[pluginId] = factory
         Log.d(TAG, "Registered BLE plugin: $pluginId")
     }
@@ -57,59 +54,6 @@ class PluginRegistry {
     fun registerOutputPlugin(pluginId: String, factory: () -> OutputPluginInterface) {
         outputPluginFactories[pluginId] = factory
         Log.d(TAG, "Registered output plugin: $pluginId")
-    }
-    
-    /**
-     * Get a BLE plugin (loaded or loads it on-demand).
-     * Supports multiple plugins loaded simultaneously.
-     * 
-     * @param pluginId The plugin to load
-     * @param context Android context for initialization
-     * @param config Plugin configuration
-     * @return The loaded plugin, or null if load failed
-     */
-    suspend fun getBlePlugin(
-        pluginId: String,
-        context: Context,
-        config: Map<String, String>
-    ): BlePluginInterface? = mutex.withLock {
-        // If we already have this plugin loaded, return it
-        loadedBlePlugins[pluginId]?.let {
-            Log.d(TAG, "BLE plugin already loaded: $pluginId")
-            return@withLock it
-        }
-        
-        // Load new plugin
-        val factory = blePluginFactories[pluginId]
-        if (factory == null) {
-            Log.e(TAG, "No factory registered for BLE plugin: $pluginId")
-            return@withLock null
-        }
-        
-        try {
-            Log.i(TAG, "Loading BLE plugin: $pluginId")
-            val plugin = factory()
-            
-            // Check if it's a legacy BlePluginInterface
-            if (plugin !is BlePluginInterface) {
-                Log.w(TAG, "Plugin $pluginId is not a BlePluginInterface (may be BleDevicePlugin - use getDevicePlugin instead)")
-                return@withLock null
-            }
-            
-            val result = plugin.initialize(context, config)
-            
-            if (result.isSuccess) {
-                loadedBlePlugins[pluginId] = plugin
-                Log.i(TAG, "BLE plugin loaded successfully: $pluginId v${plugin.getPluginVersion()} (${loadedBlePlugins.size} total)")
-                return@withLock plugin
-            } else {
-                Log.e(TAG, "Failed to initialize BLE plugin $pluginId: ${result.exceptionOrNull()?.message}")
-                return@withLock null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception loading BLE plugin $pluginId", e)
-            return@withLock null
-        }
     }
     
     /**
@@ -130,23 +74,8 @@ class PluginRegistry {
             null
         }
         
-        // Check already loaded plugins first (fast path)
-        for ((pluginId, plugin) in loadedBlePlugins) {
-            // Skip if not enabled (when context is available)
-            if (enabledPlugins != null && !enabledPlugins.contains(pluginId)) {
-                continue
-            }
-            
-            if (plugin.canHandleDevice(device, scanRecord)) {
-                Log.d(TAG, "Device ${device.address} matches loaded plugin: $pluginId")
-                return pluginId
-            }
-        }
-        
         // Check other registered plugins by creating temporary instances
         for ((pluginId, factory) in blePluginFactories) {
-            if (loadedBlePlugins.containsKey(pluginId)) continue // already checked
-            
             // Skip if not enabled (when context is available)
             // For multi-instance plugins, check if ANY instance of this plugin type is enabled
             if (enabledPlugins != null) {
@@ -163,92 +92,82 @@ class PluginRegistry {
             try {
                 val tempPlugin = factory()
                 
-                // Check if it's a new-style BleDevicePlugin
-                if (tempPlugin is BleDevicePlugin) {
-                    // For multi-instance plugins, check each instance's config
-                    if (context != null && tempPlugin.supportsMultipleInstances) {
+                // For multi-instance plugins, check each instance's config
+                if (context != null && tempPlugin.supportsMultipleInstances) {
+                    val allInstances = ServiceStateManager.getAllInstances(context)
+                    val matchingInstances = allInstances.filter { (_, instance) -> 
+                        instance.pluginType == pluginId 
+                    }
+                    
+                    for ((instanceId, instance) in matchingInstances) {
+                        try {
+                            val instancePlugin = factory()
+                            Log.d(TAG, "Instance $instanceId config map: ${instance.config}")
+                            
+                            // Build config from instance data
+                            val configMap = if (instance.config.isNotEmpty()) {
+                                instance.config.toMutableMap()
+                            } else {
+                                mutableMapOf()
+                            }
+                            
+                            // Add device MAC to config based on plugin type
+                            when (pluginId) {
+                                "easytouch" -> {
+                                    configMap["thermostat_mac"] = instance.deviceMac
+                                    instance.config["password"]?.let { configMap["thermostat_password"] = it }
+                                }
+                                "onecontrol", "onecontrol_v2" -> configMap["gateway_mac"] = instance.deviceMac
+                                "gopower" -> configMap["controller_mac"] = instance.deviceMac
+                                "hughes_watchdog" -> configMap["watchdog_mac"] = instance.deviceMac
+                                "mopeka" -> configMap["sensor_mac"] = instance.deviceMac
+                            }
+                            
+                            // Use new initialize method with instance config
+                            instancePlugin.initializeWithConfig(instanceId, configMap)
+                            
+                            Log.d(TAG, "Checking if device ${device.address} matches instance: $instanceId")
+                            // Convert ByteArray back to ScanRecord for matching
+                            val scanRecordObj = scanRecord?.let { bytes ->
+                                try {
+                                    // Use the bytes directly to create a new ScanRecord via the builder pattern
+                                    val parser = Class.forName("android.bluetooth.le.ScanRecord")
+                                        .getDeclaredMethod("parseFromBytes", ByteArray::class.java)
+                                    parser.invoke(null, bytes) as? android.bluetooth.le.ScanRecord
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Failed to parse ScanRecord: ${e.message}")
+                                    null
+                                }
+                            }
+                            if (instancePlugin.matchesDevice(device, scanRecordObj)) {
+                                Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
+                                return instanceId  // Return instance ID, not plugin type
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error checking instance $instanceId: ${e.message}")
+                        }
+                    }
+                } else {
+                    // Single-instance plugin: Still need to match against stored instances
+                    // These plugins should already be loaded via createPluginInstance,
+                    // but we still need to check if the device MAC matches the configured instance
+                    if (context != null) {
                         val allInstances = ServiceStateManager.getAllInstances(context)
                         val matchingInstances = allInstances.filter { (_, instance) -> 
                             instance.pluginType == pluginId 
                         }
                         
                         for ((instanceId, instance) in matchingInstances) {
-                            try {
-                                val instancePlugin = factory() as BleDevicePlugin
-                                Log.d(TAG, "Instance $instanceId config map: ${instance.config}")
-                                
-                                // Build config from instance data
-                                val configMap = if (instance.config.isNotEmpty()) {
-                                    instance.config.toMutableMap()
-                                } else {
-                                    mutableMapOf()
-                                }
-                                
-                                // Add device MAC to config based on plugin type
-                                when (pluginId) {
-                                    "easytouch" -> {
-                                        configMap["thermostat_mac"] = instance.deviceMac
-                                        instance.config["password"]?.let { configMap["thermostat_password"] = it }
-                                    }
-                                    "onecontrol", "onecontrol_v2" -> configMap["gateway_mac"] = instance.deviceMac
-                                    "gopower" -> configMap["controller_mac"] = instance.deviceMac
-                                    "hughes_watchdog" -> configMap["watchdog_mac"] = instance.deviceMac
-                                    "mopeka" -> configMap["sensor_mac"] = instance.deviceMac
-                                }
-                                
-                                // Use new initialize method with instance config
-                                instancePlugin.initializeWithConfig(instanceId, configMap)
-                                
-                                Log.d(TAG, "Checking if device ${device.address} matches instance: $instanceId")
-                                // Convert ByteArray back to ScanRecord for matching
-                                val scanRecordObj = scanRecord?.let { bytes ->
-                                    try {
-                                        // Use the bytes directly to create a new ScanRecord via the builder pattern
-                                        val parser = Class.forName("android.bluetooth.le.ScanRecord")
-                                            .getDeclaredMethod("parseFromBytes", ByteArray::class.java)
-                                        parser.invoke(null, bytes) as? android.bluetooth.le.ScanRecord
-                                    } catch (e: Exception) {
-                                        Log.w(TAG, "Failed to parse ScanRecord: ${e.message}")
-                                        null
-                                    }
-                                }
-                                if (instancePlugin.matchesDevice(device, scanRecordObj)) {
-                                    Log.d(TAG, "Device ${device.address} matches instance: $instanceId")
-                                    return instanceId  // Return instance ID, not plugin type
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error checking instance $instanceId: ${e.message}")
+                            // For single-instance plugins, match by device MAC address
+                            if (device.address.equals(instance.deviceMac, ignoreCase = true)) {
+                                Log.d(TAG, "Device ${device.address} matches single-instance plugin: $instanceId (plugin: $pluginId)")
+                                return instanceId  // Return instance ID for single-instance plugin
                             }
                         }
+                        
+                        Log.d(TAG, "Skipping single-instance plugin $pluginId - no MAC match for device ${device.address}")
                     } else {
-                        // Single-instance plugin: Still need to match against stored instances
-                        // These plugins should already be loaded via createPluginInstance,
-                        // but we still need to check if the device MAC matches the configured instance
-                        if (context != null) {
-                            val allInstances = ServiceStateManager.getAllInstances(context)
-                            val matchingInstances = allInstances.filter { (_, instance) -> 
-                                instance.pluginType == pluginId 
-                            }
-                            
-                            for ((instanceId, instance) in matchingInstances) {
-                                // For single-instance plugins, match by device MAC address
-                                if (device.address.equals(instance.deviceMac, ignoreCase = true)) {
-                                    Log.d(TAG, "Device ${device.address} matches single-instance plugin: $instanceId (plugin: $pluginId)")
-                                    return instanceId  // Return instance ID for single-instance plugin
-                                }
-                            }
-                            
-                            Log.d(TAG, "Skipping single-instance plugin $pluginId - no MAC match for device ${device.address}")
-                        } else {
-                            Log.d(TAG, "Skipping single-instance plugin $pluginId - no context available for instance lookup")
-                        }
-                    }
-                }
-                // Check if it's a legacy BlePluginInterface
-                else if (tempPlugin is BlePluginInterface) {
-                    if (tempPlugin.canHandleDevice(device, scanRecord)) {
-                        Log.d(TAG, "Device ${device.address} matches legacy plugin: $pluginId (not loaded yet)")
-                        return pluginId
+                        Log.d(TAG, "Skipping single-instance plugin $pluginId - no context available for instance lookup")
                     }
                 }
             } catch (e: Exception) {
@@ -300,11 +219,6 @@ class PluginRegistry {
     }
     
     /**
-     * Get a specific loaded BLE plugin.
-     */
-    fun getLoadedBlePlugin(pluginId: String): BlePluginInterface? = loadedBlePlugins[pluginId]
-    
-    /**
      * Get a BLE device plugin (new architecture) if it implements the interface.
      * Returns the same instance for repeated calls (singleton per plugin ID).
      * 
@@ -338,27 +252,9 @@ class PluginRegistry {
     }
     
     /**
-     * Get all currently loaded BLE plugins.
-     */
-    fun getLoadedBlePlugins(): Map<String, BlePluginInterface> = loadedBlePlugins.toMap()
-    
-    /**
      * Get the currently loaded output plugin (if any).
      */
     fun getCurrentOutputPlugin(): OutputPluginInterface? = outputPlugin
-    
-    /**
-     * Unload a specific BLE plugin.
-     * Called when last device of this type disconnects.
-     */
-    suspend fun unloadBlePlugin(pluginId: String) = mutex.withLock {
-        loadedBlePlugins[pluginId]?.let { plugin ->
-            Log.i(TAG, "Unloading BLE plugin: $pluginId")
-            plugin.cleanup()
-            loadedBlePlugins.remove(pluginId)
-            System.gc()
-        }
-    }
     
     /**
      * Unload a specific device plugin.
@@ -507,13 +403,7 @@ class PluginRegistry {
      * Unload all plugins and cleanup resources.
      */
     suspend fun cleanup() = mutex.withLock {
-        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins, ${loadedDevicePlugins.size} device plugins, ${pluginInstances.size} instances)")
-        
-        for ((pluginId, plugin) in loadedBlePlugins) {
-            Log.i(TAG, "Cleaning up BLE plugin: $pluginId")
-            plugin.cleanup()
-        }
-        loadedBlePlugins.clear()
+        Log.i(TAG, "Cleaning up all plugins (${loadedDevicePlugins.size} device plugins, ${pluginInstances.size} instances)")
         
         // Clear device plugins
         loadedDevicePlugins.clear()

@@ -9,7 +9,6 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.PluginRegistry
-import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
 import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
@@ -70,10 +69,6 @@ class BlePluginBridgeApplication : Application() {
         // Mopeka tank sensor plugin (passive BLE scanning)
         registry.registerBlePlugin("mopeka") {
             MopekaDevicePlugin()
-        }
-        
-        registry.registerBlePlugin("mock_battery") {
-            MockBatteryPlugin()
         }
         
         // Register output plugin FACTORIES

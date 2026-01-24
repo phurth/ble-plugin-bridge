@@ -5,11 +5,15 @@ import android.content.ComponentCallbacks2
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
  * Memory manager for handling low memory conditions.
  * Critical for coexistence with Fully Kiosk on low-end tablets.
+ * Single source of truth for memory pressure monitoring.
  */
 class MemoryManager(private val application: Application) {
     
@@ -19,6 +23,14 @@ class MemoryManager(private val application: Application) {
     
     private val scope = CoroutineScope(Dispatchers.Main)
     private var memoryCallback: MemoryCallback? = null
+    
+    // Observable memory pressure level (0-100%)
+    private val _memoryPressure = MutableStateFlow(0)
+    val memoryPressure: StateFlow<Int> = _memoryPressure.asStateFlow()
+    
+    // Observable memory info
+    private val _memoryInfo = MutableStateFlow(MemoryInfo(0, 0, 0, 0, 0))
+    val memoryInfo: StateFlow<MemoryInfo> = _memoryInfo.asStateFlow()
     
     interface MemoryCallback {
         /**
@@ -73,6 +85,18 @@ class MemoryManager(private val application: Application) {
         
         Log.w(TAG, "Memory trim requested: $levelName")
         
+        // Update memory pressure flow
+        val pressurePercent = when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> 40
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> 60
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> 80
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> 100
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE -> 50
+            else -> 30
+        }
+        _memoryPressure.value = pressurePercent
+        updateMemoryInfo()
+        
         scope.launch {
             try {
                 memoryCallback?.onMemoryPressure(level)
@@ -105,6 +129,9 @@ class MemoryManager(private val application: Application) {
     private fun handleLowMemory() {
         Log.e(TAG, "Low memory warning received - critical!")
         
+        _memoryPressure.value = 100
+        updateMemoryInfo()
+        
         scope.launch {
             try {
                 memoryCallback?.onMemoryPressure(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
@@ -115,6 +142,13 @@ class MemoryManager(private val application: Application) {
         
         // Force GC
         System.gc()
+    }
+    
+    /**
+     * Update memory info flow with current values.
+     */
+    private fun updateMemoryInfo() {
+        _memoryInfo.value = getMemoryInfo()
     }
     
     /**

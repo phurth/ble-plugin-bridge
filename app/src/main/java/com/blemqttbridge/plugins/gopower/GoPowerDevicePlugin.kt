@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
-import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.gopower.protocol.GoPowerConstants
@@ -198,11 +197,11 @@ class GoPowerGattCallback(
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isConnected) {
-                DebugLog.d(TAG, "Polling stopped: active=$isPollingActive, connected=$isConnected")
+                Log.d(TAG, "Polling stopped: active=$isPollingActive, connected=$isConnected")
                 return
             }
             
-            DebugLog.d(TAG, "Polling status...")
+            Log.d(TAG, "Polling status...")
             pollStatus()
             
             // Schedule next poll
@@ -452,7 +451,7 @@ class GoPowerGattCallback(
         val hex = characteristic.value?.joinToString(" ") { "%02X".format(it) } ?: "(null)"
         mqttPublisher.logBleEvent("WRITE ${characteristic.uuid}: $hex (status=$status)")
         if (status == BluetoothGatt.GATT_SUCCESS) {
-            DebugLog.d(TAG, "Characteristic write complete: ${characteristic.uuid}")
+            Log.d(TAG, "Characteristic write complete: ${characteristic.uuid}")
         } else {
             Log.e(TAG, "Characteristic write failed: ${characteristic.uuid}, status=$status")
         }
@@ -493,7 +492,7 @@ class GoPowerGattCallback(
         val hex = data.joinToString(" ") { "%02X".format(it) }
         mqttPublisher.logBleEvent("NOTIFY ${GoPowerConstants.NOTIFY_CHARACTERISTIC_UUID}: $hex")
         val chunk = String(data, StandardCharsets.UTF_8)
-        DebugLog.d(TAG, "Received chunk: $chunk")
+        Log.d(TAG, "Received chunk: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -506,7 +505,7 @@ class GoPowerGattCallback(
             responseBuffer.clear()
             parseAndPublishStatus(bufferStr)
         } else {
-            DebugLog.d(TAG, "Waiting for more data (have $fieldCount fields)")
+            Log.d(TAG, "Waiting for more data (have $fieldCount fields)")
         }
     }
     
@@ -514,7 +513,7 @@ class GoPowerGattCallback(
      * Parse ASCII response and publish to MQTT
      */
     private fun parseAndPublishStatus(response: String) {
-        DebugLog.d(TAG, "Parsing response: ${response.take(100)}...")
+        Log.d(TAG, "Parsing response: ${response.take(100)}...")
         
         val fields = response.split(GoPowerConstants.FIELD_DELIMITER)
         if (fields.size < GoPowerConstants.EXPECTED_FIELD_COUNT) {
@@ -616,7 +615,7 @@ class GoPowerGattCallback(
     private fun publishAvailability(online: Boolean) {
         val topic = "$baseTopic/availability"
         mqttPublisher.publishAvailability(topic, online)
-        DebugLog.d(TAG, "Published availability: $online")
+        Log.d(TAG, "Published availability: $online")
     }
     
     private fun publishDiscovery() {
@@ -725,7 +724,7 @@ class GoPowerGattCallback(
         mqttPublisher.publishState("$baseTopic/temperature", state.temperatureC.toString(), true)
         mqttPublisher.publishState("$baseTopic/energy", state.ampHours.toString(), true)  // ampHours field now contains Wh
         
-        DebugLog.d(TAG, "Published state")
+        Log.d(TAG, "Published state")
     }
     
     // ===== COMMAND HANDLING =====
@@ -806,6 +805,7 @@ class GoPowerGattCallback(
         val appVersion = try {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to get app version for discovery: ${e.message}", e)
             "unknown"
         }
         
@@ -894,7 +894,7 @@ class GoPowerGattCallback(
             dataHealthy = dataHealthy
         )
         
-        DebugLog.d(TAG, "Published diagnostic state: connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$deviceSerial, fw=$deviceFirmware")
+        Log.d(TAG, "Published diagnostic state: connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$deviceSerial, fw=$deviceFirmware")
     }    
     /**
      * Start connection watchdog - detects zombie states and stale connections

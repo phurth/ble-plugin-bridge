@@ -513,12 +513,12 @@ class HughesGattCallback(
      * Helper to publish a single sensor discovery
      */
     private fun publishDiscoverySensor(field: String, name: String, unit: String?, deviceClass: String?, deviceInfo: JSONObject, line: Int) {
-        val discoveryTopic = "homeassistant/sensor/${instanceId}_$field/config"
+        val discoveryTopic = "${mqttPublisher.topicPrefix}/sensor/${instanceId}_$field/config"
         
         val payload = JSONObject().apply {
             put("name", name)
             // MqttPublisher adds topic_prefix, so state topics must match what's published
-            put("state_topic", "homeassistant/$baseTopic/${field}")
+            put("state_topic", "${mqttPublisher.topicPrefix}/$baseTopic/${field}")
             if (unit != null) {
                 put("unit_of_measurement", unit)
             }
@@ -528,7 +528,7 @@ class HughesGattCallback(
             }
             put("unique_id", "${instanceId}_$field")
             put("device", deviceInfo)
-            put("availability_topic", "homeassistant/$baseTopic/availability")
+            put("availability_topic", "${mqttPublisher.topicPrefix}/$baseTopic/availability")
         }
         
         mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
@@ -555,5 +555,7 @@ class HughesGattCallback(
         isConnected = false
         chunk1 = null
         mainHandler.removeCallbacksAndMessages(null)
+        // Publish offline status when disconnected
+        publishAvailability(false)
     }
 }

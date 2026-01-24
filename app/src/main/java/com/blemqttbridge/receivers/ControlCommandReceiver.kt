@@ -96,12 +96,13 @@ class ControlCommandReceiver : BroadcastReceiver() {
             "start_service" -> handleStartService(context, intent)
             "stop_service" -> handleStopService(context)
             "restart_service" -> handleRestartService(context, intent)
-            "load_plugin" -> handleLoadPlugin(context, intent)
-            "unload_plugin" -> handleUnloadPlugin(context, intent)
-            "reload_plugin" -> handleReloadPlugin(context, intent)
-            "list_plugins" -> handleListPlugins(context)
-            "service_status" -> handleServiceStatus(context)
-            else -> logResponse("❌ ERROR: Unknown command '$command'")
+            // Legacy plugin commands disabled - BlePluginInterface removed in v2.5.16-pre2
+            //"load_plugin" -> handleLoadPlugin(context, intent)
+            //"unload_plugin" -> handleUnloadPlugin(context, intent)
+            //"reload_plugin" -> handleReloadPlugin(context, intent)
+            //"list_plugins" -> handleListPlugins(context)
+            //"service_status" -> handleServiceStatus(context)
+            else -> logResponse("❌ ERROR: Unknown command '$command' (note: plugin management commands disabled in v2.5.16-pre2)")
         }
     }
     
@@ -161,8 +162,10 @@ class ControlCommandReceiver : BroadcastReceiver() {
         }
     }
     
+    /*
     /**
      * Load a BLE plugin with configuration.
+     * NOTE: Disabled - legacy BlePluginInterface removed in v2.5.16-pre2
      */
     private fun handleLoadPlugin(context: Context, intent: Intent) {
         val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
@@ -190,10 +193,13 @@ class ControlCommandReceiver : BroadcastReceiver() {
             }
         }
     }
+    */
     
     /**
      * Unload a BLE plugin.
+     * NOTE: Disabled - legacy BlePluginInterface removed in v2.5.16-pre2
      */
+    /*
     private fun handleUnloadPlugin(context: Context, intent: Intent) {
         val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
         
@@ -214,10 +220,13 @@ class ControlCommandReceiver : BroadcastReceiver() {
             }
         }
     }
+    */
     
     /**
      * Reload a plugin (unload + load).
+     * NOTE: Disabled - legacy BlePluginInterface removed in v2.5.16-pre2
      */
+    /*
     private fun handleReloadPlugin(context: Context, intent: Intent) {
         val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
         
@@ -253,10 +262,13 @@ class ControlCommandReceiver : BroadcastReceiver() {
             }
         }
     }
+    */
     
     /**
      * List all registered and loaded plugins.
+     * NOTE: Disabled - legacy BlePluginInterface removed in v2.5.16-pre2
      */
+    /*
     private fun handleListPlugins(context: Context) {
         logResponse("📋 Listing plugins")
         
@@ -275,10 +287,13 @@ class ControlCommandReceiver : BroadcastReceiver() {
             }
         }
     }
+    */
     
     /**
      * Report service status.
+     * NOTE: Disabled - legacy BlePluginInterface removed in v2.5.16-pre2
      */
+    /*
     private fun handleServiceStatus(context: Context) {
         logResponse("📊 Service status")
         
@@ -297,6 +312,7 @@ class ControlCommandReceiver : BroadcastReceiver() {
             }
         }
     }
+    */
     
     /**
      * Log a response that can be easily filtered via logcat.

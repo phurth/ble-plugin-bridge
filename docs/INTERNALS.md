@@ -2,8 +2,8 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.11  
-> **Last Updated:** January 17, 2026  
+> **Current Version:** v2.5.16-pre3  
+> **Last Updated:** January 24, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -64,12 +64,19 @@
    - [Authentication Flow](#authentication-flow-1)
    - [Read-After-Write Communication Pattern](#read-after-write-communication-pattern)
    - [Capability Discovery](#capability-discovery-get-config)
-   - [MAV & SPL Arrays](#mav-mode-available-bitmask)
+   - [MAV (Mode Available) Bitmask](#mav-mode-available-bitmask)
+   - [FA (Fan Array) Bitmask & Dynamic Fan Mode Filtering](#fa-fan-array-bitmask--dynamic-fan-mode-filtering)
+   - [SPL (Setpoint Limits) Array](#spl-setpoint-limits-array)
+   - [Furnace Mode Special Handling](#furnace-mode-special-handling)
+   - [Preset Modes Implementation](#preset-modes-implementation)
    - [Write Retry with Delays](#write-retry-with-delays)
+   - [Connection Watchdog & Stale Detection](#connection-watchdog--stale-detection)
+   - [Optimistic State Updates & Status Suppression](#optimistic-state-updates--status-suppression)
    - [JSON Command Format](#json-command-format)
    - [Status Response Format](#status-response-format)
    - [Home Assistant Integration](#home-assistant-integration)
    - [Command Handling](#command-handling-1)
+   - [Mode Switching Performance](#mode-switching-performance)
    - [Key Differences from OneControl](#key-differences-from-onecontrol)
 
 7. [GoPower Solar Controller Protocol](#7-gopower-solar-controller-protocol)
@@ -1989,6 +1996,216 @@ The `SPL` array contains temperature limits: `[minCool, maxCool, minHeat, maxHea
 
 These values are used in Home Assistant discovery for `min_temp` and `max_temp`.
 
+### FA (Fan Array) Bitmask & Dynamic Fan Mode Filtering
+
+The `FA` array provides a bitmask for each HVAC mode indicating what fan control options are available:
+
+```json
+{
+  "CFG": {
+    "Zone": 0,
+    "FA": [16, 34, 194, 0, 226, 226, 0, 226, 210, 0, 34, 34, 210, 226, 0],
+    ...
+  }
+}
+```
+
+Each FA element corresponds to a mode index, where the bitmask indicates:
+
+| Bit | Flag | Meaning |
+|-----|------|---------|
+| 0-3 | max_speed | Maximum fan speed (1=low, 2=medium, 3=high) |
+| 4 | fixed_speed | Fan speed is fixed (cannot change) |
+| 5 | allow_off | Fan can be turned off |
+| 6 | allow_manual_auto | Manual speed selection available |
+| 7 | allow_full_auto | Full auto mode available |
+
+**Example Parsing:**
+```kotlin
+// FA[2] = 0xe2 (226 decimal) = 11100010 binary
+// Bits 0-3: 0010 = 2 (max speed: medium)
+// Bit 4: 0 (not fixed)
+// Bit 5: 0 (no off)
+// Bit 6: 0 (no manual)
+// Bit 7: 1 (full auto allowed)
+// Bit 8: 1 (some other flag)
+// Result: Only "auto" fan mode available
+```
+
+**Dynamic Fan Mode Calculation:**
+```kotlin
+private fun getAvailableFanModesForMode(mode: Int): List<String> {
+    // Furnace modes (binary fan hardware) - only support "auto"
+    if (mode in listOf(3, 4, 13)) {  // HEAT, FURNACE, GAS_HEAT
+        return listOf("auto")
+    }
+    
+    // Other modes: parse FA array for available options
+    val faValue = fa.getOrNull(mode) ?: return listOf("auto", "low", "high")
+    
+    val modes = mutableListOf<String>()
+    
+    // Check for full auto (bit 7)
+    if ((faValue and 0x80) != 0) {
+        modes.add("auto")
+    }
+    
+    // Check for manual speed selection (bit 6)
+    if ((faValue and 0x40) != 0) {
+        val maxSpeed = faValue and 0x0F
+        when (maxSpeed) {
+            1 -> modes.addAll(listOf("low"))
+            2 -> modes.addAll(listOf("low", "high"))
+            3 -> modes.addAll(listOf("low", "high"))
+        }
+    }
+    
+    return if (modes.isEmpty()) listOf("auto") else modes
+}
+```
+
+**File:** `EasyTouchDevicePlugin.kt`, method `getAvailableFanModesForMode()` (line ~985)
+
+### Furnace Mode Special Handling
+
+Micro-Air EasyTouch thermostats distinguish between variable-capacity HVAC systems (heat pump, electric heat) and binary on/off systems (furnace, gas heat).
+
+**Hardware Reality:**
+- **Furnace modes (3, 4, 13):** Binary on/off fan control
+- **Other modes:** Variable speed fan control (low/medium/high/auto)
+
+The FA array is populated from firmware configuration but may incorrectly indicate variable fan for furnace modes. To prevent UX confusion, furnace modes are hardcoded to return only "auto" fan speed:
+
+```kotlin
+private fun getAvailableFanModesForMode(mode: Int): List<String> {
+    // Override furnace modes: hardware is binary, only support "auto"
+    if (mode in listOf(
+        DeviceMode.HEAT,           // 3
+        DeviceMode.FURNACE,        // 4
+        DeviceMode.GAS_HEAT        // 13
+    )) {
+        return listOf("auto")
+    }
+    
+    // All other modes: parse FA array for variable fan support
+    return parseFA(mode)
+}
+```
+
+**Command Publishing for Furnace Modes:**
+When switching to furnace modes, the fan_mode is published as "auto" BEFORE the discovery is republished to prevent validation errors:
+
+```kotlin
+private fun handleModeCommand(zone: Int, modeStr: String) {
+    val modeValue = convertModeStringToValue(modeStr)
+    
+    // For furnace modes, publish fan_mode="auto" BEFORE discovery update
+    if (modeValue in listOf(3, 4, 13)) {
+        mqttPublisher.publishState(
+            "$zoneTopic/state/fan_mode", 
+            "auto", 
+            true  // retain=true
+        )
+    }
+    
+    // Then send mode change command
+    val command = JSONObject().apply {
+        put("Type", "Change")
+        put("Changes", JSONObject().apply {
+            put("zone", zone)
+            put("mode", modeValue)
+        })
+    }
+    writeJsonCommand(command)
+    
+    // Finally republish discovery with updated fan_modes
+    publishDiscovery(zone)
+}
+```
+
+**File:** `EasyTouchDevicePlugin.kt`, methods `getAvailableFanModesForMode()`, `handleModeCommand()`, `publishZoneState()`
+
+### Preset Modes Implementation
+
+EasyTouch supports preset HVAC configurations (Furnace, Heat Pump, Electric Heat, etc.) that provide pre-optimized settings for different heating sources.
+
+**Available Presets:**
+- **0:** Furnace (Gas/Oil heating, binary fan)
+- **1:** Heat Pump (Air source heat pump, variable fan)
+- **2:** Electric Heat (Electric resistance heating, variable fan)
+- **3:** Tankless Water Heater
+- **4:** Propane Furnace
+
+**Preset Default & Visibility:**
+
+1. **Heat Mode:** Always defaults to first available preset (typically Furnace)
+   ```kotlin
+   if (currentMode == DeviceMode.HEAT) {
+       // Default to first available preset
+       val firstPreset = availablePresets.firstOrNull()
+       publishState("$zoneTopic/state/preset_mode", firstPreset ?: "none", true)
+   }
+   ```
+
+2. **Cool/Fan Only/Off Modes:** Publish "none" (no preset applicable)
+   ```kotlin
+   if (currentMode !in listOf(DeviceMode.HEAT, DeviceMode.AUTO)) {
+       publishState("$zoneTopic/state/preset_mode", "none", true)
+   }
+   ```
+
+3. **Discovery:** All presets always included (Home Assistant handles visibility)
+   ```kotlin
+   val discovery = JSONObject().apply {
+       put("preset_modes", JSONArray(allPresets))
+       // HA config will show only relevant presets in UI
+   }
+   ```
+
+**Command Handling:**
+When user selects a preset in Home Assistant, the plugin stores it for future reference:
+
+```kotlin
+override fun handleCommand(topic: String, payload: String): Result<Unit> {
+    when {
+        topic.endsWith("/preset_mode/set") -> {
+            // Validate preset value
+            val presetIndex = payload.toIntOrNull()
+                ?: return Result.failure(Exception("Invalid preset: $payload"))
+            
+            // Store selected preset
+            currentPresetMode = presetIndex
+            
+            // For furnace presets (modes 3, 4, 13), publish fan_mode="auto" first
+            if (presetIndex in listOf(0, 3, 4)) {
+                mqttPublisher.publishState(
+                    "$zoneTopic/state/fan_mode",
+                    "auto",
+                    true
+                )
+            }
+            
+            // Publish optimistic preset update
+            mqttPublisher.publishState(
+                "$zoneTopic/state/preset_mode",
+                payload,
+                true
+            )
+            
+            // Apply preset command to device
+            sendPresetChangeCommand(zone, presetIndex)
+            
+            // Suppress status updates during device processing
+            suppressStatusUpdates(4000)
+            
+            return Result.success(Unit)
+        }
+    }
+}
+```
+
+**File:** `EasyTouchDevicePlugin.kt`, methods `handlePresetModeCommand()`, `publishZoneState()`, `publishDiscovery()`
+
 ### Write Retry with Delays
 
 BLE write operations can fail on first attempt. The plugin implements retry logic with exponential backoff:
@@ -2016,7 +2233,7 @@ private fun writeJsonCommand(json: JSONObject, retryCount: Int = 0) {
 
 This matches the behavior of the HACS integration and significantly improves write reliability.
 
-### Connection Watchdog (v2.4.9+)
+### Connection Watchdog & Stale Detection
 
 The plugin implements a 60-second connection watchdog to detect and recover from zombie states and stale connections.
 
@@ -2070,7 +2287,7 @@ private val watchdogRunnable = object : Runnable {
 
 The `shouldContinue` flag prevents infinite loops when cleanup is triggered.
 
-### Optimistic State Updates (v2.4.9+)
+### Optimistic State Updates & Status Suppression
 
 When a user changes a setpoint in Home Assistant, the plugin immediately publishes the new value to MQTT before sending the command to the device. This provides instant UI feedback and prevents the "bounce-back" issue where stale status data overwrites the command.
 
@@ -2411,6 +2628,106 @@ override fun handleCommand(commandTopic: String, payload: String): Result<Unit> 
 ```
 
 **CRITICAL:** Mode change commands MUST include `"power": 1` or the thermostat won't actually change modes.
+
+### Mode Switching Performance
+
+**Problem:** Original implementation took 8+ seconds for mode changes to appear in Home Assistant UI due to status polling delays and discovery republish timing.
+
+**Solution (v2.5.16-pre3):** Optimized status suppression timeout from 8 seconds to 4 seconds, improving responsiveness to ~4 seconds (comparable to official app).
+
+**Performance Timeline:**
+```
+0ms:  User taps mode in HA
+      └─ Plugin receives command
+      
+0-50ms: Optimistic fan_mode publishing
+        └─ For furnace modes: publish fan_mode="auto" immediately
+        └─ Prevents validation errors during state sync
+        
+50ms: Mode command sent to device
+      
+200-400ms: Device processing (variable, depends on hardware)
+
+~1000ms: Next status poll occurs
+
+~1000-4000ms: Status suppression active
+              └─ Responses received but not published
+              └─ Prevents "bounce-back" from stale discovery
+
+~4000ms: Status suppression ends
+         └─ Next status poll published to MQTT
+         └─ HA UI updates with actual device state
+
+4-5 seconds total: Mode change visible in HA UI
+```
+
+**Implementation Details:**
+
+1. **Furnace Mode Handling:**
+   ```kotlin
+   // publishZoneState() - line ~1186
+   if (newMode in listOf(3, 4, 13)) {  // HEAT, FURNACE, GAS_HEAT
+       // Publish fan_mode="auto" before discovery
+       mqttPublisher.publishState(
+           "$zoneTopic/state/fan_mode", 
+           "auto", 
+           true
+       )
+       // Trigger discovery republish with correct fan_modes
+       publishDiscovery(zone)
+   }
+   ```
+
+2. **Status Suppression Timeout:**
+   ```kotlin
+   // Constants - line ~1502
+   const val STATUS_SUPPRESSION_TIMEOUT_MS = 4000L  // Reduced from 8000L
+   ```
+
+3. **Optimistic Publishing in Mode Command:**
+   ```kotlin
+   // handleModeCommand() - line ~1515
+   private fun handleModeCommand(zone: Int, mode: String) {
+       // Optimistic fan_mode publishing for furnace modes
+       if (mode in listOf("heat", "furnace", "gas_heat")) {
+           mqttPublisher.publishState(
+               "$zoneTopic/state/fan_mode",
+               "auto",
+               true
+           )
+       }
+       
+       // Send device command
+       sendModeChangeCommand(zone, mode)
+       
+       // Suppress polling
+       suppressStatusUpdates(STATUS_SUPPRESSION_TIMEOUT_MS)
+   }
+   ```
+
+4. **Discovery Republish Before Fan Mode Update:**
+   ```kotlin
+   // publishDiscovery() - line ~1470
+   if (mode in furnaceModes) {
+       // Publish fan_mode="auto" BEFORE updating discovery config
+       // This ensures state validators won't reject the fan_mode
+       mqttPublisher.publishState(
+           "$zoneTopic/state/fan_mode",
+           "auto",
+           true
+       )
+   }
+   ```
+
+**Key Insight:** The critical sequence is:
+1. Publish optimistic fan_mode BEFORE changing discovery
+2. Suppress polling during device processing (4 seconds)
+3. Publish discovery with new fan_modes
+4. Allow next status poll to update all state
+
+This prevents Home Assistant state validation errors and gives instant visual feedback to the user.
+
+**File:** `EasyTouchDevicePlugin.kt`, constants and handlers throughout
 
 ### Key Differences from OneControl
 
