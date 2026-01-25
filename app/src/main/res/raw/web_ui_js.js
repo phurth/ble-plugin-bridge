@@ -217,11 +217,19 @@ async function loadInstances() {
                                 <span class="instance-name">${displayName}</span>
                             </div>
                             <div class="instance-actions">
-                                <button class="instance-edit-btn" onclick="showEditInstanceDialog('${instance.instanceId}')" ${serviceRunning ? 'disabled' : ''}>
-                                    Edit
+                                <button class="icon-btn edit-icon-btn" onclick="showEditInstanceDialog('${instance.instanceId}')" ${serviceRunning ? 'disabled' : ''} title="Edit">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                    </svg>
                                 </button>
-                                <button class="instance-remove-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}')" ${serviceRunning ? 'disabled' : ''}>
-                                    Remove
+                                <button class="icon-btn delete-icon-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}')" ${serviceRunning ? 'disabled' : ''} title="Remove">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                                    </svg>
                                 </button>
                             </div>
                         </div>
@@ -358,12 +366,17 @@ function getDragAfterElement(container, y) {
         const box = child.getBoundingClientRect();
         const offset = y - box.top - box.height / 2;
         
-        if (offset < 0 && offset > closest.offset) {
+        // Return the element closest to the cursor position (both above and below)
+        if (closest.offset === null) {
+            return { offset: offset, element: child };
+        }
+        
+        if (Math.abs(offset) < Math.abs(closest.offset)) {
             return { offset: offset, element: child };
         } else {
             return closest;
         }
-    }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }, { offset: null, element: null }).element;
 }
 
 async function showAddInstanceDialog(pluginType = '') {
@@ -798,15 +811,24 @@ function buildEditableField(pluginId, fieldName, label, value, editDisabled, isS
     const fieldId = `${pluginId}_${fieldName}`;
     const displayValue = value || 'None';
     const maskedValue = isSecret && value ? '•'.repeat(value.length) : displayValue;
-    const helper = helperText ? `<div style="font-size: 12px; color: #888; margin-top: 2px;">${helperText}</div>` : '';
+    const helper = helperText ? `<div style="font-size: 12px; color: #888; margin-top: 0; margin-bottom: 0; line-height: 1;">${helperText}</div>` : '';
     
     return `
         <div class="plugin-config-field">
             ${label}: 
             <span id="${fieldId}_display">${maskedValue}</span>
             <input type="text" id="${fieldId}_input" class="config-input" value="${value}" style="display:none;">
-            <button id="${fieldId}_edit" class="edit-btn" ${editDisabled} onclick="editField('${pluginId}', '${fieldName}', ${isSecret})">Edit</button>
-            <button id="${fieldId}_save" class="edit-btn save-btn" style="display:none;" onclick="saveField('${pluginId}', '${fieldName}')">Save</button>
+            <button id="${fieldId}_edit" class="icon-btn config-edit-icon-btn" ${editDisabled} onclick="editField('${pluginId}', '${fieldName}', ${isSecret})" title="Edit">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                </svg>
+            </button>
+            <button id="${fieldId}_save" class="icon-btn config-save-icon-btn" style="display:none;" onclick="saveField('${pluginId}', '${fieldName}')" title="Save">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+            </button>
             ${helper}
         </div>
     `;

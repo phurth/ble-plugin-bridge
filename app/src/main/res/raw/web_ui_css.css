@@ -151,7 +151,7 @@ body {
 .status-row {
     display: flex;
     justify-content: space-between;
-    padding: 10px 0;
+    padding: 2px 0;
     border-bottom: 1px solid var(--border-color);
 }
 
@@ -170,10 +170,12 @@ body {
 }
 
 .mqtt-config-item {
-    padding: 12px;
-    margin-bottom: 10px;
+    padding: 3px 0 3px 8px;
+    margin-bottom: 2px;
     background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 4px;
+    border-left: 4px solid #1976d2;
 }
 
 .mqtt-config-item.mqtt-connected {
@@ -184,11 +186,18 @@ body {
     border-left: 4px solid #f44336;
 }
 
-.plugin-name { font-weight: 600; color: var(--text-primary); margin-bottom: 5px; text-align: left; }
+.plugin-name { 
+    font-weight: 600; 
+    color: var(--text-primary); 
+    margin-bottom: 5px; 
+    text-align: left;
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
 .plugin-status { font-size: 14px; color: var(--text-secondary); text-align: left; }
 .plugin-status-line { margin-bottom: 8px; text-align: left; }
-.plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
-.mqtt-config-field { margin: 4px 0; padding-left: 0; text-align: left; font-size: 14px; color: var(--text-secondary); }
+.plugin-config-field { margin: 0; padding-left: 0; text-align: left; line-height: 1.2; }
+.mqtt-config-field { margin: 0; padding-left: 0; text-align: left; font-size: 14px; color: var(--text-secondary); line-height: 1.2; }
 .plugin-healthy { color: #4caf50; }
 .plugin-unhealthy { color: #f44336; }
 
@@ -336,14 +345,14 @@ button:hover { background: #1565c0; }
 
 .config-input {
     font-family: monospace;
-    padding: 8px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border-light);
     background: var(--bg-input);
     color: var(--text-primary);
     border-radius: 4px;
     font-size: 14px;
     width: 200px;
-    min-height: 40px;
+    min-height: 30px;
 }
 
 @media (max-width: 600px) {
@@ -370,10 +379,14 @@ button:hover { background: #1565c0; }
 
 .plugin-type-section {
     margin-bottom: 20px;
+    transition: all 0.2s ease;
 }
 
 .plugin-type-section.dragging {
-    opacity: 0.5;
+    opacity: 0.6;
+    transform: scale(1.02);
+    box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+    z-index: 100;
 }
 
 .plugin-type-section.drag-over {
@@ -479,18 +492,20 @@ button:hover { background: #1565c0; }
     font-weight: 600;
     font-size: 14px;
     color: var(--text-primary);
+    word-break: break-word;
+    overflow-wrap: break-word;
 }
 
 .instance-actions {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
 }
 
 @media (max-width: 480px) {
     .instance-actions {
-        flex-direction: column;
-        width: 100%;
+        flex-direction: row;
+        gap: 8px;
     }
 }
 
@@ -501,28 +516,89 @@ button:hover { background: #1565c0; }
     cursor: pointer;
     font-size: 12px;
     min-height: 40px;
-    flex: 1;
+    white-space: nowrap;
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    padding: 8px;
+    margin: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    min-height: 40px;
+    min-width: 40px;
+}
+
+.edit-icon-btn {
+    color: #2196f3;
+}
+
+.edit-icon-btn:hover {
+    background: rgba(33, 150, 243, 0.1);
+    color: #1976d2;
+}
+
+.edit-icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    color: #ccc;
+}
+
+.delete-icon-btn {
+    color: #f44336;
+}
+
+.delete-icon-btn:hover {
+    background: rgba(244, 67, 54, 0.1);
+    color: #d32f2f;
+}
+
+.delete-icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    color: #ccc;
+}
+
+.config-edit-icon-btn {
+    color: #1976d2;
+    margin-left: 4px;
+}
+
+.config-edit-icon-btn:hover {
+    background: rgba(25, 118, 210, 0.1);
+}
+
+.config-edit-icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    color: #ccc;
+}
+
+.config-save-icon-btn {
+    color: #4caf50;
+    margin-left: 4px;
+}
+
+.config-save-icon-btn:hover {
+    background: rgba(76, 175, 80, 0.1);
+}
+
+.config-save-icon-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 @media (max-width: 480px) {
     .instance-edit-btn, .instance-remove-btn {
         width: 100%;
+        flex: 1;
     }
 }
-
-.instance-edit-btn {
-    background: #2196f3;
-    color: white;
-}
-
-.instance-edit-btn:hover { background: #1976d2; }
-
-.instance-remove-btn {
-    background: #f44336;
-    color: white;
-}
-
-.instance-remove-btn:hover { background: #d32f2f; }
 
 .instance-edit-btn:disabled, .instance-remove-btn:disabled {
     background: #ccc;

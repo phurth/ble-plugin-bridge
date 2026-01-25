@@ -1547,6 +1547,7 @@ class BaseBleService : Service() {
             val (gatt, _) = deviceInfo
             try {
                 gatt.disconnect()
+                gatt.close()  // Fully release GATT object to clear stack state
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied for disconnect", e)
             }
