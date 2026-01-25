@@ -48,9 +48,21 @@ body {
     background: var(--bg-primary);
     color: var(--text-primary);
     padding: 20px;
+    font-size: 16px;
 }
 
-.container { max-width: 1200px; margin: 0 auto; }
+@media (max-width: 480px) {
+    body {
+        padding: 10px;
+        font-size: 14px;
+    }
+}
+
+.container { 
+    max-width: 1200px; 
+    margin: 0 auto;
+    min-width: 0;
+}
 
 .header {
     background: var(--bg-header);
@@ -63,9 +75,29 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
-.header h1 { font-size: 24px; margin-bottom: 5px; }
+@media (max-width: 600px) {
+    .header {
+        padding: 15px;
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+
+.header h1 { 
+    font-size: 24px; 
+    margin-bottom: 5px;
+}
+
+@media (max-width: 600px) {
+    .header h1 {
+        font-size: 20px;
+    }
+}
+
 .header .version { opacity: 0.8; font-size: 14px; }
 .header .header-content { flex: 1; }
 
@@ -79,6 +111,15 @@ body {
     font-size: 14px;
     white-space: nowrap;
     transition: all 0.2s;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+}
+
+@media (max-width: 600px) {
+    .theme-toggle {
+        align-self: flex-end;
+    }
 }
 
 .theme-toggle:hover {
@@ -91,6 +132,12 @@ body {
     padding: 20px;
     margin-bottom: 20px;
     box-shadow: 0 2px 4px var(--shadow);
+}
+
+@media (max-width: 480px) {
+    .card {
+        padding: 15px;
+    }
 }
 
 .card h2 {
@@ -147,9 +194,11 @@ body {
 
 .toggle-switch {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     width: 50px;
     height: 24px;
+    min-height: 44px;
 }
 
 .toggle-switch input {
@@ -161,13 +210,15 @@ body {
 .toggle-slider {
     position: absolute;
     cursor: pointer;
-    top: 0;
+    top: 50%;
+    transform: translateY(-50%);
     left: 0;
     right: 0;
-    bottom: 0;
     background-color: #ccc;
     transition: .4s;
     border-radius: 24px;
+    height: 24px;
+    width: 50px;
 }
 
 .toggle-slider:before {
@@ -204,9 +255,22 @@ button {
     cursor: pointer;
     font-size: 14px;
     margin-right: 10px;
+    margin-bottom: 8px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 button:hover { background: #1565c0; }
+
+@media (max-width: 600px) {
+    button {
+        padding: 8px 16px;
+        font-size: 13px;
+        margin-right: 8px;
+    }
+}
 
 .log-container {
     background: var(--code-bg);
@@ -219,6 +283,15 @@ button:hover { background: #1565c0; }
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-all;
+    overflow-x: hidden;
+    word-wrap: break-word;
+}
+
+@media (max-width: 480px) {
+    .log-container {
+        max-height: 200px;
+        font-size: 11px;
+    }
 }
 
 .loading { text-align: center; padding: 20px; color: var(--text-secondary); }
@@ -227,11 +300,21 @@ button:hover { background: #1565c0; }
     background: #1976d2;
     color: white;
     border: none;
-    padding: 4px 12px;
+    padding: 8px 12px;
     border-radius: 4px;
     cursor: pointer;
     font-size: 12px;
     margin-left: 8px;
+    min-height: 40px;
+    white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+    .edit-btn {
+        margin-left: 0;
+        margin-top: 8px;
+        width: 100%;
+    }
 }
 
 .edit-btn:hover { background: #1565c0; }
@@ -253,13 +336,21 @@ button:hover { background: #1565c0; }
 
 .config-input {
     font-family: monospace;
-    padding: 4px 8px;
+    padding: 8px 8px;
     border: 1px solid var(--border-light);
     background: var(--bg-input);
     color: var(--text-primary);
     border-radius: 4px;
     font-size: 14px;
     width: 200px;
+    min-height: 40px;
+}
+
+@media (max-width: 600px) {
+    .config-input {
+        width: 100%;
+        max-width: 100%;
+    }
 }
 
 .helper-text {
@@ -300,6 +391,14 @@ button:hover { background: #1565c0; }
     cursor: move;
     user-select: none;
     border: 1px solid var(--border-color);
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+@media (max-width: 480px) {
+    .plugin-type-header {
+        padding: 8px 10px;
+    }
 }
 
 .plugin-type-header:hover {
@@ -310,16 +409,27 @@ button:hover { background: #1565c0; }
     font-weight: 600;
     font-size: 16px;
     color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+@media (max-width: 480px) {
+    .plugin-type-title {
+        font-size: 14px;
+    }
 }
 
 .add-instance-btn {
     background: #4caf50;
     color: white;
     border: none;
-    padding: 6px 12px;
+    padding: 10px 16px;
     border-radius: 4px;
     cursor: pointer;
     font-size: 13px;
+    min-height: 44px;
 }
 
 .add-instance-btn:hover { background: #45a049; }
@@ -341,6 +451,13 @@ button:hover { background: #1565c0; }
     margin-bottom: 8px;
     margin-left: 20px;
     position: relative;
+    word-break: break-word;
+}
+
+@media (max-width: 600px) {
+    .instance-card {
+        margin-left: 8px;
+    }
 }
 
 .instance-card.instance-healthy {
@@ -367,14 +484,30 @@ button:hover { background: #1565c0; }
 .instance-actions {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+    .instance-actions {
+        flex-direction: column;
+        width: 100%;
+    }
 }
 
 .instance-edit-btn, .instance-remove-btn {
-    padding: 4px 8px;
+    padding: 8px 12px;
     border: none;
     border-radius: 3px;
     cursor: pointer;
     font-size: 12px;
+    min-height: 40px;
+    flex: 1;
+}
+
+@media (max-width: 480px) {
+    .instance-edit-btn, .instance-remove-btn {
+        width: 100%;
+    }
 }
 
 .instance-edit-btn {
@@ -459,9 +592,19 @@ button:hover { background: #1565c0; }
     margin: 15% auto;
     padding: 20px;
     border-radius: 8px;
-    width: 80%;
+    width: 90%;
     max-width: 400px;
+    max-height: 90vh;
+    overflow-y: auto;
     box-shadow: 0 4px 6px var(--shadow-strong);
+}
+
+@media (max-width: 480px) {
+    .modal-content {
+        width: 95%;
+        margin: 30% auto;
+        padding: 15px;
+    }
 }
 
 .modal-content h3 {
@@ -482,16 +625,34 @@ button:hover { background: #1565c0; }
 
 .modal-buttons {
     margin-top: 20px;
-    text-align: right;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+    .modal-buttons {
+        flex-direction: column-reverse;
+    }
 }
 
 .modal-btn {
-    padding: 8px 16px;
-    margin-left: 8px;
+    padding: 10px 16px;
+    margin-left: 0;
     border: none;
     border-radius: 4px;
     cursor: pointer;
     font-size: 14px;
+    min-height: 40px;
+    flex: 1;
+    min-width: 80px;
+}
+
+@media (max-width: 480px) {
+    .modal-btn {
+        width: 100%;
+    }
 }
 
 .modal-btn-primary {

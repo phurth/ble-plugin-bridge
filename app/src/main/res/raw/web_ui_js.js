@@ -260,7 +260,10 @@ async function loadInstances() {
 function setupDragAndDrop() {
     const sections = document.querySelectorAll('.plugin-type-section');
     let draggedElement = null;
+    let touchIdentifier = null;
+    let touchStartY = 0;
     
+    // Mouse drag events
     sections.forEach(section => {
         section.addEventListener('dragstart', (e) => {
             draggedElement = section;
@@ -304,6 +307,47 @@ function setupDragAndDrop() {
             e.preventDefault();
             section.classList.remove('drag-over');
         });
+        
+        // Touch drag events for mobile
+        section.addEventListener('touchstart', (e) => {
+            draggedElement = section;
+            touchIdentifier = e.touches[0].identifier;
+            touchStartY = e.touches[0].clientY;
+            section.classList.add('dragging');
+        }, false);
+        
+        section.addEventListener('touchmove', (e) => {
+            if (!draggedElement || draggedElement !== section) return;
+            
+            const touch = Array.from(e.touches).find(t => t.identifier === touchIdentifier);
+            if (!touch) return;
+            
+            e.preventDefault();
+            
+            const container = section.parentNode;
+            const afterElement = getDragAfterElement(container, touch.clientY);
+            
+            if (afterElement == null) {
+                container.appendChild(draggedElement);
+            } else {
+                container.insertBefore(draggedElement, afterElement);
+            }
+        }, false);
+        
+        section.addEventListener('touchend', (e) => {
+            if (draggedElement === section) {
+                section.classList.remove('dragging');
+                sections.forEach(s => s.classList.remove('drag-over'));
+                
+                // Save new order to localStorage
+                const newOrder = Array.from(document.querySelectorAll('.plugin-type-section'))
+                    .map(s => s.dataset.pluginType);
+                localStorage.setItem('pluginOrder', JSON.stringify(newOrder));
+                
+                draggedElement = null;
+                touchIdentifier = null;
+            }
+        }, false);
     });
 }
 
