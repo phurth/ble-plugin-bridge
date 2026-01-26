@@ -28,6 +28,7 @@ let serviceRunning = false;
 let configChanged = {}; // Track which configs have changed
 let editingFields = {}; // Track which fields are currently being edited
 let instanceToRemove = null;
+let instanceToRemoveIsPolling = false;
 
 const PLUGIN_TYPE_NAMES = {
     'onecontrol': 'OneControl',
@@ -35,19 +36,22 @@ const PLUGIN_TYPE_NAMES = {
     'gopower': 'GoPower',
     'hughes_watchdog': 'Hughes Watchdog',
     'mopeka': 'Mopeka',
-    'blescanner': 'BLE Scanner'
+    'blescanner': 'BLE Scanner',
+    'peplink': 'Peplink Router'
 };
 
-const MULTI_INSTANCE_PLUGINS = ['easytouch', 'mopeka']; // Plugins supporting multiple instances
+const MULTI_INSTANCE_PLUGINS = ['easytouch', 'mopeka', 'peplink']; // Plugins supporting multiple instances
 
 // Load status on page load
 window.addEventListener('load', () => {
     loadStatus();
+    loadPollingStatus();
     loadConfig();
     loadInstances();
     // Auto-refresh status every 5 seconds
     setInterval(() => {
         loadStatus();
+        loadPollingStatus();
         // Only refresh instances if not currently editing
         if (Object.keys(editingFields).length === 0) {
             loadInstances();
@@ -84,8 +88,58 @@ async function loadStatus() {
             addInstanceBtn.disabled = serviceRunning;
         }
     } catch (error) {
-        document.getElementById('service-status').innerHTML = 
+        document.getElementById('service-status').innerHTML =
             '<div style="color: #f44336;">Failed to load status</div>';
+    }
+}
+
+async function loadPollingStatus() {
+    try {
+        const response = await fetch('/api/polling/status');
+        const data = await response.json();
+
+        const runningCount = data.runningCount || 0;
+        const totalCount = data.totalCount || 0;
+        const isRunning = data.running || false;
+
+        const html = `
+            <div class="status-row">
+                <span class="status-label">Polling Service:</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" ${isRunning ? 'checked' : ''} onchange="togglePolling(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="status-row" style="margin-top: 10px;">
+                <span class="status-label">Active Instances:</span>
+                <span>${runningCount} / ${totalCount}</span>
+            </div>
+        `;
+        document.getElementById('polling-status').innerHTML = html;
+    } catch (error) {
+        document.getElementById('polling-status').innerHTML =
+            '<div style="color: #f44336;">Failed to load polling status</div>';
+    }
+}
+
+async function togglePolling(enable) {
+    try {
+        const action = enable ? 'start' : 'stop';
+        const response = await fetch(`/api/polling/control/${action}`, {
+            method: 'POST'
+        });
+        const result = await response.json();
+
+        if (result.success) {
+            loadPollingStatus();
+            loadInstances();
+        } else {
+            alert('Failed to ' + action + ' polling: ' + (result.error || 'Unknown error'));
+            loadPollingStatus(); // Revert toggle
+        }
+    } catch (error) {
+        alert('Failed to toggle polling: ' + error.message);
+        loadPollingStatus(); // Revert toggle
     }
 }
 
@@ -120,27 +174,42 @@ async function loadConfig() {
 
 async function loadInstances() {
     try {
-        const [instancesResponse, statusResponse] = await Promise.all([
+        const [instancesResponse, pollingInstancesResponse, statusResponse] = await Promise.all([
             fetch('/api/instances'),
+            fetch('/api/polling/instances'),
             fetch('/api/status')
         ]);
         const instances = await instancesResponse.json();
+        const pollingInstances = await pollingInstancesResponse.json();
         const statusData = await statusResponse.json();
+
+        // Merge regular and polling instances
+        const allInstances = [
+            ...instances,
+            ...pollingInstances.map(p => ({
+                instanceId: p.instanceId,
+                pluginType: p.pluginId,
+                deviceMac: '',  // Polling plugins don't have MAC
+                displayName: p.displayName,
+                config: {},  // Config not exposed for polling plugins
+                isPolling: true
+            }))
+        ];
         
         // Check if service is running
         const serviceRunning = statusData.running || false;
         
         // Get plugin statuses
         const pluginStatuses = {};
-        for (const instance of instances) {
-            const status = statusData.pluginStatuses?.[instance.instanceId] || 
+        for (const instance of allInstances) {
+            const status = statusData.pluginStatuses?.[instance.instanceId] ||
                            statusData.pluginStatuses?.[instance.pluginType] || {};
             pluginStatuses[instance.instanceId] = status;
         }
-        
+
         // Group instances by plugin type
         const grouped = {};
-        for (const instance of instances) {
+        for (const instance of allInstances) {
             if (!grouped[instance.pluginType]) {
                 grouped[instance.pluginType] = [];
             }
@@ -208,8 +277,10 @@ async function loadInstances() {
                     const mediumType = instance.config?.medium_type || 'propane';
                     const tankType = instance.config?.tank_type || '20lb_v';
                     configDetails = `<div class="instance-detail-line">Medium: ${mediumType} | Tank: ${tankType}</div>`;
+                } else if (pluginType === 'peplink') {
+                    configDetails = `<div class="instance-detail-line">Polling plugin (REST API)</div>`;
                 }
-                
+
                 html += `
                     <div class="instance-card ${healthClass}">
                         <div class="instance-header">
@@ -223,7 +294,7 @@ async function loadInstances() {
                                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
                                     </svg>
                                 </button>
-                                <button class="icon-btn delete-icon-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}')" ${serviceRunning ? 'disabled' : ''} title="Remove">
+                                <button class="icon-btn delete-icon-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}', ${instance.isPolling || false})" ${serviceRunning ? 'disabled' : ''} title="Remove">
                                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <polyline points="3 6 5 6 21 6"></polyline>
                                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -440,16 +511,17 @@ async function confirmAddInstance() {
         alert('This plugin type already exists and does not support multiple instances. Please edit the existing instance instead.');
         return;
     }
-    
+
     if (!displayName) {
         alert('Please enter a display name');
         return;
     }
-    if (!deviceMac && pluginType !== 'blescanner') {
+    // Skip MAC validation for non-BLE plugins (blescanner, peplink)
+    if (!deviceMac && pluginType !== 'blescanner' && pluginType !== 'peplink') {
         alert('Please enter a device MAC address');
         return;
     }
-    
+
     // Collect plugin-specific config
     const config = {};
     if (pluginType === 'onecontrol') {
@@ -468,8 +540,55 @@ async function confirmAddInstance() {
         const tankType = document.getElementById('new-tank-type')?.value || '20lb_v';
         config.medium_type = mediumType;
         config.tank_type = tankType;
+    } else if (pluginType === 'peplink') {
+        // Peplink is a polling plugin - collect REST API config
+        let baseUrl = document.getElementById('new-base-url')?.value.trim();
+        const clientId = document.getElementById('new-client-id')?.value.trim();
+        const clientSecret = document.getElementById('new-client-secret')?.value.trim();
+        const pollingInterval = document.getElementById('new-polling-interval')?.value.trim();
+
+        if (!baseUrl || !clientId || !clientSecret) {
+            alert('Please fill in all required Peplink fields (URL, Client ID, Client Secret)');
+            return;
+        }
+
+        // Ensure URL has protocol scheme
+        if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+            baseUrl = 'http://' + baseUrl;
+        }
+
+        config.base_url = baseUrl;
+        config.client_id = clientId;
+        config.client_secret = clientSecret;
+        if (pollingInterval) config.polling_interval = pollingInterval;
+
+        // Use polling plugin API instead of regular instance API
+        try {
+            const response = await fetch('/api/polling/instances/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pluginType: pluginType,
+                    instanceName: displayName.toLowerCase().replace(/\s+/g, '_'),
+                    displayName: displayName,
+                    config: config
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                closeAddInstanceDialog();
+                loadStatus();
+            } else {
+                alert('Failed to add Peplink router: ' + (result.error || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('Error adding Peplink instance:', error);
+            alert('Failed to add Peplink router: ' + error.message);
+        }
+        return;  // Early return for polling plugins
     }
-    
+
     try {
         const response = await fetch('/api/instances/add', {
             method: 'POST',
@@ -538,11 +657,12 @@ async function confirmEditInstance() {
         alert('Please enter a display name');
         return;
     }
-    if (!deviceMac && pluginType !== 'blescanner') {
+    // Skip MAC validation for non-BLE plugins (blescanner, peplink)
+    if (!deviceMac && pluginType !== 'blescanner' && pluginType !== 'peplink') {
         alert('Please enter a device MAC address');
         return;
     }
-    
+
     // Collect plugin-specific config
     const config = {};
     const pinField = document.getElementById('edit-gateway-pin');
@@ -598,23 +718,28 @@ async function confirmEditInstance() {
     }
 }
 
-function showRemoveInstanceDialog(instanceId, displayName) {
+function showRemoveInstanceDialog(instanceId, displayName, isPolling = false) {
     instanceToRemove = instanceId;
-    document.getElementById('remove-message').textContent = 
+    instanceToRemoveIsPolling = isPolling;
+    document.getElementById('remove-message').textContent =
         `Are you sure you want to remove "${displayName}"?`;
     document.getElementById('confirmRemoveModal').style.display = 'block';
 }
 
 function closeRemoveDialog() {
     instanceToRemove = null;
+    instanceToRemoveIsPolling = false;
     document.getElementById('confirmRemoveModal').style.display = 'none';
 }
 
 async function confirmRemove() {
     if (!instanceToRemove) return;
-    
+
     try {
-        const response = await fetch('/api/instances/remove', {
+        // Use different endpoint based on plugin type
+        const endpoint = instanceToRemoveIsPolling ? '/api/polling/instances/remove' : '/api/instances/remove';
+
+        const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ instanceId: instanceToRemove })
@@ -714,6 +839,31 @@ function updatePluginSpecificFields() {
                     </optgroup>
                     <option value="custom">Custom Tank</option>
                 </select>
+            </div>
+        `;
+    } else if (pluginType === 'peplink') {
+        // Peplink is a polling plugin - hide MAC field
+        if (macContainer) {
+            macContainer.style.display = 'none';
+        }
+        container.innerHTML = `
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Router URL: <span style="color: #f44336;">*</span></label>
+                <input type="text" id="new-base-url" placeholder="e.g., http://192.168.1.1" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="margin-top: 4px; font-size: 12px; color: #666;">Router's local IP address or hostname</div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client ID: <span style="color: #f44336;">*</span></label>
+                <input type="text" id="new-client-id" placeholder="OAuth2 Client ID from router" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client Secret: <span style="color: #f44336;">*</span></label>
+                <input type="password" id="new-client-secret" placeholder="OAuth2 Client Secret from router" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Interval (seconds):</label>
+                <input type="number" id="new-polling-interval" value="30" min="5" max="300" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="margin-top: 4px; font-size: 12px; color: #666;">How often to query router status (default: 30s)</div>
             </div>
         `;
     } else {

@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
+import com.blemqttbridge.core.interfaces.PollingDevicePlugin
 import com.blemqttbridge.core.interfaces.PluginConfig
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -37,6 +38,10 @@ class PluginRegistry {
     // Plugin factory map: pluginId -> factory function
     private val blePluginFactories = mutableMapOf<String, () -> BleDevicePlugin>()
     private val outputPluginFactories = mutableMapOf<String, () -> OutputPluginInterface>()
+    private val pollingPluginFactories = mutableMapOf<String, () -> PollingDevicePlugin>()
+
+    // Active polling plugin instances
+    private val pollingPluginInstances = mutableMapOf<String, PollingDevicePlugin>()
     
     /**
      * Register a BLE plugin factory.
@@ -55,7 +60,16 @@ class PluginRegistry {
         outputPluginFactories[pluginId] = factory
         Log.d(TAG, "Registered output plugin: $pluginId")
     }
-    
+
+    /**
+     * Register a polling plugin factory.
+     * Polling plugins use REST APIs instead of BLE for device communication.
+     */
+    fun registerPollingPlugin(pluginId: String, factory: () -> PollingDevicePlugin) {
+        pollingPluginFactories[pluginId] = factory
+        Log.d(TAG, "Registered polling plugin: $pluginId")
+    }
+
     /**
      * Find which plugin can handle a discovered device.
      * Checks loaded plugins first (fast), then factory creates temporary instances.
@@ -414,20 +428,108 @@ class PluginRegistry {
             plugin.destroy()
         }
         pluginInstances.clear()
-        
+
         outputPlugin?.disconnect()
         outputPlugin = null
-        
+
+        // Clear polling plugins
+        for ((instanceId, plugin) in pollingPluginInstances) {
+            Log.i(TAG, "Cleaning up polling plugin instance: $instanceId")
+            plugin.destroy()
+        }
+        pollingPluginInstances.clear()
+
         System.gc()
     }
-    
+
+    // ============================================================================
+    // Polling Plugin Management
+    // ============================================================================
+
+    /**
+     * Create and initialize a polling plugin instance.
+     *
+     * @param pluginType The plugin type (e.g., "peplink")
+     * @param instanceId Unique instance identifier (e.g., "peplink_main")
+     * @param context Android context
+     * @param config Plugin configuration
+     * @return The initialized plugin instance, or null if creation failed
+     */
+    fun createPollingPluginInstance(
+        pluginType: String,
+        instanceId: String,
+        context: Context,
+        config: PluginConfig
+    ): PollingDevicePlugin? {
+        val factory = pollingPluginFactories[pluginType]
+
+        if (factory == null) {
+            Log.e(TAG, "No factory registered for polling plugin type: $pluginType")
+            return null
+        }
+
+        return try {
+            Log.i(TAG, "Creating polling plugin instance: $instanceId (type: $pluginType)")
+            val plugin = factory()
+            plugin.initialize(context, config)
+
+            // Cache the instance
+            pollingPluginInstances[instanceId] = plugin
+
+            Log.i(TAG, "Polling plugin instance created successfully: $instanceId")
+            plugin
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating polling plugin instance $instanceId", e)
+            null
+        }
+    }
+
+    /**
+     * Get a polling plugin instance by ID.
+     *
+     * @param instanceId The instance ID (e.g., "peplink_main")
+     * @return The plugin instance, or null if not found
+     */
+    fun getPollingPluginInstance(instanceId: String): PollingDevicePlugin? {
+        return pollingPluginInstances[instanceId]
+    }
+
+    /**
+     * Get all polling plugin instances.
+     *
+     * @return Map of instanceId -> PollingDevicePlugin
+     */
+    fun getAllPollingPluginInstances(): Map<String, PollingDevicePlugin> {
+        return pollingPluginInstances.toMap()
+    }
+
+    /**
+     * Remove and destroy a polling plugin instance.
+     *
+     * @param instanceId The instance to remove
+     */
+    suspend fun removePollingPluginInstance(instanceId: String) = mutex.withLock {
+        pollingPluginInstances[instanceId]?.let { plugin ->
+            Log.i(TAG, "Removing polling plugin instance: $instanceId")
+            plugin.destroy()
+            pollingPluginInstances.remove(instanceId)
+            Log.i(TAG, "Polling plugin instance removed: $instanceId")
+            System.gc()
+        }
+    }
+
     /**
      * Get list of registered BLE plugin IDs.
      */
     fun getRegisteredBlePlugins(): List<String> = blePluginFactories.keys.toList()
-    
+
     /**
      * Get list of registered output plugin IDs.
      */
     fun getRegisteredOutputPlugins(): List<String> = outputPluginFactories.keys.toList()
+
+    /**
+     * Get list of registered polling plugin IDs.
+     */
+    fun getRegisteredPollingPlugins(): List<String> = pollingPluginFactories.keys.toList()
 }

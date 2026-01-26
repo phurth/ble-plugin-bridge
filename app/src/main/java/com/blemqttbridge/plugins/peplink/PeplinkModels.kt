@@ -251,3 +251,34 @@ data class ApiResponse<T>(
     val isFailure: Boolean
         get() = stat == "fail"
 }
+
+// ===== HARDWARE CONFIGURATION =====
+
+/**
+ * Hardware configuration discovered from Peplink router.
+ * Contains all WAN connections and their capabilities.
+ */
+data class PeplinkHardwareConfig(
+    val wanConnections: Map<Int, WanConnection>
+) {
+    /**
+     * Get all cellular connections.
+     */
+    fun getCellularConnections(): List<Pair<Int, WanConnection>> {
+        return wanConnections.filter { (_, conn) -> conn.type == WanType.CELLULAR }.toList()
+    }
+
+    /**
+     * Get all WiFi WAN connections.
+     */
+    fun getWifiConnections(): List<Pair<Int, WanConnection>> {
+        return wanConnections.filter { (_, conn) -> conn.type == WanType.WIFI }.toList()
+    }
+
+    /**
+     * Get all Ethernet connections.
+     */
+    fun getEthernetConnections(): List<Pair<Int, WanConnection>> {
+        return wanConnections.filter { (_, conn) -> conn.type == WanType.ETHERNET }.toList()
+    }
+}

@@ -184,14 +184,25 @@ class BaseBleService : Service() {
             get() = outputPlugin?.getTopicPrefix() ?: "homeassistant"
         
         override fun publishState(topic: String, payload: String, retained: Boolean) {
+            Log.v(TAG, "📤 publishState called: topic=$topic, outputPlugin=${outputPlugin != null}")
             serviceScope.launch {
-                outputPlugin?.publishState(topic, payload, retained)
+                if (outputPlugin == null) {
+                    Log.w(TAG, "❌ outputPlugin is null, cannot publish state to: $topic")
+                } else {
+                    outputPlugin?.publishState(topic, payload, retained)
+                }
             }
         }
         
         override fun publishDiscovery(topic: String, payload: String) {
+            Log.d(TAG, "📤 publishDiscovery called: topic=$topic, outputPlugin=${outputPlugin != null}")
             serviceScope.launch {
-                outputPlugin?.publishDiscovery(topic, payload)
+                if (outputPlugin == null) {
+                    Log.w(TAG, "❌ outputPlugin is null, cannot publish discovery to: $topic")
+                } else {
+                    Log.d(TAG, "✅ Calling outputPlugin.publishDiscovery for: $topic")
+                    outputPlugin?.publishDiscovery(topic, payload)
+                }
             }
         }
         
@@ -260,7 +271,13 @@ class BaseBleService : Service() {
             appendBleTrace(message)
         }
     }
-    
+
+    /**
+     * Get the MQTT publisher for use by polling plugins.
+     * @return The MqttPublisher instance
+     */
+    fun getMqttPublisher(): MqttPublisher = mqttPublisher
+
     /**
      * Clears the internal GATT cache for a device.
      * This is a hidden Android method that resolves status=133 errors caused by stale cached services.
@@ -645,12 +662,19 @@ class BaseBleService : Service() {
         
         // Phase 4: Load all plugin instances from ServiceStateManager
         val allInstances = ServiceStateManager.getAllInstances(applicationContext)
-        Log.i(TAG, "📦 Found ${allInstances.size} plugin instance(s) to load")
-        
-        if (allInstances.isEmpty()) {
+        val allPollingInstances = ServiceStateManager.getAllPollingInstances(applicationContext)
+        Log.i(TAG, "📦 Found ${allInstances.size} BLE plugin instance(s) and ${allPollingInstances.size} polling plugin instance(s)")
+
+        if (allInstances.isEmpty() && allPollingInstances.isEmpty()) {
             Log.e(TAG, "No plugin instances configured - cannot start service")
             appendServiceLog("ERROR: No plugin instances configured")
             updateNotification("Error: No plugins loaded")
+            return
+        } else if (allInstances.isEmpty()) {
+            // No BLE plugins but polling plugins exist - keep service running for MQTT support
+            Log.i(TAG, "No BLE plugins configured, but polling plugins need MQTT - keeping service running")
+            appendServiceLog("INFO: Service running for polling plugin MQTT support")
+            updateNotification("Running (MQTT only)")
             return
         } else {
             // Load all instances via PluginRegistry
@@ -735,7 +759,10 @@ class BaseBleService : Service() {
                 }
             }
         }
-        
+
+        // Note: Polling plugins (HTTP/REST-based) are managed independently via web UI
+        // They are not auto-started with the BLE service
+
         // Try to reconnect to bonded devices or scan for new ones
         reconnectToBondedDevices()
     }

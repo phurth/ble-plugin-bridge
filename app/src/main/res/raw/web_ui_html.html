@@ -17,8 +17,14 @@
         </div>
 
         <div class="card">
-            <h2>Service Status</h2>
+            <h2>BLE Service Status</h2>
             <div id="service-status" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2>HTTP Polling Plugins</h2>
+            <div class="section-helper">Control HTTP/REST-based plugins (Peplink, etc.) independently from BLE service</div>
+            <div id="polling-status" class="loading">Loading...</div>
         </div>
 
         <div class="card">
@@ -48,6 +54,7 @@
                         <option value="hughes_watchdog" data-multi="false">Hughes Power Watchdog (Surge protector)</option>
                         <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
                         <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
+                        <option value="peplink" data-multi="true" data-polling="true">Peplink Router (REST API monitoring) - Supports multiple</option>
                     </select>
                     <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
                         ⚠️ This plugin type already exists and does not support multiple instances.

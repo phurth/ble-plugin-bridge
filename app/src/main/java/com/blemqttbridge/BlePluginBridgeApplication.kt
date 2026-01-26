@@ -15,6 +15,7 @@ import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
 import com.blemqttbridge.plugins.hughes.HughesWatchdogDevicePlugin
 import com.blemqttbridge.plugins.mopeka.MopekaDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
+import com.blemqttbridge.plugins.peplink.PeplinkPlugin
 import com.blemqttbridge.workers.ServiceWatchdogWorker
 import java.util.concurrent.TimeUnit
 
@@ -75,13 +76,19 @@ class BlePluginBridgeApplication : Application() {
         registry.registerOutputPlugin("mqtt") {
             MqttOutputPlugin(this@BlePluginBridgeApplication)
         }
-        
+
+        // Register polling plugin FACTORIES (REST API-based devices)
+        registry.registerPollingPlugin("peplink") {
+            PeplinkPlugin()
+        }
+
         // NOTE: Plugins are only active when user adds them via UI with a configured MAC address.
         // No plugins are auto-enabled - this prevents connecting to neighbors' devices in RV parks.
         
         Log.i(TAG, "Plugin factory registration complete")
         Log.i(TAG, "  Available BLE plugins: ${registry.getRegisteredBlePlugins().joinToString(", ")}")
         Log.i(TAG, "  Available output plugins: ${registry.getRegisteredOutputPlugins().joinToString(", ")}")
+        Log.i(TAG, "  Available polling plugins: ${registry.getRegisteredPollingPlugins().joinToString(", ")}")
         
         // Schedule service watchdog (runs every 15 minutes to ensure service stays alive)
         scheduleServiceWatchdog()

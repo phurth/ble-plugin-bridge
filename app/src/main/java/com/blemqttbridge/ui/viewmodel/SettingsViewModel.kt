@@ -523,7 +523,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
         }
     }
-    
+
     fun setWebServerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settings.setWebServerEnabled(enabled)

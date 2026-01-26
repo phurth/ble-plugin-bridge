@@ -34,6 +34,9 @@ object ServiceStateManager {
     // Plugin instance keys (v2.6.0+)
     private const val KEY_PLUGIN_INSTANCES = "plugin_instances"
     private const val KEY_MIGRATION_COMPLETE = "migration_complete_v2_6_0"
+
+    // Polling plugin instance keys (v2.6.x+)
+    private const val KEY_POLLING_INSTANCES = "polling_instances"
     
     // Instance cache (v2.5.14+): Debounce repeated getAllInstances() calls
     // The BLE scan loop can call getAllInstances() many times per second (once per scan callback).
@@ -45,6 +48,13 @@ object ServiceStateManager {
     )
     private var instancesCache: InstancesCacheEntry? = null
     private const val CACHE_VALIDITY_MS = 500L  // Invalidate cache after 500ms
+
+    // Polling instance cache (v2.6.x+): Same pattern as BLE instances
+    private data class PollingInstancesCacheEntry(
+        val instances: Map<String, PollingPluginConfig>,
+        val timestamp: Long
+    )
+    private var pollingInstancesCache: PollingInstancesCacheEntry? = null
     
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -52,6 +62,10 @@ object ServiceStateManager {
     
     private fun invalidateInstancesCache() {
         instancesCache = null
+    }
+
+    private fun invalidatePollingInstancesCache() {
+        pollingInstancesCache = null
     }
     
     // ============================================================================
@@ -398,6 +412,119 @@ object ServiceStateManager {
             "mopeka" -> config["sensor_mac"]
             "hughes_watchdog" -> config["watchdog_mac"]
             else -> null
+        }
+    }
+
+    // ============================================================================
+    // Polling Plugin Instances (v2.6.x+)
+    // ============================================================================
+
+    /**
+     * Get all polling plugin instances (REST API-based plugins).
+     * Returns a map of instanceId -> PollingPluginConfig
+     *
+     * PERFORMANCE: Results are cached for 500ms to avoid expensive SharedPreferences JSON parsing.
+     * Cache is invalidated when instances are saved/removed.
+     */
+    fun getAllPollingInstances(context: Context): Map<String, PollingPluginConfig> {
+        // Check if cache is still valid
+        val now = System.currentTimeMillis()
+        pollingInstancesCache?.let { cache ->
+            if (now - cache.timestamp < CACHE_VALIDITY_MS) {
+                return cache.instances  // Return cached result
+            }
+        }
+
+        val prefs = getPrefs(context)
+        val jsonString = prefs.getString(KEY_POLLING_INSTANCES, "") ?: ""
+
+        if (jsonString.isEmpty()) {
+            pollingInstancesCache = PollingInstancesCacheEntry(emptyMap(), now)
+            return emptyMap()
+        }
+
+        val result = try {
+            val json = org.json.JSONObject(jsonString)
+            val instances = mutableMapOf<String, PollingPluginConfig>()
+
+            json.keys().forEach { instanceId ->
+                val instanceJson = json.getString(instanceId)
+                Log.d(TAG, "📖 Loading polling instance $instanceId, JSON: $instanceJson")
+                PollingPluginConfig.fromJson(instanceJson)?.let {
+                    Log.d(TAG, "✅ Loaded polling instance $instanceId with config: ${it.config}")
+                    instances[instanceId] = it
+                }
+            }
+
+            instances
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading polling instances", e)
+            emptyMap()
+        }
+
+        // Cache the result
+        pollingInstancesCache = PollingInstancesCacheEntry(result, now)
+        return result
+    }
+
+    /**
+     * Get polling plugin instances by type.
+     * Example: getPollingInstancesOfType(context, "peplink") returns all Peplink instances
+     */
+    fun getPollingInstancesOfType(context: Context, pluginType: String): List<PollingPluginConfig> {
+        return getAllPollingInstances(context).values
+            .filter { it.pluginType == pluginType }
+    }
+
+    /**
+     * Save a single polling plugin instance.
+     * If instance with same ID exists, it will be updated.
+     */
+    fun savePollingInstance(context: Context, instance: PollingPluginConfig) {
+        val prefs = getPrefs(context)
+        val jsonString = prefs.getString(KEY_POLLING_INSTANCES, "") ?: ""
+
+        val json = if (jsonString.isEmpty()) {
+            org.json.JSONObject()
+        } else {
+            org.json.JSONObject(jsonString)
+        }
+
+        val instanceJson = PollingPluginConfig.toJson(instance)
+        Log.d(TAG, "💾 Saving polling instance ${instance.instanceId}, JSON: $instanceJson")
+        json.put(instance.instanceId, instanceJson)
+
+        prefs.edit()
+            .putString(KEY_POLLING_INSTANCES, json.toString())
+            .apply()
+
+        // Invalidate cache since instances have changed
+        invalidatePollingInstancesCache()
+    }
+
+    /**
+     * Remove a polling plugin instance by ID.
+     */
+    fun removePollingInstance(context: Context, instanceId: String) {
+        val prefs = getPrefs(context)
+        val jsonString = prefs.getString(KEY_POLLING_INSTANCES, "") ?: ""
+
+        if (jsonString.isEmpty()) {
+            return
+        }
+
+        try {
+            val json = org.json.JSONObject(jsonString)
+            json.remove(instanceId)
+
+            prefs.edit()
+                .putString(KEY_POLLING_INSTANCES, json.toString())
+                .apply()
+
+            // Invalidate cache since instances have changed
+            invalidatePollingInstancesCache()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing polling instance", e)
         }
     }
 
