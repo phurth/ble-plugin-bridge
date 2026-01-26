@@ -121,7 +121,6 @@ class BaseBleService : Service() {
     private var alarmManager: AlarmManager? = null
     private var keepAlivePendingIntent: PendingIntent? = null
     
-    private var outputPlugin: OutputPluginInterface? = null
     private var bleScannerPlugin: BleScannerPlugin? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
@@ -176,45 +175,54 @@ class BaseBleService : Service() {
     }
     
     /**
+     * Get MQTT publisher from standalone MqttService.
+     * Returns null if MqttService is not running or not connected.
+     */
+    private fun getMqttPlugin(): MqttOutputPlugin? {
+        return MqttService.getInstance()?.getMqttPublisher()
+    }
+    
+    /**
      * MQTT Publisher implementation for plugins.
-     * Wraps the output plugin to provide a clean interface for BLE plugins.
+     * Wraps MqttService to provide a clean interface for BLE plugins.
      */
     private val mqttPublisher = object : MqttPublisher {
         override val topicPrefix: String
-            get() = outputPlugin?.getTopicPrefix() ?: "homeassistant"
+            get() = getMqttPlugin()?.getTopicPrefix() ?: "homeassistant"
         
         override fun publishState(topic: String, payload: String, retained: Boolean) {
-            Log.v(TAG, "📤 publishState called: topic=$topic, outputPlugin=${outputPlugin != null}")
+            val mqtt = getMqttPlugin()
+            Log.v(TAG, "📤 publishState called: topic=$topic, mqttAvailable=${mqtt != null}")
             serviceScope.launch {
-                if (outputPlugin == null) {
-                    Log.w(TAG, "❌ outputPlugin is null, cannot publish state to: $topic")
+                if (mqtt == null) {
+                    Log.w(TAG, "❌ MQTT service not available, cannot publish state to: $topic")
                 } else {
-                    outputPlugin?.publishState(topic, payload, retained)
+                    mqtt.publishState(topic, payload, retained)
                 }
             }
         }
         
         override fun publishDiscovery(topic: String, payload: String) {
-            Log.d(TAG, "📤 publishDiscovery called: topic=$topic, outputPlugin=${outputPlugin != null}")
+            val mqtt = getMqttPlugin()
+            Log.d(TAG, "📤 publishDiscovery called: topic=$topic, mqttAvailable=${mqtt != null}")
             serviceScope.launch {
-                if (outputPlugin == null) {
-                    Log.w(TAG, "❌ outputPlugin is null, cannot publish discovery to: $topic")
+                if (mqtt == null) {
+                    Log.w(TAG, "❌ MQTT service not available, cannot publish discovery to: $topic")
                 } else {
-                    Log.d(TAG, "✅ Calling outputPlugin.publishDiscovery for: $topic")
-                    outputPlugin?.publishDiscovery(topic, payload)
+                    Log.d(TAG, "✅ Calling MQTT service publishDiscovery for: $topic")
+                    mqtt.publishDiscovery(topic, payload)
                 }
             }
         }
         
         override fun publishAvailability(topic: String, online: Boolean) {
             serviceScope.launch {
-                (outputPlugin as? MqttOutputPlugin)?.publishAvailability(topic, online)
-                    ?: outputPlugin?.publishAvailability(online)
+                getMqttPlugin()?.publishAvailability(topic, online)
             }
         }
         
         override fun isConnected(): Boolean {
-            return outputPlugin?.isConnected() ?: false
+            return getMqttPlugin()?.isConnected() ?: false
         }
         
         @Suppress("OVERRIDE_DEPRECATION")
@@ -260,7 +268,7 @@ class BaseBleService : Service() {
         override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
             serviceScope.launch {
                 try {
-                    outputPlugin?.subscribeToCommands(topicPattern, callback)
+                    getMqttPlugin()?.subscribeToCommands(topicPattern, callback)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to subscribe to commands: $topicPattern", e)
                 }
@@ -399,9 +407,9 @@ class BaseBleService : Service() {
                     }
                     
                     val settings = AppSettings(applicationContext)
-                    val serviceEnabled = settings.serviceEnabled.first()
+                    val bleEnabled = settings.bleEnabled.first()
                     
-                    if (serviceEnabled) {
+                    if (bleEnabled) {
                         synchronized(initializationLock) {
                             if (isInitializing) {
                                 Log.i(TAG, "⚙️ Skipping auto-start - initialization started by another path")
@@ -561,59 +569,25 @@ class BaseBleService : Service() {
         
         serviceScope.launch {
             pluginRegistry.cleanup()
-            outputPlugin?.disconnect()
-            outputPlugin = null
             memoryManager.logMemoryUsage()
         }
     }
     
     /**
      * Initialize plugins.
+     * DEPRECATED: This method is no longer used after Phase 2 refactoring.
+     * MQTT is now handled by MqttService independently.
      */
+    @Deprecated("No longer used - MQTT is owned by MqttService")
     private suspend fun initializePlugins(
         blePluginId: String,
         outputPluginId: String,
         _bleConfig: Map<String, String>,
         outputConfig: Map<String, String>
     ) {
-        Log.i(TAG, "Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
-        appendServiceLog("Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
-        
-        // Load output plugin first (needed for publishing)
-        // Note: Output plugin is optional for testing (MQTT needs broker config)
-        outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
-        if (outputPlugin == null) {
-            Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
-            Log.i(TAG, "Continuing without output plugin for BLE testing")
-            _mqttConnected.value = false
-        } else {
-            // Set up connection status listener BEFORE initialize so we catch connection state changes
-            outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
-                override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
-                    _mqttConnected.value = connected
-                }
-            })
-        }
-        
-        // Load BLE device plugin (new architecture)
-        val devicePlugin = pluginRegistry.getDevicePlugin(blePluginId, applicationContext)
-        if (devicePlugin == null) {
-            Log.e(TAG, "Failed to load BLE plugin: $blePluginId (not found in registry)")
-            appendServiceLog("ERROR: Failed to load BLE plugin: $blePluginId (not found in registry)")
-            updateNotification("Error: BLE plugin failed to load")
-            return
-        } else {
-            Log.i(TAG, "Loaded device plugin: $blePluginId (plugin-owned GATT callback)")
-            appendServiceLog("Loaded BLE plugin: $blePluginId (device plugin)")
-        }
-        
-        Log.i(TAG, "Plugins initialized successfully")
-        memoryManager.logMemoryUsage()
-        
-        // CRITICAL: Try to reconnect to bonded devices first!
-        // Many BLE devices don't actively advertise when bonded - they wait for reconnection
-        reconnectToBondedDevices()
+        // This method has been replaced by initializeMultiplePlugins
+        // which only handles BLE plugins. MQTT is now managed by MqttService.
+        throw UnsupportedOperationException("This method is deprecated and should not be called")
     }
     
     /**
@@ -641,23 +615,13 @@ class BaseBleService : Service() {
             Log.i(TAG, "✓ No migration needed (already using instance format)")
         }
         
-        // Load output plugin first (needed for publishing)
-        outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
-        if (outputPlugin == null) {
-            Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
-            Log.i(TAG, "Continuing without output plugin for BLE testing")
-            appendServiceLog("WARNING: Output plugin $outputPluginId not available")
-            _mqttConnected.value = false
-        } else {
-            appendServiceLog("Loaded output plugin: $outputPluginId")
-            // Set up connection status listener BEFORE initialize so we catch connection state changes
-            outputPlugin?.setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
-                override fun onConnectionStatusChanged(connected: Boolean) {
-                    Log.i(TAG, "✅ MQTT connection status changed: $connected")
-                    _mqttConnected.value = connected
-                }
-            })
-            
+        // Check MQTT availability from MqttService
+        val mqttAvailable = getMqttPlugin() != null
+        Log.i(TAG, "MQTT service ${if (mqttAvailable) "is available" else "is not running"}")
+        _mqttConnected.value = mqttAvailable
+        if (!mqttAvailable) {
+            Log.w(TAG, "⚠️ MQTT service not running - BLE plugins will not publish data")
+            appendServiceLog("WARNING: MQTT service not running")
         }
         
         // Phase 4: Load all plugin instances from ServiceStateManager
@@ -671,10 +635,9 @@ class BaseBleService : Service() {
             updateNotification("Error: No plugins loaded")
             return
         } else if (allInstances.isEmpty()) {
-            // No BLE plugins but polling plugins exist - keep service running for MQTT support
-            Log.i(TAG, "No BLE plugins configured, but polling plugins need MQTT - keeping service running")
-            appendServiceLog("INFO: Service running for polling plugin MQTT support")
-            updateNotification("Running (MQTT only)")
+            // No BLE plugins configured - BLE service has nothing to do
+            Log.i(TAG, "No BLE plugins configured - stopping BLE service")
+            appendServiceLog("INFO: No BLE plugins to manage")
             return
         } else {
             // Load all instances via PluginRegistry
@@ -1400,9 +1363,9 @@ class BaseBleService : Service() {
      */
     private fun subscribeToDeviceCommands(device: BluetoothDevice, pluginId: String, plugin: BleDevicePlugin?) {
         Log.i(TAG, "📡 subscribeToDeviceCommands called for $pluginId, plugin=${plugin != null}")
-        val output = outputPlugin
+        val output = getMqttPlugin()
         if (output == null || plugin == null) {
-            Log.w(TAG, "❌ Cannot subscribe to commands - output=${output != null}, plugin=${plugin != null}")
+            Log.w(TAG, "❌ Cannot subscribe to commands - mqtt=${output != null}, plugin=${plugin != null}")
             return
         }
         
@@ -1627,9 +1590,9 @@ class BaseBleService : Service() {
      * This removes the entities from HA when a plugin is removed.
      */
     private suspend fun clearPluginDiscovery(pluginId: String) {
-        val mqtt = outputPlugin as? MqttOutputPlugin
+        val mqtt = getMqttPlugin()
         if (mqtt == null) {
-            Log.w(TAG, "Cannot clear discovery - MQTT plugin not available")
+            Log.w(TAG, "Cannot clear discovery - MQTT not available")
             return
         }
         
@@ -1910,7 +1873,7 @@ class BaseBleService : Service() {
                 out.appendLine("")
                 
                 out.appendLine("Active Plugins:")
-                outputPlugin?.let { out.appendLine("  Output: ${it.javaClass.simpleName}") }
+                getMqttPlugin()?.let { out.appendLine("  MQTT: ${it.javaClass.simpleName}") }
                 out.appendLine("")
                 
                 out.appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
@@ -1964,7 +1927,7 @@ class BaseBleService : Service() {
             appendLine("")
             
             appendLine("Active Plugins:")
-            outputPlugin?.let { appendLine("  Output: ${it.javaClass.simpleName}") }
+            getMqttPlugin()?.let { appendLine("  MQTT: ${it.javaClass.simpleName}") }
             appendLine("")
             
             appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
@@ -2003,36 +1966,36 @@ class BaseBleService : Service() {
     
     /**
      * Disconnect MQTT (for web interface control).
+     * TODO: DEPRECATED - MQTT is now owned by MqttService. This method is kept temporarily
+     * for compatibility until Phase 3 updates WebServerManager.
      */
+    @Deprecated("Use MqttService.getInstance()?.disconnectMqtt() instead")
     suspend fun disconnectMqtt() {
-        Log.i(TAG, "MQTT disconnect requested")
-        // Force UI state to reflect disconnect immediately, even if the plugin
-        // never notifies (observed when toggling MQTT via web UI)
-        _mqttConnected.value = false
-        appendServiceLog("MQTT connection status: disconnected (manual disconnect)")
-        outputPlugin?.disconnect()
+        Log.w(TAG, "BaseBleService.disconnectMqtt() is deprecated - use MqttService instead")
+        // Delegate to MqttService
+        val mqttService = MqttService.getInstance()
+        if (mqttService != null) {
+            // Stop MqttService to disconnect
+            val intent = Intent(this, MqttService::class.java)
+            stopService(intent)
+        }
     }
     
     /**
      * Reconnect MQTT (for web interface control).
+     * TODO: DEPRECATED - MQTT is now owned by MqttService. This method is kept temporarily
+     * for compatibility until Phase 3 updates WebServerManager.
      */
+    @Deprecated("Use MqttService - stop and restart the service to reconnect")
     suspend fun reconnectMqtt() {
-        Log.i(TAG, "MQTT reconnect requested")
-        val currentPlugin = outputPlugin
-        if (currentPlugin != null) {
-            // Disconnect first
-            currentPlugin.disconnect()
-            // Small delay
-            kotlinx.coroutines.delay(GATT_SETTLE_DELAY_MS)
-            // Re-initialize with same config
-            val settings = AppSettings(applicationContext)
-            val config = mapOf(
-                "broker_url" to "tcp://${settings.mqttBrokerHost.first()}:${settings.mqttBrokerPort.first()}",
-                "username" to settings.mqttUsername.first(),
-                "password" to settings.mqttPassword.first(),
-                "topic_prefix" to settings.mqttTopicPrefix.first()
-            )
-            currentPlugin.initialize(config)
+        Log.w(TAG, "BaseBleService.reconnectMqtt() is deprecated - use MqttService instead")
+        // Delegate to MqttService by restarting it
+        val mqttService = MqttService.getInstance()
+        if (mqttService != null) {
+            val intent = Intent(this, MqttService::class.java)
+            stopService(intent)
+            kotlinx.coroutines.delay(500)
+            startService(intent)
         }
     }
     
