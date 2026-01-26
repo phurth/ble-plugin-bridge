@@ -65,15 +65,20 @@ class WebServerService : Service() {
         try {
             val settings = AppSettings(applicationContext)
             val port = settings.webServerPort.first()
-            
-            // Get BLE service instance if running (optional)
-            val bleService = BaseBleService.getInstance()
-            
-            webServer = WebServerManager(applicationContext, bleService, port)
+
+            // WebServerManager will get BLE service instance dynamically when needed
+            webServer = WebServerManager(applicationContext, port)
             webServer?.startServer()
-            
+
             Log.i(TAG, "Web server started on port $port")
             updateNotification("Web UI running on port $port")
+
+            // Auto-start polling if it was enabled
+            val pollingEnabled = settings.pollingEnabled.first()
+            if (pollingEnabled) {
+                Log.i(TAG, "Auto-starting polling service (was enabled)")
+                webServer?.autoStartPolling()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start web server", e)
             stopSelf()

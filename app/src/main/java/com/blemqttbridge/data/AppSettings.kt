@@ -25,6 +25,7 @@ class AppSettings(private val context: Context) {
         
         // Service Settings
         val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
+        val POLLING_ENABLED = booleanPreferencesKey("polling_enabled")
         
         // OneControl Plugin Settings
         val ONECONTROL_ENABLED = booleanPreferencesKey("onecontrol_enabled")
@@ -78,6 +79,7 @@ class AppSettings(private val context: Context) {
     
     // Service Settings Flows
     val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { it[SERVICE_ENABLED] ?: false }
+    val pollingEnabled: Flow<Boolean> = context.dataStore.data.map { it[POLLING_ENABLED] ?: false }
     
     // OneControl Plugin Flows
     val oneControlEnabled: Flow<Boolean> = context.dataStore.data.map { it[ONECONTROL_ENABLED] ?: false }
@@ -137,6 +139,10 @@ class AppSettings(private val context: Context) {
     
     suspend fun setServiceEnabled(enabled: Boolean) {
         context.dataStore.edit { it[SERVICE_ENABLED] = enabled }
+    }
+
+    suspend fun setPollingEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[POLLING_ENABLED] = enabled }
     }
     
     suspend fun setOneControlEnabled(enabled: Boolean) {

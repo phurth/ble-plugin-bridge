@@ -7,7 +7,10 @@ import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.ConfigBackupManager
 import com.blemqttbridge.core.PluginInstance
+import com.blemqttbridge.core.PluginRegistry
+import com.blemqttbridge.core.PollingPluginConfig
 import com.blemqttbridge.core.ServiceStateManager
+import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.util.ConfigValidator
 import fi.iki.elonen.NanoHTTPD
@@ -25,9 +28,11 @@ import java.security.MessageDigest
  */
 class WebServerManager(
     private val context: Context,
-    private val service: BaseBleService?,
     private val port: Int = 8088
 ) : NanoHTTPD(port) {
+
+    // Get service dynamically instead of storing reference
+    private fun getService(): BaseBleService? = BaseBleService.getInstance()
 
     companion object {
         private const val TAG = "WebServerManager"
@@ -129,6 +134,14 @@ class WebServerManager(
                 uri == "/api/plugins/remove" && method == Method.POST -> handlePluginRemove(session)
                 uri == "/api/config/export" && method == Method.GET -> handleConfigExport()
                 uri == "/api/config/import" && method == Method.POST -> handleConfigImport(session)
+                uri == "/api/polling/instances" && method == Method.GET -> servePollingInstances()
+                uri == "/api/polling/instances/add" && method == Method.POST -> handlePollingInstanceAdd(session)
+                uri == "/api/polling/instances/remove" && method == Method.POST -> handlePollingInstanceRemove(session)
+                uri == "/api/polling/instances/start" && method == Method.POST -> handlePollingInstanceStart(session)
+                uri == "/api/polling/instances/stop" && method == Method.POST -> handlePollingInstanceStop(session)
+                uri == "/api/polling/status" && method == Method.GET -> servePollingStatus()
+                uri == "/api/polling/control/start" && method == Method.POST -> handlePollingControlStart()
+                uri == "/api/polling/control/stop" && method == Method.POST -> handlePollingControlStop()
                 uri.startsWith("/api/") -> newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "application/json",
@@ -283,7 +296,7 @@ class WebServerManager(
             put("running", BaseBleService.serviceRunning.value)
             put("mqttEnabled", mqttEnabled) // Setting, not connection status
             put("mqttConnected", BaseBleService.mqttConnected.value) // Actual connection status
-            put("bleTraceActive", service?.isBleTraceActive() ?: false)
+            put("bleTraceActive", getService()?.isBleTraceActive() ?: false)
             
             // Include plugin statuses for the UI
             val statuses = BaseBleService.pluginStatuses.value
@@ -426,7 +439,7 @@ class WebServerManager(
     }
 
     private fun serveDebugLog(): Response {
-        val logText = service?.exportDebugLogToString() ?: "Service not running"
+        val logText = getService()?.exportDebugLogToString() ?: "Service not running"
         return newFixedLengthResponse(
             Response.Status.OK,
             "text/plain; charset=utf-8",
@@ -435,7 +448,7 @@ class WebServerManager(
     }
 
     private fun serveBleTrace(): Response {
-        val traceText = service?.exportBleTraceToString() ?: "Service not running"
+        val traceText = getService()?.exportBleTraceToString() ?: "Service not running"
         return newFixedLengthResponse(
             Response.Status.OK,
             "text/plain; charset=utf-8",
@@ -511,7 +524,7 @@ class WebServerManager(
             val json = JSONObject(body)
             val enable = json.getBoolean("enable")
             
-            if (service == null) {
+            if (getService() == null) {
                 return newFixedLengthResponse(
                     Response.Status.SERVICE_UNAVAILABLE,
                     "application/json",
@@ -549,7 +562,7 @@ class WebServerManager(
             } else {
                 // Just disconnect MQTT without restarting service
                 runBlocking {
-                    service.disconnectMqtt()
+                    getService()?.disconnectMqtt()
                     Log.i(TAG, "MQTT disconnect requested via web interface")
                 }
             }
@@ -1190,6 +1203,515 @@ class WebServerManager(
             Log.i(TAG, "Web server stopped")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping web server", e)
+        }
+    }
+
+    // ============================================================================
+    // Polling Plugin Management (Peplink, etc.)
+    // ============================================================================
+
+    /**
+     * Serve all polling plugin instances as JSON.
+     * Loads from persistence (SharedPreferences) to include instances even when service is stopped.
+     */
+    private fun servePollingInstances(): Response {
+        return try {
+            val persistedInstances = ServiceStateManager.getAllPollingInstances(context)
+            val registry = PluginRegistry.getInstance()
+            val jsonArray = JSONArray()
+
+            for ((instanceId, config) in persistedInstances) {
+                // Check if instance is running in memory
+                val runningPlugin = registry.getPollingPluginInstance(instanceId)
+
+                val instanceJson = JSONObject().apply {
+                    put("instanceId", instanceId)
+                    put("pluginId", config.pluginType)
+                    put("displayName", config.displayName)
+
+                    // If running, get live data; otherwise use config values
+                    if (runningPlugin != null) {
+                        put("baseTopic", runningPlugin.getMqttBaseTopic())
+                        put("pollingInterval", runningPlugin.getPollingInterval())
+                        put("running", true)
+                    } else {
+                        put("baseTopic", "homeassistant")  // Default
+                        put("pollingInterval", config.config["polling_interval"]?.toLongOrNull()?.times(1000) ?: 30000)
+                        put("running", false)
+                    }
+                }
+                jsonArray.put(instanceJson)
+            }
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", jsonArray.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error serving polling instances", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Add a new polling plugin instance (e.g., Peplink router).
+     */
+    private fun handlePollingInstanceAdd(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val pluginType = jsonObject.getString("pluginType")
+            val instanceName = jsonObject.optString("instanceName", "main")
+            val displayName = jsonObject.optString("displayName", instanceName)
+            val config = jsonObject.optJSONObject("config")?.let {
+                val map = mutableMapOf<String, String>()
+                it.keys().forEach { key -> map[key] = it.getString(key) }
+                map
+            } ?: mutableMapOf()
+
+            // Add instance_name to config
+            config["instance_name"] = instanceName
+
+            // Create plugin instance
+            val registry = PluginRegistry.getInstance()
+            val instanceId = "${pluginType}_$instanceName"
+
+            val pluginInstance = registry.createPollingPluginInstance(
+                pluginType = pluginType,
+                instanceId = instanceId,
+                context = context,
+                config = PluginConfig(config)
+            )
+
+            if (pluginInstance == null) {
+                return newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "application/json",
+                    """{"success":false,"error":"Failed to create plugin instance"}"""
+                )
+            }
+
+            // Persist the instance configuration
+            val pollingConfig = PollingPluginConfig(
+                instanceId = instanceId,
+                pluginType = pluginType,
+                displayName = displayName,
+                config = config
+            )
+            ServiceStateManager.savePollingInstance(context, pollingConfig)
+
+            // Start polling if MQTT is available
+            getService()?.let { bleService ->
+                runBlocking {
+                    pluginInstance.startPolling(bleService.getMqttPublisher())
+                }
+            }
+
+            Log.i(TAG, "Polling plugin instance added and persisted: $instanceId")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true,"instanceId":"$instanceId"}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding polling plugin instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Remove a polling plugin instance.
+     */
+    private fun handlePollingInstanceRemove(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+
+            // Stop and remove instance
+            val registry = PluginRegistry.getInstance()
+            val plugin = registry.getPollingPluginInstance(instanceId)
+
+            if (plugin != null) {
+                runBlocking {
+                    plugin.stopPolling()
+                }
+            }
+
+            runBlocking {
+                registry.removePollingPluginInstance(instanceId)
+            }
+
+            // Remove from persistence
+            ServiceStateManager.removePollingInstance(context, instanceId)
+
+            Log.i(TAG, "Polling plugin instance removed and deleted from persistence: $instanceId")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing polling plugin instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Start polling for an instance.
+     */
+    private fun handlePollingInstanceStart(session: IHTTPSession): Response {
+        return try {
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+
+            val registry = PluginRegistry.getInstance()
+            val plugin = registry.getPollingPluginInstance(instanceId)
+
+            if (plugin == null) {
+                return newFixedLengthResponse(
+                    Response.Status.NOT_FOUND,
+                    "application/json",
+                    """{"success":false,"error":"Instance not found"}"""
+                )
+            }
+
+            // Start polling
+            getService()?.let { bleService ->
+                runBlocking {
+                    plugin.startPolling(bleService.getMqttPublisher())
+                }
+            } ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"Service not available"}"""
+            )
+
+            Log.i(TAG, "Polling started for instance: $instanceId")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting polling instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Stop polling for an instance.
+     */
+    private fun handlePollingInstanceStop(session: IHTTPSession): Response {
+        return try {
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+
+            val registry = PluginRegistry.getInstance()
+            val plugin = registry.getPollingPluginInstance(instanceId)
+
+            if (plugin == null) {
+                return newFixedLengthResponse(
+                    Response.Status.NOT_FOUND,
+                    "application/json",
+                    """{"success":false,"error":"Instance not found"}"""
+                )
+            }
+
+            // Stop polling
+            runBlocking {
+                plugin.stopPolling()
+            }
+
+            Log.i(TAG, "Polling stopped for instance: $instanceId")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping polling instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    // ============================================================================
+    // Polling Plugin Control (Independent from BLE Service)
+    // ============================================================================
+
+    /**
+     * Serve polling plugin status (running/stopped, counts).
+     */
+    private fun servePollingStatus(): Response {
+        return try {
+            val registry = PluginRegistry.getInstance()
+            val allInstances = ServiceStateManager.getAllPollingInstances(context)
+            val runningInstances = registry.getAllPollingPluginInstances()
+            val isEnabled = runBlocking { appSettings.pollingEnabled.first() }
+
+            val json = JSONObject().apply {
+                put("running", runningInstances.isNotEmpty() || isEnabled)
+                put("runningCount", runningInstances.size)
+                put("totalCount", allInstances.size)
+            }
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error serving polling status", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Start all polling plugin instances.
+     * Loads instances from SharedPreferences, creates them, and starts polling.
+     */
+    private fun handlePollingControlStart(): Response {
+        return try {
+            val registry = PluginRegistry.getInstance()
+            val allPollingInstances = ServiceStateManager.getAllPollingInstances(context)
+
+            if (allPollingInstances.isEmpty()) {
+                return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    """{"success":true,"message":"No polling instances configured","started":0}"""
+                )
+            }
+
+            // Check if MQTT service is available
+            val mqttPublisher = getService()?.getMqttPublisher() ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"MQTT service not available"}"""
+            )
+
+            var successCount = 0
+            val errors = mutableListOf<String>()
+
+            for ((instanceId, pollingConfig) in allPollingInstances) {
+                try {
+                    // Create plugin instance if not already created
+                    var plugin = registry.getPollingPluginInstance(instanceId)
+                    if (plugin == null) {
+                        plugin = registry.createPollingPluginInstance(
+                            pluginType = pollingConfig.pluginType,
+                            instanceId = instanceId,
+                            context = context,
+                            config = PluginConfig(pollingConfig.config)
+                        )
+                    }
+
+                    if (plugin != null) {
+                        // Start polling
+                        val result = runBlocking {
+                            plugin.startPolling(mqttPublisher)
+                        }
+
+                        if (result.isSuccess) {
+                            successCount++
+                            Log.i(TAG, "Started polling for: $instanceId")
+                        } else {
+                            val errorMsg = "$instanceId: ${result.exceptionOrNull()?.message}"
+                            errors.add(errorMsg)
+                            Log.w(TAG, "Failed to start polling for $instanceId: ${result.exceptionOrNull()?.message}")
+                        }
+                    } else {
+                        errors.add("$instanceId: Failed to create plugin instance")
+                    }
+                } catch (e: Exception) {
+                    errors.add("$instanceId: ${e.message}")
+                    Log.e(TAG, "Exception starting polling for $instanceId", e)
+                }
+            }
+
+            // Save polling state if any plugins started successfully
+            if (successCount > 0) {
+                runBlocking {
+                    appSettings.setPollingEnabled(true)
+                }
+            }
+
+            val response = JSONObject().apply {
+                put("success", successCount > 0)
+                put("started", successCount)
+                put("total", allPollingInstances.size)
+                if (errors.isNotEmpty()) {
+                    put("errors", JSONArray(errors))
+                }
+            }
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting polling control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Auto-start polling on app startup if it was previously enabled.
+     * Called from WebServerService after server starts.
+     */
+    fun autoStartPolling() {
+        try {
+            val registry = PluginRegistry.getInstance()
+            val allPollingInstances = ServiceStateManager.getAllPollingInstances(context)
+
+            if (allPollingInstances.isEmpty()) {
+                Log.i(TAG, "No polling instances configured for auto-start")
+                return
+            }
+
+            // Check if MQTT service is available
+            val mqttPublisher = getService()?.getMqttPublisher()
+            if (mqttPublisher == null) {
+                Log.w(TAG, "MQTT service not available for polling auto-start, will retry later")
+                return
+            }
+
+            Log.i(TAG, "Auto-starting ${allPollingInstances.size} polling instances...")
+
+            for ((instanceId, pollingConfig) in allPollingInstances) {
+                try {
+                    // Create plugin instance if not already created
+                    var plugin = registry.getPollingPluginInstance(instanceId)
+                    if (plugin == null) {
+                        plugin = registry.createPollingPluginInstance(
+                            pluginType = pollingConfig.pluginType,
+                            instanceId = instanceId,
+                            context = context,
+                            config = PluginConfig(pollingConfig.config)
+                        )
+                    }
+
+                    if (plugin != null) {
+                        // Start polling
+                        runBlocking {
+                            val result = plugin.startPolling(mqttPublisher)
+                            if (result.isSuccess) {
+                                Log.i(TAG, "Auto-started polling for: $instanceId")
+                            } else {
+                                Log.w(TAG, "Failed to auto-start polling for $instanceId: ${result.exceptionOrNull()?.message}")
+                            }
+                        }
+                    } else {
+                        Log.w(TAG, "Failed to create plugin instance for auto-start: $instanceId")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exception auto-starting polling for $instanceId", e)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in autoStartPolling", e)
+        }
+    }
+
+    /**
+     * Stop all polling plugin instances.
+     */
+    private fun handlePollingControlStop(): Response {
+        return try {
+            val registry = PluginRegistry.getInstance()
+            val runningInstances = registry.getAllPollingPluginInstances()
+
+            if (runningInstances.isEmpty()) {
+                return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    """{"success":true,"message":"No polling instances running","stopped":0}"""
+                )
+            }
+
+            var successCount = 0
+            for ((instanceId, plugin) in runningInstances) {
+                try {
+                    runBlocking {
+                        plugin.stopPolling()
+                        // Remove from registry
+                        registry.removePollingPluginInstance(instanceId)
+                    }
+                    successCount++
+                    Log.i(TAG, "Stopped polling for: $instanceId")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping polling for $instanceId", e)
+                }
+            }
+
+            // Save polling state
+            runBlocking {
+                appSettings.setPollingEnabled(false)
+            }
+
+            val response = JSONObject().apply {
+                put("success", true)
+                put("stopped", successCount)
+            }
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", response.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping polling control", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
         }
     }
 
