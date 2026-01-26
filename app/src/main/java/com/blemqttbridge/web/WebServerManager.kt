@@ -6,6 +6,7 @@ import android.util.Log
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.ConfigBackupManager
+import com.blemqttbridge.core.MqttService
 import com.blemqttbridge.core.PluginInstance
 import com.blemqttbridge.core.PluginRegistry
 import com.blemqttbridge.core.PollingPluginConfig
@@ -33,6 +34,9 @@ class WebServerManager(
 
     // Get service dynamically instead of storing reference
     private fun getService(): BaseBleService? = BaseBleService.getInstance()
+    
+    // Get MQTT service dynamically
+    private fun getMqttService(): MqttService? = MqttService.getInstance()
 
     companion object {
         private const val TAG = "WebServerManager"
@@ -470,10 +474,10 @@ class WebServerManager(
             val json = JSONObject(body)
             val enable = json.getBoolean("enable")
             
-            // Update AppSettings first (like Android app does) so both UIs stay in sync
+            // Update AppSettings for BLE service
             runBlocking {
                 val settings = AppSettings(context)
-                settings.setServiceEnabled(enable)
+                settings.setBleEnabled(enable)
             }
             
             if (enable) {
@@ -524,47 +528,25 @@ class WebServerManager(
             val json = JSONObject(body)
             val enable = json.getBoolean("enable")
             
-            if (getService() == null) {
-                return newFixedLengthResponse(
-                    Response.Status.SERVICE_UNAVAILABLE,
-                    "application/json",
-                    """{"success":false,"error":"BLE service not running"}"""
-                )
-            }
-            
-            // Update AppSettings first (like Android app does) so both UIs stay in sync
+            // Update AppSettings for MQTT service
             runBlocking {
                 val settings = AppSettings(context)
                 settings.setMqttEnabled(enable)
             }
             
             if (enable) {
-                // Restart service to properly initialize MQTT (like Android app does)
+                // Start MqttService directly (no BLE service restart needed)
+                val intent = android.content.Intent(context, MqttService::class.java)
+                context.startForegroundService(intent)
+                Log.i(TAG, "MQTT service start requested via web interface")
+            } else {
+                // Stop MqttService directly
                 Thread {
                     Thread.sleep(100) // Small delay to send response first
-                    
-                    // Stop service
-                    val stopIntent = android.content.Intent(context, BaseBleService::class.java).apply {
-                        action = BaseBleService.ACTION_STOP_SERVICE
-                    }
-                    context.startService(stopIntent)
-                    
-                    // Wait for service to stop
-                    Thread.sleep(SERVICE_RESTART_DELAY_MS)
-                    
-                    // Start service with MQTT enabled
-                    val startIntent = android.content.Intent(context, BaseBleService::class.java).apply {
-                        action = BaseBleService.ACTION_START_SCAN
-                    }
-                    context.startForegroundService(startIntent)
-                    Log.i(TAG, "Service restart requested via web interface for MQTT enable")
+                    val intent = android.content.Intent(context, MqttService::class.java)
+                    context.stopService(intent)
+                    Log.i(TAG, "MQTT service stop requested via web interface")
                 }.start()
-            } else {
-                // Just disconnect MQTT without restarting service
-                runBlocking {
-                    getService()?.disconnectMqtt()
-                    Log.i(TAG, "MQTT disconnect requested via web interface")
-                }
             }
             
             newFixedLengthResponse(
@@ -1533,7 +1515,7 @@ class WebServerManager(
             }
 
             // Check if MQTT service is available
-            val mqttPublisher = getService()?.getMqttPublisher() ?: return newFixedLengthResponse(
+            val mqttPublisher = getMqttService()?.getMqttPublisher() ?: return newFixedLengthResponse(
                 Response.Status.BAD_REQUEST,
                 "application/json",
                 """{"success":false,"error":"MQTT service not available"}"""
