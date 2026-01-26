@@ -75,6 +75,13 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- MQTT Service -->
+        <service
+            android:name=".core.MqttService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <!-- Web Server Service -->
         <service
             android:name=".web.WebServerService"

@@ -24,7 +24,8 @@ class AppSettings(private val context: Context) {
         val MQTT_TOPIC_PREFIX = stringPreferencesKey("mqtt_topic_prefix")
         
         // Service Settings
-        val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")
+        val BLE_ENABLED = booleanPreferencesKey("ble_enabled")
+        val SERVICE_ENABLED = booleanPreferencesKey("service_enabled")  // Legacy, mapped to BLE_ENABLED
         val POLLING_ENABLED = booleanPreferencesKey("polling_enabled")
         
         // OneControl Plugin Settings
@@ -73,12 +74,21 @@ class AppSettings(private val context: Context) {
     val mqttEnabled: Flow<Boolean> = context.dataStore.data.map { it[MQTT_ENABLED] ?: false }
     val mqttBrokerHost: Flow<String> = context.dataStore.data.map { it[MQTT_BROKER_HOST] ?: DEFAULT_MQTT_HOST }
     val mqttBrokerPort: Flow<Int> = context.dataStore.data.map { it[MQTT_BROKER_PORT] ?: DEFAULT_MQTT_PORT }
+    val mqttBrokerUrl: Flow<String> = context.dataStore.data.map { 
+        val host = it[MQTT_BROKER_HOST] ?: DEFAULT_MQTT_HOST
+        val port = it[MQTT_BROKER_PORT] ?: DEFAULT_MQTT_PORT
+        if (host.isNotEmpty()) "tcp://$host:$port" else ""
+    }
+    val mqttClientId: Flow<String> = context.dataStore.data.map { 
+        "ble_mqtt_bridge_${android.os.Build.MODEL.replace(" ", "_")}"
+    }
     val mqttUsername: Flow<String> = context.dataStore.data.map { it[MQTT_USERNAME] ?: DEFAULT_MQTT_USERNAME }
     val mqttPassword: Flow<String> = context.dataStore.data.map { it[MQTT_PASSWORD] ?: DEFAULT_MQTT_PASSWORD }
     val mqttTopicPrefix: Flow<String> = context.dataStore.data.map { it[MQTT_TOPIC_PREFIX] ?: DEFAULT_TOPIC_PREFIX }
     
     // Service Settings Flows
-    val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { it[SERVICE_ENABLED] ?: false }
+    val bleEnabled: Flow<Boolean> = context.dataStore.data.map { it[BLE_ENABLED] ?: false }
+    val serviceEnabled: Flow<Boolean> = context.dataStore.data.map { it[SERVICE_ENABLED] ?: it[BLE_ENABLED] ?: false }  // Legacy support
     val pollingEnabled: Flow<Boolean> = context.dataStore.data.map { it[POLLING_ENABLED] ?: false }
     
     // OneControl Plugin Flows
@@ -135,6 +145,10 @@ class AppSettings(private val context: Context) {
     
     suspend fun setMqttTopicPrefix(prefix: String) {
         context.dataStore.edit { it[MQTT_TOPIC_PREFIX] = prefix }
+    }
+    
+    suspend fun setBleEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[BLE_ENABLED] = enabled }
     }
     
     suspend fun setServiceEnabled(enabled: Boolean) {
