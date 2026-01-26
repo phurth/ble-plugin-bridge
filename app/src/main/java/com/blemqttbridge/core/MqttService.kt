@@ -11,9 +11,9 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.blemqttbridge.R
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
+import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -119,7 +119,7 @@ class MqttService : Service() {
             )
             
             mqttPlugin = MqttOutputPlugin(applicationContext).apply {
-                setConnectionStatusListener(object : MqttOutputPlugin.ConnectionStatusListener {
+                setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                     override fun onConnectionStatusChanged(connected: Boolean) {
                         isConnected = connected
                         updateNotification(if (connected) "Connected" else "Disconnected")
@@ -147,7 +147,7 @@ class MqttService : Service() {
     private fun disconnectMqtt() {
         Log.i(TAG, "Disconnecting from MQTT broker...")
         runBlocking {
-            mqttPlugin?.shutdown()
+            mqttPlugin?.disconnect()
         }
         mqttPlugin = null
         isConnected = false
@@ -193,7 +193,7 @@ class MqttService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("MQTT Service")
             .setContentText(status)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
