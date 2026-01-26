@@ -114,7 +114,11 @@ dependencies {
     
     // JSON
     implementation("org.json:json:20240303")
-    
+
+    // OkHttp for HTTP client (Peplink plugin)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
     // NanoHTTPD for embedded web server
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     
