@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
+import com.blemqttbridge.core.interfaces.MqttPublisher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -157,7 +158,18 @@ class MqttService : Service() {
      * Get the MQTT publisher interface for other components to use.
      * Returns null if MQTT is not connected.
      */
-    fun getMqttPublisher(): MqttOutputPlugin? {
+    /**
+     * Get MQTT publisher interface for other components.
+     * Returns null when MQTT is not connected.
+     */
+    fun getMqttPublisher(): MqttPublisher? {
+        return if (isConnected && mqttPlugin != null) mqttPublisherWrapper else null
+    }
+
+    /**
+     * Get underlying MQTT plugin for advanced operations (e.g., clearing discovery).
+     */
+    fun getPlugin(): MqttOutputPlugin? {
         return if (isConnected) mqttPlugin else null
     }
     
@@ -204,5 +216,64 @@ class MqttService : Service() {
         val notification = createNotification(status)
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * MqttPublisher wrapper delegating to mqttPlugin.
+     * Provides interface expected by BLE/polling plugins.
+     */
+    private val mqttPublisherWrapper = object : MqttPublisher {
+        override val topicPrefix: String
+            get() = mqttPlugin?.getTopicPrefix() ?: "homeassistant"
+
+        override fun publishState(topic: String, payload: String, retained: Boolean) {
+            serviceScope.launch {
+                mqttPlugin?.publishState(topic, payload, retained)
+            }
+        }
+
+        override fun publishDiscovery(topic: String, payload: String) {
+            serviceScope.launch {
+                mqttPlugin?.publishDiscovery(topic, payload)
+            }
+        }
+
+        override fun publishAvailability(topic: String, online: Boolean) {
+            serviceScope.launch {
+                mqttPlugin?.publishAvailability(topic, online)
+            }
+        }
+
+        override fun isConnected(): Boolean {
+            return mqttPlugin?.isConnected() ?: false
+        }
+
+        @Suppress("OVERRIDE_DEPRECATION")
+        override fun updateDiagnosticStatus(dataHealthy: Boolean) {
+            // Deprecated - no-op
+        }
+
+        @Suppress("OVERRIDE_DEPRECATION")
+        override fun updateBleStatus(connected: Boolean, paired: Boolean) {
+            // Deprecated - no-op
+        }
+
+        override fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
+            // MQTT service does not track per-plugin status
+        }
+
+        override fun updateMqttStatus(connected: Boolean) {
+            // Already tracked via connection listener
+        }
+
+        override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
+            serviceScope.launch {
+                mqttPlugin?.subscribeToCommands(topicPattern, callback)
+            }
+        }
+
+        override fun logBleEvent(message: String) {
+            // Not applicable for MQTT service
+        }
     }
 }

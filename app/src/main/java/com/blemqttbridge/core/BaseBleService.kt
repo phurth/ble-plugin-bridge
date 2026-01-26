@@ -175,11 +175,18 @@ class BaseBleService : Service() {
     }
     
     /**
-     * Get MQTT publisher from standalone MqttService.
+     * Get MQTT publisher interface from standalone MqttService.
      * Returns null if MqttService is not running or not connected.
      */
-    private fun getMqttPlugin(): MqttOutputPlugin? {
+    private fun getMqttPublisherFromService(): MqttPublisher? {
         return MqttService.getInstance()?.getMqttPublisher()
+    }
+
+    /**
+     * Get underlying MQTT plugin for advanced operations (e.g., clearing discovery).
+     */
+    private fun getMqttPluginRaw(): MqttOutputPlugin? {
+        return MqttService.getInstance()?.getPlugin()
     }
     
     /**
@@ -188,10 +195,10 @@ class BaseBleService : Service() {
      */
     private val mqttPublisher = object : MqttPublisher {
         override val topicPrefix: String
-            get() = getMqttPlugin()?.getTopicPrefix() ?: "homeassistant"
+            get() = getMqttPublisherFromService()?.topicPrefix ?: "homeassistant"
         
         override fun publishState(topic: String, payload: String, retained: Boolean) {
-            val mqtt = getMqttPlugin()
+            val mqtt = getMqttPublisherFromService()
             Log.v(TAG, "📤 publishState called: topic=$topic, mqttAvailable=${mqtt != null}")
             serviceScope.launch {
                 if (mqtt == null) {
@@ -203,7 +210,7 @@ class BaseBleService : Service() {
         }
         
         override fun publishDiscovery(topic: String, payload: String) {
-            val mqtt = getMqttPlugin()
+            val mqtt = getMqttPublisherFromService()
             Log.d(TAG, "📤 publishDiscovery called: topic=$topic, mqttAvailable=${mqtt != null}")
             serviceScope.launch {
                 if (mqtt == null) {
@@ -217,12 +224,12 @@ class BaseBleService : Service() {
         
         override fun publishAvailability(topic: String, online: Boolean) {
             serviceScope.launch {
-                getMqttPlugin()?.publishAvailability(topic, online)
+                getMqttPublisherFromService()?.publishAvailability(topic, online)
             }
         }
         
         override fun isConnected(): Boolean {
-            return getMqttPlugin()?.isConnected() ?: false
+            return getMqttPublisherFromService()?.isConnected() ?: false
         }
         
         @Suppress("OVERRIDE_DEPRECATION")
@@ -268,7 +275,7 @@ class BaseBleService : Service() {
         override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
             serviceScope.launch {
                 try {
-                    getMqttPlugin()?.subscribeToCommands(topicPattern, callback)
+                    getMqttPublisherFromService()?.subscribeToCommands(topicPattern, callback)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to subscribe to commands: $topicPattern", e)
                 }
@@ -616,7 +623,7 @@ class BaseBleService : Service() {
         }
         
         // Check MQTT availability from MqttService
-        val mqttAvailable = getMqttPlugin() != null
+        val mqttAvailable = getMqttPublisherFromService() != null
         Log.i(TAG, "MQTT service ${if (mqttAvailable) "is available" else "is not running"}")
         _mqttConnected.value = mqttAvailable
         if (!mqttAvailable) {
@@ -1363,7 +1370,7 @@ class BaseBleService : Service() {
      */
     private fun subscribeToDeviceCommands(device: BluetoothDevice, pluginId: String, plugin: BleDevicePlugin?) {
         Log.i(TAG, "📡 subscribeToDeviceCommands called for $pluginId, plugin=${plugin != null}")
-        val output = getMqttPlugin()
+        val output = getMqttPublisherFromService()
         if (output == null || plugin == null) {
             Log.w(TAG, "❌ Cannot subscribe to commands - mqtt=${output != null}, plugin=${plugin != null}")
             return
@@ -1590,7 +1597,7 @@ class BaseBleService : Service() {
      * This removes the entities from HA when a plugin is removed.
      */
     private suspend fun clearPluginDiscovery(pluginId: String) {
-        val mqtt = getMqttPlugin()
+        val mqtt = getMqttPluginRaw()
         if (mqtt == null) {
             Log.w(TAG, "Cannot clear discovery - MQTT not available")
             return
@@ -1873,7 +1880,7 @@ class BaseBleService : Service() {
                 out.appendLine("")
                 
                 out.appendLine("Active Plugins:")
-                getMqttPlugin()?.let { out.appendLine("  MQTT: ${it.javaClass.simpleName}") }
+                getMqttPublisherFromService()?.let { out.appendLine("  MQTT: available") }
                 out.appendLine("")
                 
                 out.appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
@@ -1927,7 +1934,7 @@ class BaseBleService : Service() {
             appendLine("")
             
             appendLine("Active Plugins:")
-            getMqttPlugin()?.let { appendLine("  MQTT: ${it.javaClass.simpleName}") }
+            getMqttPublisherFromService()?.let { appendLine("  MQTT: available") }
             appendLine("")
             
             appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
