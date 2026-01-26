@@ -64,11 +64,12 @@ async function loadStatus() {
         const response = await fetch('/api/status');
         const data = await response.json();
         serviceRunning = data.running;
+        const bleEnabled = data.bleEnabled ?? data.running;
         const html = `
             <div class="status-row">
                 <span class="status-label">BLE Bridge Service:</span>
                 <label class="toggle-switch">
-                    <input type="checkbox" ${data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
+                    <input type="checkbox" ${bleEnabled ? 'checked' : ''} onchange="toggleService(this.checked)">
                     <span class="toggle-slider"></span>
                 </label>
             </div>

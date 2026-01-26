@@ -296,8 +296,10 @@ class WebServerManager(
     private fun serveStatus(): Response {
         val settings = AppSettings(context)
         val mqttEnabled = runBlocking { settings.mqttEnabled.first() }
+        val bleEnabled = runBlocking { settings.bleEnabled.first() }
         val json = JSONObject().apply {
             put("running", BaseBleService.serviceRunning.value)
+            put("bleEnabled", bleEnabled)
             put("mqttEnabled", mqttEnabled) // Setting, not connection status
             put("mqttConnected", BaseBleService.mqttConnected.value) // Actual connection status
             put("bleTraceActive", getService()?.isBleTraceActive() ?: false)
