@@ -618,7 +618,11 @@ async function confirmAddInstance() {
         let baseUrl = document.getElementById('new-base-url')?.value.trim();
         const username = document.getElementById('new-username')?.value.trim();
         const password = document.getElementById('new-password')?.value.trim();
-        const pollingInterval = document.getElementById('new-polling-interval')?.value.trim();
+        const statusPollInterval = document.getElementById('new-status-poll-interval')?.value.trim();
+        const usagePollInterval = document.getElementById('new-usage-poll-interval')?.value.trim();
+        const diagnosticsPollInterval = document.getElementById('new-diagnostics-poll-interval')?.value.trim();
+        const enableVpnPolling = document.getElementById('new-enable-vpn-polling')?.checked;
+        const enableGpsPolling = document.getElementById('new-enable-gps-polling')?.checked;
 
         if (!baseUrl || !username || !password) {
             alert('Please fill in all required Peplink fields (URL, Username, Password)');
@@ -633,7 +637,13 @@ async function confirmAddInstance() {
         config.base_url = baseUrl;
         config.username = username;
         config.password = password;
-        if (pollingInterval) config.polling_interval = pollingInterval;
+        
+        // Add polling configuration
+        if (statusPollInterval) config.status_poll_interval = statusPollInterval;
+        if (usagePollInterval) config.usage_poll_interval = usagePollInterval;
+        if (diagnosticsPollInterval) config.diagnostics_poll_interval = diagnosticsPollInterval;
+        if (enableVpnPolling) config.enable_vpn_polling = 'true';
+        if (enableGpsPolling) config.enable_gps_polling = 'true';
 
         // Use polling plugin API instead of regular instance API
         try {
@@ -933,10 +943,43 @@ function updatePluginSpecificFields() {
                 <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password: <span style="color: #f44336;">*</span></label>
                 <input type="password" id="new-password" placeholder="Admin password" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Interval (seconds):</label>
-                <input type="number" id="new-polling-interval" value="30" min="5" max="300" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="margin-top: 4px; font-size: 12px; color: #666;">How often to query router status (default: 30s)</div>
+            <div style="margin-bottom: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 4px; border-left: 4px solid #2196F3;">
+                <label style="display: block; margin-bottom: 10px; font-weight: 600; color: #1976D2;">Polling Configuration</label>
+                <div style="font-size: 12px; color: #666; margin-bottom: 12px;">Customize how often to poll each data type</div>
+                
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500; font-size: 13px;">Status Poll (WAN, Priority)</label>
+                    <input type="number" id="new-status-poll-interval" value="10" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                    <div style="margin-top: 2px; font-size: 11px; color: #999;">seconds (default: 10)</div>
+                </div>
+                
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500; font-size: 13px;">Usage Poll (Data Usage, SIM)</label>
+                    <input type="number" id="new-usage-poll-interval" value="60" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                    <div style="margin-top: 2px; font-size: 11px; color: #999;">seconds (default: 60)</div>
+                </div>
+                
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500; font-size: 13px;">Diagnostics Poll (Temperature, Fans)</label>
+                    <input type="number" id="new-diagnostics-poll-interval" value="30" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                    <div style="margin-top: 2px; font-size: 11px; color: #999;">seconds (default: 30)</div>
+                </div>
+                
+                <div style="margin-bottom: 12px;">
+                    <label style="display: flex; align-items: center; font-size: 13px;">
+                        <input type="checkbox" id="new-enable-vpn-polling" style="margin-right: 6px;">
+                        <span style="font-weight: 500;">Enable VPN Polling</span>
+                    </label>
+                    <div style="margin-top: 2px; font-size: 11px; color: #999; margin-left: 24px;">VPN status monitoring (default: disabled)</div>
+                </div>
+                
+                <div style="margin-bottom: 12px;">
+                    <label style="display: flex; align-items: center; font-size: 13px;">
+                        <input type="checkbox" id="new-enable-gps-polling" style="margin-right: 6px;">
+                        <span style="font-weight: 500;">Enable GPS Polling</span>
+                    </label>
+                    <div style="margin-top: 2px; font-size: 11px; color: #999; margin-left: 24px; color: #f57c00;">Location tracking (⚠️ privacy - default: disabled)</div>
+                </div>
             </div>
         `;
     } else {

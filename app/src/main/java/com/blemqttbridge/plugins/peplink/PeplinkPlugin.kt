@@ -63,6 +63,7 @@ class PeplinkPlugin : PollingDevicePlugin {
 
     private var hardwareConfig: PeplinkDiscovery.HardwareConfig? = null
     private var pollingJob: Job? = null
+    private var pollingManager: PeplinkPollingManager? = null
     private var lastWanState: Map<Int, WanConnection> = emptyMap()
     private var lastWanUsage: Map<Int, WanUsage> = emptyMap()
     private var lastUsagePollAt: Long = 0L
@@ -70,6 +71,19 @@ class PeplinkPlugin : PollingDevicePlugin {
     private var connectedDevicesCount: Int = 0
     private var pepVpnProfiles: Map<String, Triple<String, String, String>> = emptyMap()
     private val commandMutex = Mutex()  // Serialize command execution to prevent concurrent API calls
+
+    // ===== POLLING CONFIGURATION =====
+
+    private var statusPollInterval: Int = 10          // seconds
+    private var usagePollInterval: Int = 60           // seconds
+    private var diagnosticsPollInterval: Int = 30     // seconds
+    private var vpnPollInterval: Int = 60             // seconds
+    private var gpsPollInterval: Int = 120            // seconds
+    private var enableStatusPolling: Boolean = true
+    private var enableUsagePolling: Boolean = true
+    private var enableDiagnosticsPolling: Boolean = true
+    private var enableVpnPolling: Boolean = false
+    private var enableGpsPolling: Boolean = false
 
     // ===== LIFECYCLE =====
 
@@ -82,7 +96,25 @@ class PeplinkPlugin : PollingDevicePlugin {
         this.pollingIntervalMs = (config.getString("polling_interval", "30").toLongOrNull() ?: 30) * 1000
         this.instanceId = "peplink_$instanceName"
 
+        // Load polling configuration
+        statusPollInterval = (config.getString("status_poll_interval", "10").toIntOrNull() ?: 10).coerceIn(5, 3600)
+        usagePollInterval = (config.getString("usage_poll_interval", "60").toIntOrNull() ?: 60).coerceIn(5, 3600)
+        diagnosticsPollInterval = (config.getString("diagnostics_poll_interval", "30").toIntOrNull() ?: 30).coerceIn(5, 3600)
+        vpnPollInterval = (config.getString("vpn_poll_interval", "60").toIntOrNull() ?: 60).coerceIn(5, 3600)
+        gpsPollInterval = (config.getString("gps_poll_interval", "120").toIntOrNull() ?: 120).coerceIn(5, 3600)
+
+        enableStatusPolling = config.getString("enable_status_polling", "true").toBoolean()
+        enableUsagePolling = config.getString("enable_usage_polling", "true").toBoolean()
+        enableDiagnosticsPolling = config.getString("enable_diagnostics_polling", "true").toBoolean()
+        enableVpnPolling = config.getString("enable_vpn_polling", "false").toBoolean()
+        enableGpsPolling = config.getString("enable_gps_polling", "false").toBoolean()
+
         Log.i(TAG, "[$instanceId] Initialized - URL: $baseUrl, Polling: ${pollingIntervalMs}ms")
+        Log.i(TAG, "[$instanceId] Polling config: status=${statusPollInterval}s(${if(enableStatusPolling) "ON" else "OFF"}), " +
+                "usage=${usagePollInterval}s(${if(enableUsagePolling) "ON" else "OFF"}), " +
+                "diag=${diagnosticsPollInterval}s(${if(enableDiagnosticsPolling) "ON" else "OFF"}), " +
+                "vpn=${vpnPollInterval}s(${if(enableVpnPolling) "ON" else "OFF"}), " +
+                "gps=${gpsPollInterval}s(${if(enableGpsPolling) "ON" else "OFF"})")
     }
 
     override fun destroy() {
@@ -168,23 +200,46 @@ class PeplinkPlugin : PollingDevicePlugin {
                     }
                 } catch (_: Exception) {}
 
-                // Step 3: Force an immediate poll so data is available at startup
+                // Step 3: Initialize and start polling manager
+                val pollingScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                pollingManager = PeplinkPollingManager(instanceId, pollingScope)
+
+                // Configure polling intervals
+                pollingManager!!.configure(
+                    PeplinkPollingManager.PollingConfig(
+                        statusInterval = statusPollInterval,
+                        usageInterval = usagePollInterval,
+                        diagnosticsInterval = diagnosticsPollInterval,
+                        vpnInterval = vpnPollInterval,
+                        gpsInterval = gpsPollInterval,
+                        enableStatusPolling = enableStatusPolling,
+                        enableUsagePolling = enableUsagePolling,
+                        enableDiagnosticsPolling = enableDiagnosticsPolling,
+                        enableVpnPolling = enableVpnPolling,
+                        enableGpsPolling = enableGpsPolling
+                    )
+                )
+
+                // Set up polling callbacks
+                pollingManager!!.onStatusPoll = { poll() }
+                pollingManager!!.onUsagePoll = { pollUsage() }
+                pollingManager!!.onDiagnosticsPoll = { pollDiagnostics() }
+                pollingManager!!.onVpnPoll = { pollVpn() }
+                pollingManager!!.onGpsPoll = { pollGps() }
+
+                // Force an immediate poll so data is available at startup
                 try {
                     poll()
                 } catch (e: Exception) {
                     Log.w(TAG, "[$instanceId] Initial poll failed: ${e.message}", e)
                 }
 
-                // Continue with periodic polling
-                while (isActive) {
-                    try {
-                        poll()
-                    } catch (e: CancellationException) {
-                        throw e  // Propagate cancellation
-                    } catch (e: Exception) {
-                        Log.e(TAG, "[$instanceId] Poll error: ${e.message}", e)
-                    }
-                    delay(pollingIntervalMs)
+                // Start the polling manager
+                pollingManager!!.start()
+
+                // Keep coroutine alive while polling manager is running
+                while (isActive && pollingManager?.isRunning() == true) {
+                    delay(1000)  // Check every second if polling manager is still running
                 }
             }
 
@@ -222,18 +277,6 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             val wanStatus = statusResult.getOrThrow()
 
-            // Optionally query usage data at slower cadence (~60s)
-            val now = System.currentTimeMillis()
-            if (now - lastUsagePollAt >= 60_000) {
-                val usageResult = apiClient.getWanUsage()
-                if (usageResult.isSuccess) {
-                    lastWanUsage = usageResult.getOrThrow()
-                    lastUsagePollAt = now
-                } else {
-                    Log.w(TAG, "[$instanceId] WAN usage fetch failed: ${usageResult.exceptionOrNull()?.message}")
-                }
-            }
-
             // Publish state for each WAN connection
             for ((connId, connection) in wanStatus) {
                 // Get enriched connection from hardware config (has simSlotCount set)
@@ -244,35 +287,80 @@ class PeplinkPlugin : PollingDevicePlugin {
                 mqttPublisher.publishAvailability("$baseTopic/wan/$connId/availability", connection.enabled)
 
                 publishWanState(connId, enrichedConnection)
-
-                // Note: Usage is now published in publishWanState() method
             }
 
             // Update cached state
             lastWanState = wanStatus
 
-            // Fetch diagnostics on each poll (lightweight requests)
-            try {
-                apiClient.getConnectedDevicesCount().onSuccess { count ->
-                    connectedDevicesCount = count
-                    val base = getMqttBaseTopic()
-                    mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
-                }
-                apiClient.getPepVpnProfiles().onSuccess { profiles ->
-                    pepVpnProfiles = profiles
-                    val base = getMqttBaseTopic()
-                    pepVpnProfiles.forEach { (id, triple) ->
-                        mqttPublisher.publishState("$base/diagnostic/vpn/$id/status", triple.third)
-                    }
-                }
-            } catch (_: Exception) {}
-
             Result.success(Unit)
         } catch (e: Exception) {
-            Log.e(TAG, "[$instanceId] Poll failed", e)
+            Log.e(TAG, "[$instanceId] Status poll failed", e)
             // Report unhealthy status on exception
             mqttPublisher.updatePluginStatus(instanceId, false, false, false)
             Result.failure(e)
+        }
+    }
+
+    private suspend fun pollUsage() {
+        try {
+            val usageResult = apiClient.getWanUsage()
+            if (usageResult.isSuccess) {
+                lastWanUsage = usageResult.getOrThrow()
+                
+                // Publish usage data for each WAN
+                for ((connId, usage) in lastWanUsage) {
+                    val baseTopic = getMqttBaseTopic()
+                    mqttPublisher.publishState("$baseTopic/wan/$connId/usage/current", usage.usage.toString())
+                    
+                    // Publish per-SIM usage if available
+                    usage.simSlots?.forEach { (slotId, simInfo) ->
+                        mqttPublisher.publishState("$baseTopic/wan/$connId/sim/$slotId/usage", simInfo.usage.toString())
+                    }
+                }
+                
+                Log.d(TAG, "[$instanceId] Usage poll successful")
+            } else {
+                Log.w(TAG, "[$instanceId] Usage poll failed: ${usageResult.exceptionOrNull()?.message}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[$instanceId] Usage poll exception: ${e.message}")
+        }
+    }
+
+    private suspend fun pollDiagnostics() {
+        try {
+            apiClient.getConnectedDevicesCount().onSuccess { count ->
+                connectedDevicesCount = count
+                val base = getMqttBaseTopic()
+                mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
+            }
+            Log.d(TAG, "[$instanceId] Diagnostics poll successful")
+        } catch (e: Exception) {
+            Log.e(TAG, "[$instanceId] Diagnostics poll exception: ${e.message}")
+        }
+    }
+
+    private suspend fun pollVpn() {
+        try {
+            apiClient.getPepVpnProfiles().onSuccess { profiles ->
+                pepVpnProfiles = profiles
+                val base = getMqttBaseTopic()
+                pepVpnProfiles.forEach { (id, triple) ->
+                    mqttPublisher.publishState("$base/diagnostic/vpn/$id/status", triple.third)
+                }
+            }
+            Log.d(TAG, "[$instanceId] VPN poll successful")
+        } catch (e: Exception) {
+            Log.e(TAG, "[$instanceId] VPN poll exception: ${e.message}")
+        }
+    }
+
+    private suspend fun pollGps() {
+        try {
+            // GPS polling will be implemented in Phase 2
+            Log.d(TAG, "[$instanceId] GPS poll - not yet implemented")
+        } catch (e: Exception) {
+            Log.e(TAG, "[$instanceId] GPS poll exception: ${e.message}")
         }
     }
 
