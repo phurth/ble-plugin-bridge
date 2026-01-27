@@ -310,27 +310,26 @@ class WebServerManager(
             put("bluetoothAvailable", BaseBleService.bluetoothAvailable.value)
             put("bleScanningActive", BaseBleService.bleScanningActive.value)
             
-            // Get all plugin statuses and split by type
-            val allStatuses = BaseBleService.pluginStatuses.value
-            val httpPluginTypes = setOf("peplink")  // HTTP polling plugins
-            
+            // Get BLE plugin statuses
+            val bleStatuses = BaseBleService.pluginStatuses.value
             val bleStatusesJson = JSONObject()
-            val pollingStatusesJson = JSONObject()
-            
-            for ((pluginId, status) in allStatuses) {
-                val statusObj = JSONObject().apply {
+            for ((pluginId, status) in bleStatuses) {
+                bleStatusesJson.put(pluginId, JSONObject().apply {
                     put("connected", status.connected)
                     put("authenticated", status.authenticated)
                     put("dataHealthy", status.dataHealthy)
-                }
-                
-                // Classify by plugin type (extract from instanceId if needed)
-                val pluginType = pluginId.takeWhile { it.isLetter() }
-                if (httpPluginTypes.contains(pluginType)) {
-                    pollingStatusesJson.put(pluginId, statusObj)
-                } else {
-                    bleStatusesJson.put(pluginId, statusObj)
-                }
+                })
+            }
+            
+            // Get polling (HTTP) plugin statuses separately
+            val pollingStatuses = BaseBleService.pollingPluginStatuses.value
+            val pollingStatusesJson = JSONObject()
+            for ((pluginId, status) in pollingStatuses) {
+                pollingStatusesJson.put(pluginId, JSONObject().apply {
+                    put("connected", status.connected)
+                    put("authenticated", status.authenticated)
+                    put("dataHealthy", status.dataHealthy)
+                })
             }
             
             put("pluginStatuses", bleStatusesJson)
@@ -604,7 +603,7 @@ class WebServerManager(
                 }
             }
             // HTTP Polling plugins - check if any polling is running
-            pluginId in listOf("mopeka") -> {
+            pluginId in listOf("mopeka", "peplink") -> {
                 val registry = PluginRegistry.getInstance()
                 val runningInstances = registry.getAllPollingPluginInstances()
                 if (runningInstances.isNotEmpty()) {
@@ -1689,8 +1688,9 @@ class WebServerManager(
     /**
      * Auto-start polling on app startup if it was previously enabled.
      * Called from WebServerService after server starts.
+     * Retries up to 3 times if MQTT service is not yet available.
      */
-    fun autoStartPolling() {
+    fun autoStartPolling(retryCount: Int = 0) {
         try {
             val registry = PluginRegistry.getInstance()
             val allPollingInstances = ServiceStateManager.getAllPollingInstances(context)
@@ -1703,7 +1703,15 @@ class WebServerManager(
             // Check if MQTT service is available
             val mqttPublisher = getMqttService()?.getMqttPublisher()
             if (mqttPublisher == null) {
-                Log.w(TAG, "MQTT service not available for polling auto-start, will retry later")
+                if (retryCount < 3) {
+                    Log.w(TAG, "MQTT service not available for polling auto-start (attempt ${retryCount + 1}/3), will retry in 3 seconds...")
+                    // Retry after delay
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        autoStartPolling(retryCount + 1)
+                    }, 3000)
+                } else {
+                    Log.e(TAG, "MQTT service not available after 3 attempts, polling auto-start failed")
+                }
                 return
             }
 

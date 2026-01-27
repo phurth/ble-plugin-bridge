@@ -1862,6 +1862,22 @@ class BaseBleService : Service() {
     fun isTraceActive(): Boolean = traceEnabled
     
     /**
+     * Update polling (HTTP) plugin status from external services.
+     * Called by MqttService when polling plugins report status updates.
+     */
+    fun reportPollingPluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
+        val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
+        val newStatuses = _pollingPluginStatuses.value.toMutableMap()
+        newStatuses[pluginId] = status
+        
+        Log.d(TAG, "📊 Polling plugin status reported: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+        _pollingPluginStatuses.value = newStatuses
+        if (connected && authenticated && dataHealthy) {
+            appendServiceLog("Polling plugin ready: $pluginId")
+        }
+    }
+    
+    /**
      * Export debug log to a file.
      * Creates a debug log file with all buffered log entries and system information.
      * Returns the debug log file if successful, null otherwise.
@@ -1894,7 +1910,7 @@ class BaseBleService : Service() {
                 traceFile?.let { out.appendLine("  Trace File: ${it.absolutePath}") }
                 out.appendLine("")
                 
-                out.appendLine("Plugin Statuses:")
+                out.appendLine("BLE Plugin Statuses:")
                 // Deduplicate aliases: if an instance is present, skip the legacy plugin-type alias
                 val instanceTypesWithInstances = instancePluginTypes.values.toSet()
                 _pluginStatuses.value
@@ -1905,6 +1921,15 @@ class BaseBleService : Service() {
                         out.appendLine("    Authenticated: ${status.authenticated}")
                         out.appendLine("    Data Healthy: ${status.dataHealthy}")
                     }
+                out.appendLine("")
+                
+                out.appendLine("Polling (HTTP) Plugin Statuses:")
+                _pollingPluginStatuses.value.forEach { (pluginId, status) ->
+                    out.appendLine("  $pluginId:")
+                    out.appendLine("    Connected: ${status.connected}")
+                    out.appendLine("    Authenticated: ${status.authenticated}")
+                    out.appendLine("    Data Healthy: ${status.dataHealthy}")
+                }
                 out.appendLine("")
                 
                 out.appendLine("Active Plugins:")
@@ -1949,7 +1974,7 @@ class BaseBleService : Service() {
             traceFile?.let { appendLine("  Trace File: ${it.absolutePath}") }
             appendLine("")
             
-            appendLine("Plugin Statuses:")
+            appendLine("BLE Plugin Statuses:")
             val instanceTypesWithInstances = instancePluginTypes.values.toSet()
             _pluginStatuses.value
                 .filterNot { (pluginId, _) -> instanceTypesWithInstances.contains(pluginId) }
@@ -1959,6 +1984,15 @@ class BaseBleService : Service() {
                     appendLine("    Authenticated: ${status.authenticated}")
                     appendLine("    Data Healthy: ${status.dataHealthy}")
                 }
+            appendLine("")
+            
+            appendLine("Polling (HTTP) Plugin Statuses:")
+            _pollingPluginStatuses.value.forEach { (pluginId, status) ->
+                appendLine("  $pluginId:")
+                appendLine("    Connected: ${status.connected}")
+                appendLine("    Authenticated: ${status.authenticated}")
+                appendLine("    Data Healthy: ${status.dataHealthy}")
+            }
             appendLine("")
             
             appendLine("Active Plugins:")

@@ -278,7 +278,8 @@ class MqttService : Service() {
         }
 
         override fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
-            // MQTT service does not track per-plugin status
+            // Forward polling plugin status updates to BaseBleService for UI tracking
+            BaseBleService.getInstance()?.reportPollingPluginStatus(pluginId, connected, authenticated, dataHealthy)
         }
 
         override fun updateMqttStatus(connected: Boolean) {
