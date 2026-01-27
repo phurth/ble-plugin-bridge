@@ -468,89 +468,170 @@ class PeplinkApiClient(
 
     /**
      * Get system diagnostics (temperature, fans).
-     * Attempts multiple endpoints to find temperature and fan data.
+     * Queries /cgi-bin/MANGA/api.cgi for thermal sensor and fan speed data.
      */
     suspend fun getSystemDiagnostics(): Result<SystemDiagnostics> {
-        // Try /api/status.system first, then /api/info.status
-        val urls = listOf(
-            "$baseUrl/api/status.system",
-            "$baseUrl/api/info.status",
-            "$baseUrl/api/status.status"
-        )
-
-        for (url in urls) {
-            try {
-                val responseBody = makeAuthenticatedRequest(url).getOrNull()
-                if (responseBody == null) {
-                    continue
-                }
-                
-                val json = JSONObject(responseBody)
-                
-                if (json.optString("stat") != "ok") {
-                    continue
-                }
-
-                val responseObj = json.optJSONObject("response") ?: json
-                
-                // Check if this response contains system info
-                if (responseObj.has("temperature") || responseObj.has("fans")) {
-                    Log.d(TAG, "Found system diagnostics at $url")
-                    return Result.success(SystemDiagnostics.fromJson(responseObj))
-                }
-            } catch (e: Exception) {
-                // Try next endpoint
-                Log.d(TAG, "Could not get diagnostics from $url: ${e.message}")
+        // Use the MANGA API endpoint that combines thermal and fan data
+        val url = "$baseUrl/cgi-bin/MANGA/api.cgi?func=status.system.info&infoType=thermalSensor%20fanSpeed"
+        
+        return try {
+            val responseBody = makeAuthenticatedRequest(url).getOrNull()
+            if (responseBody == null) {
+                Log.w(TAG, "No response from system diagnostics endpoint")
+                return Result.success(SystemDiagnostics(temperature = null, temperatureThreshold = null))
             }
-        }
+            
+            val json = JSONObject(responseBody)
+            
+            if (json.optString("stat") != "ok") {
+                Log.w(TAG, "System diagnostics API returned error: ${json.optString("message")}")
+                return Result.success(SystemDiagnostics(temperature = null, temperatureThreshold = null))
+            }
 
-        // Return empty diagnostics if no endpoint returns data
-        Log.w(TAG, "No system diagnostics endpoint available")
-        return Result.success(SystemDiagnostics(temperature = null, temperatureThreshold = null))
+            val responseObj = json.optJSONObject("response") ?: json
+            
+            // Parse thermal sensor data
+            var temperature: Double? = null
+            var temperatureThreshold: Double? = null
+            val thermalArray = responseObj.optJSONArray("thermalSensor")
+            if (thermalArray != null && thermalArray.length() > 0) {
+                val thermalObj = thermalArray.getJSONObject(0)
+                temperature = thermalObj.optDouble("temperature", Double.NaN).takeIf { !it.isNaN() }
+                temperatureThreshold = thermalObj.optDouble("threshold", Double.NaN).takeIf { !it.isNaN() }
+                Log.d(TAG, "System diagnostics: temp=${temperature}°C, threshold=${temperatureThreshold}°C")
+            } else {
+                Log.i(TAG, "Thermal sensor data not available on this device (endpoint returned empty response)")
+            }
+            
+            // Parse fan speed data
+            val fans = mutableListOf<FanInfo>()
+            val fanArray = responseObj.optJSONArray("fanSpeed")
+            if (fanArray != null) {
+                for (i in 0 until fanArray.length()) {
+                    val fanObj = fanArray.getJSONObject(i)
+                    val speedRpm = fanObj.optInt("value").takeIf { it > 0 }
+                    val speedPercent = fanObj.optInt("percentage").takeIf { it > 0 }
+                    val isActive = fanObj.optBoolean("active", false)
+                    
+                    fans.add(FanInfo(
+                        id = i + 1,
+                        name = "Fan ${i + 1}",
+                        speedRpm = speedRpm,
+                        speedPercent = speedPercent,
+                        status = if (isActive) "normal" else "off"
+                    ))
+                }
+                Log.d(TAG, "Found ${fans.size} fans")
+            }
+            Result.success(SystemDiagnostics(
+                temperature = temperature,
+                temperatureThreshold = temperatureThreshold,
+                fans = fans
+            ))
+
+        } catch (e: Exception) {
+            Log.e(TAG, "System diagnostics exception: ${e.message}", e)
+            Result.success(SystemDiagnostics(temperature = null, temperatureThreshold = null))
+        }
     }
 
     /**
      * Get device information (serial number, model, hardware version).
-     * Attempts multiple endpoints to find device info.
+     * Queries /cgi-bin/MANGA/api.cgi for device info.
      */
     suspend fun getDeviceInfo(): Result<DeviceInfo> {
-        // Try /api/info.device first, then /api/info.status
-        val urls = listOf(
-            "$baseUrl/api/info.device",
-            "$baseUrl/api/status.device",
-            "$baseUrl/api/info.status"
-        )
-
-        for (url in urls) {
-            try {
-                val responseBody = makeAuthenticatedRequest(url).getOrNull()
-                if (responseBody == null) {
-                    continue
-                }
-                
-                val json = JSONObject(responseBody)
-                
-                if (json.optString("stat") != "ok") {
-                    continue
-                }
-
-                val responseObj = json.optJSONObject("response") ?: json
-                
-                // Check if this response contains device info
-                if (responseObj.has("serialNumber") || responseObj.has("model")) {
-                    Log.d(TAG, "Found device info at $url")
-                    return Result.success(DeviceInfo.fromJson(responseObj))
-                }
-            } catch (e: Exception) {
-                // Try next endpoint
-                Log.d(TAG, "Could not get device info from $url: ${e.message}")
-                continue
+        val url = "$baseUrl/cgi-bin/MANGA/api.cgi?func=status.system.info&infoType=device"
+        
+        return try {
+            val responseBody = makeAuthenticatedRequest(url).getOrNull()
+            if (responseBody == null) {
+                Log.w(TAG, "No response from device info endpoint")
+                return Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
             }
-        }
+            
+            val json = JSONObject(responseBody)
+            
+            if (json.optString("stat") != "ok") {
+                Log.w(TAG, "Device info API returned error: ${json.optString("message")}")
+                return Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
+            }
 
-        // Return default device info if no endpoint returns data
-        Log.w(TAG, "No device info endpoint available")
-        return Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
+            val responseObj = json.optJSONObject("response") ?: json
+            val deviceObj = responseObj.optJSONObject("device")
+            
+            if (deviceObj == null) {
+                Log.w(TAG, "No device object in response")
+                return Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
+            }
+            
+            val deviceInfo = DeviceInfo(
+                serialNumber = deviceObj.optString("serialNumber", "unknown"),
+                model = deviceObj.optString("model", "unknown"),
+                hardwareVersion = deviceObj.optString("hardwareRevision", null)
+            )
+            
+            Log.d(TAG, "Device info: ${deviceInfo.model} SN:${deviceInfo.serialNumber}")
+            Result.success(deviceInfo)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Device info exception: ${e.message}", e)
+            Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
+        }
+    }
+
+    /**
+     * Get bandwidth/traffic statistics.
+     * Queries /cgi-bin/MANGA/api.cgi for traffic and bandwidth data.
+     */
+    suspend fun getTrafficStats(): Result<Map<Int, Pair<Double, Double>>> {
+        val url = "$baseUrl/cgi-bin/MANGA/api.cgi?func=status.traffic"
+        
+        return try {
+            val responseBody = makeAuthenticatedRequest(url).getOrNull()
+            if (responseBody == null) {
+                Log.w(TAG, "No response from traffic stats endpoint")
+                return Result.success(emptyMap())
+            }
+            
+            val json = JSONObject(responseBody)
+            
+            if (json.optString("stat") != "ok") {
+                Log.w(TAG, "Traffic stats API returned error: ${json.optString("message")}")
+                return Result.success(emptyMap())
+            }
+
+            val responseObj = json.optJSONObject("response") ?: json
+            val bandwidthObj = responseObj.optJSONObject("bandwidth")
+            
+            if (bandwidthObj == null) {
+                Log.w(TAG, "No bandwidth data in response")
+                return Result.success(emptyMap())
+            }
+            
+            val result = mutableMapOf<Int, Pair<Double, Double>>()
+            bandwidthObj.keys().forEach { key ->
+                val connId = key.toIntOrNull()
+                if (connId != null) {
+                    val connData = bandwidthObj.optJSONObject(key)
+                    if (connData != null) {
+                        val overall = connData.optJSONObject("overall")
+                        if (overall != null) {
+                            // Convert from kbps to Mbps
+                            val downloadMbps = overall.optDouble("download", 0.0) / 1000.0
+                            val uploadMbps = overall.optDouble("upload", 0.0) / 1000.0
+                            result[connId] = Pair(downloadMbps, uploadMbps)
+                            Log.d(TAG, "Traffic $connId: ↓${String.format("%.1f", downloadMbps)} Mbps, ↑${String.format("%.1f", uploadMbps)} Mbps")
+                        }
+                    }
+                }
+            }
+            
+            Result.success(result)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Traffic stats exception: ${e.message}", e)
+            Result.success(emptyMap())
+        }
     }
 
     /**

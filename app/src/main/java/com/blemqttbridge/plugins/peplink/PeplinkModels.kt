@@ -332,9 +332,8 @@ data class ApiResponse<T>(
 }
 
 // ===== SYSTEM DIAGNOSTICS =====
-
 /**
- * Fan speed information from /api/status.system or /api/info.status
+ * Fan speed information
  */
 data class FanInfo(
     val id: Int,
@@ -357,7 +356,7 @@ data class FanInfo(
 }
 
 /**
- * System diagnostics including temperature and fan information
+ * System diagnostics including temperature
  */
 data class SystemDiagnostics(
     val temperature: Double?,               // °C
@@ -367,8 +366,6 @@ data class SystemDiagnostics(
     companion object {
         fun fromJson(json: JSONObject): SystemDiagnostics {
             val fans = mutableListOf<FanInfo>()
-            
-            // Parse fans array if present
             val fansArray = json.optJSONArray("fans")
             if (fansArray != null) {
                 for (i in 0 until fansArray.length()) {
@@ -376,7 +373,6 @@ data class SystemDiagnostics(
                     fans.add(FanInfo.fromJson(i + 1, fanObj))
                 }
             }
-            
             return SystemDiagnostics(
                 temperature = if (json.has("temperature")) json.optDouble("temperature") else null,
                 temperatureThreshold = if (json.has("temperatureThreshold")) json.optDouble("temperatureThreshold") else null,

@@ -352,21 +352,30 @@ class PeplinkPlugin : PollingDevicePlugin {
                 lastSystemDiagnostics = diagnostics
                 
                 // Publish temperature and threshold
-                diagnostics.temperature?.let {
-                    mqttPublisher.publishState("$base/diagnostic/system/temperature", String.format("%.1f", it))
+                if (diagnostics.temperature != null) {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature", String.format("%.1f", diagnostics.temperature))
+                } else {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature", "unavailable")
                 }
-                diagnostics.temperatureThreshold?.let {
-                    mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", String.format("%.0f", it))
+                
+                if (diagnostics.temperatureThreshold != null) {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", String.format("%.0f", diagnostics.temperatureThreshold))
+                } else {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", "unavailable")
                 }
                 
                 // Publish fan information
                 diagnostics.fans.forEach { fan ->
                     mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/status", fan.status)
-                    fan.speedRpm?.let {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", it.toString())
+                    if (fan.speedRpm != null) {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", fan.speedRpm.toString())
+                    } else {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", "unavailable")
                     }
-                    fan.speedPercent?.let {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", it.toString())
+                    if (fan.speedPercent != null) {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", fan.speedPercent.toString())
+                    } else {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", "unavailable")
                     }
                 }
             }
@@ -387,8 +396,8 @@ class PeplinkPlugin : PollingDevicePlugin {
                 mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
             }
             
-            // Calculate and publish bandwidth rates from last WAN status
-            publishBandwidthRates()
+            // Get bandwidth/traffic rates from the traffic API
+            publishBandwidthFromTraffic()
             
             Log.d(TAG, "[$instanceId] Diagnostics poll successful")
         } catch (e: Exception) {
@@ -397,44 +406,26 @@ class PeplinkPlugin : PollingDevicePlugin {
     }
     
     /**
-     * Calculate bandwidth rates from WAN status byte counters and publish to MQTT.
-     * Uses delta calculation from previous snapshot.
+     * Get bandwidth rates from the traffic API and publish to MQTT.
+     * This is more reliable than calculating from byte counters.
      */
-    private fun publishBandwidthRates() {
+    private suspend fun publishBandwidthFromTraffic() {
         val base = getMqttBaseTopic()
-        val currentTime = System.currentTimeMillis()
         
-        for ((connId, wanConn) in lastWanState) {
-            val rxBytes = wanConn.rxBytes ?: continue
-            val txBytes = wanConn.txBytes ?: continue
-            
-            val lastSnapshot = lastBandwidthSnapshot[connId]
-            
-            if (lastSnapshot != null) {
-                val timeDeltaSec = (currentTime - lastSnapshot.timestamp) / 1000.0
-                if (timeDeltaSec > 0) {
-                    // Calculate rates in bytes per second, then convert to Mbps
-                    val rxDelta = (rxBytes - lastSnapshot.rxBytes).coerceAtLeast(0L)
-                    val txDelta = (txBytes - lastSnapshot.txBytes).coerceAtLeast(0L)
+        apiClient.getTrafficStats().onSuccess { stats ->
+            if (stats.isNotEmpty()) {
+                for ((connId, ratesDownloadUp) in stats) {
+                    val downloadMbps = ratesDownloadUp.first
+                    val uploadMbps = ratesDownloadUp.second
                     
-                    val downloadMbps = (rxDelta / timeDeltaSec * 8) / 1_000_000
-                    val uploadMbps = (txDelta / timeDeltaSec * 8) / 1_000_000
-                    
-                    // Publish bandwidth rates
-                    mqttPublisher.publishState("$base/wan/$connId/bandwidth/download_mbps", String.format("%.1f", downloadMbps))
-                    mqttPublisher.publishState("$base/wan/$connId/bandwidth/upload_mbps", String.format("%.1f", uploadMbps))
-                    
-                    Log.d(TAG, "[$instanceId] WAN $connId: ↓${String.format("%.1f", downloadMbps)} Mbps, ↑${String.format("%.1f", uploadMbps)} Mbps")
+                    // Only publish if we have non-zero rates
+                    if (downloadMbps > 0 || uploadMbps > 0) {
+                        mqttPublisher.publishState("$base/wan/$connId/bandwidth/download_mbps", String.format("%.1f", downloadMbps))
+                        mqttPublisher.publishState("$base/wan/$connId/bandwidth/upload_mbps", String.format("%.1f", uploadMbps))
+                    }
                 }
+                Log.d(TAG, "[$instanceId] Published bandwidth for ${stats.size} connections")
             }
-            
-            // Update snapshot for next calculation
-            lastBandwidthSnapshot[connId] = BandwidthSnapshot(
-                timestamp = currentTime,
-                rxBytes = rxBytes,
-                txBytes = txBytes,
-                connId = connId
-            )
         }
     }
 
@@ -761,7 +752,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                 }
             }
 
-            // Bandwidth sensors (per-WAN in Diagnostics section)
+            // Bandwidth sensors (per-WAN, regular sensors not in diagnostic)
             payloads.add(
                 "homeassistant/sensor/${uniqueId}_download_rate/config" to JSONObject().apply {
                     put("name", "${connection.name} Download Rate")
@@ -770,7 +761,6 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("unit_of_measurement", "Mbit/s")
                     put("device_class", "data_rate")
                     put("icon", "mdi:download")
-                    put("entity_category", "diagnostic")
                     put("availability_topic", availabilityTopic)
                     put("payload_available", "online")
                     put("payload_not_available", "offline")
@@ -786,7 +776,6 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("unit_of_measurement", "Mbit/s")
                     put("device_class", "data_rate")
                     put("icon", "mdi:upload")
-                    put("entity_category", "diagnostic")
                     put("availability_topic", availabilityTopic)
                     put("payload_available", "online")
                     put("payload_not_available", "offline")
@@ -810,6 +799,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("device_class", "temperature")
                     put("icon", "mdi:thermometer")
                     put("entity_category", "diagnostic")
+                    put("enabled_by_default", false)
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -824,9 +814,64 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("device_class", "temperature")
                     put("icon", "mdi:alert-thermometer")
                     put("entity_category", "diagnostic")
+                    put("enabled_by_default", false)
                     put("device", deviceInfo)
                 }.toString()
             )
+
+            // Dynamic fan sensors
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_fan_1_speed/config" to JSONObject().apply {
+                    put("name", "Fan 1 Speed")
+                    put("unique_id", "${instanceId}_fan_1_speed")
+                    put("state_topic", "$fullBaseTopic/diagnostic/fan/1/speed_rpm")
+                    put("unit_of_measurement", "rpm")
+                    put("icon", "mdi:fan")
+                    put("entity_category", "diagnostic")
+                    put("enabled_by_default", false)
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_fan_1_status/config" to JSONObject().apply {
+                    put("name", "Fan 1 Status")
+                    put("unique_id", "${instanceId}_fan_1_status")
+                    put("state_topic", "$fullBaseTopic/diagnostic/fan/1/status")
+                    put("icon", "mdi:fan-alert")
+                    put("entity_category", "diagnostic")
+                    put("enabled_by_default", false)
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Add up to 3 fans (most routers have 1-3)
+            for (fanId in 2..3) {
+                payloads.add(
+                    "homeassistant/sensor/${instanceId}_fan_${fanId}_speed/config" to JSONObject().apply {
+                        put("name", "Fan $fanId Speed")
+                        put("unique_id", "${instanceId}_fan_${fanId}_speed")
+                        put("state_topic", "$fullBaseTopic/diagnostic/fan/$fanId/speed_rpm")
+                        put("unit_of_measurement", "rpm")
+                        put("icon", "mdi:fan")
+                        put("entity_category", "diagnostic")
+                        put("enabled_by_default", false)
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+
+                payloads.add(
+                    "homeassistant/sensor/${instanceId}_fan_${fanId}_status/config" to JSONObject().apply {
+                        put("name", "Fan $fanId Status")
+                        put("unique_id", "${instanceId}_fan_${fanId}_status")
+                        put("state_topic", "$fullBaseTopic/diagnostic/fan/$fanId/status")
+                        put("icon", "mdi:fan-alert")
+                        put("entity_category", "diagnostic")
+                        put("enabled_by_default", false)
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+            }
 
             // Serial number sensor
             payloads.add(
@@ -852,35 +897,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                 }.toString()
             )
 
-            // Dynamic fan sensors
-            if (lastSystemDiagnostics != null && lastSystemDiagnostics!!.fans.isNotEmpty()) {
-                lastSystemDiagnostics!!.fans.forEach { fan ->
-                    // Fan speed RPM sensor
-                    payloads.add(
-                        "homeassistant/sensor/${instanceId}_fan_${fan.id}_speed/config" to JSONObject().apply {
-                            put("name", "${fan.name} Speed")
-                            put("unique_id", "${instanceId}_fan_${fan.id}_speed")
-                            put("state_topic", "$fullBaseTopic/diagnostic/fan/${fan.id}/speed_rpm")
-                            put("unit_of_measurement", "rpm")
-                            put("icon", "mdi:fan")
-                            put("entity_category", "diagnostic")
-                            put("device", deviceInfo)
-                        }.toString()
-                    )
 
-                    // Fan status sensor
-                    payloads.add(
-                        "homeassistant/sensor/${instanceId}_fan_${fan.id}_status/config" to JSONObject().apply {
-                            put("name", "${fan.name} Status")
-                            put("unique_id", "${instanceId}_fan_${fan.id}_status")
-                            put("state_topic", "$fullBaseTopic/diagnostic/fan/${fan.id}/status")
-                            put("icon", "mdi:fan-alert")
-                            put("entity_category", "diagnostic")
-                            put("device", deviceInfo)
-                        }.toString()
-                    )
-                }
-            }
         }
 
         Log.i(TAG, "[$instanceId] Generated ${payloads.size} discovery payloads")
