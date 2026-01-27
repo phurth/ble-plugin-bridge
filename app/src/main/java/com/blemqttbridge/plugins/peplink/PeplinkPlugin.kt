@@ -109,15 +109,21 @@ class PeplinkPlugin : PollingDevicePlugin {
             mqttPublisher.subscribeToCommands("$baseTopic/wan/+/priority/set") { topic, payload ->
                 GlobalScope.launch(Dispatchers.IO) {
                     try {
+                        Log.d(TAG, "[$instanceId] Processing priority/set subscription callback")
                         handleCommandSerialized(topic, payload)
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[$instanceId] Priority command handler failed", e)
+                    }
                 }
             }
             mqttPublisher.subscribeToCommands("$baseTopic/wan/+/cellular/reset") { topic, payload ->
                 GlobalScope.launch(Dispatchers.IO) {
                     try {
+                        Log.d(TAG, "[$instanceId] Processing cellular/reset subscription callback")
                         handleCommandSerialized(topic, payload)
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.e(TAG, "[$instanceId] Reset command handler failed", e)
+                    }
                 }
             }
 
@@ -595,10 +601,13 @@ class PeplinkPlugin : PollingDevicePlugin {
      * sequentially rather than in parallel, avoiding race conditions.
      */
     private suspend fun handleCommandSerialized(topic: String, payload: String): Result<Unit> {
+        Log.d(TAG, "[$instanceId] Waiting for command lock (topic=$topic)")
         commandMutex.lock()
+        Log.d(TAG, "[$instanceId] Acquired command lock, executing (topic=$topic)")
         return try {
             handleCommand(topic, payload)
         } finally {
+            Log.d(TAG, "[$instanceId] Releasing command lock (topic=$topic)")
             commandMutex.unlock()
         }
     }
