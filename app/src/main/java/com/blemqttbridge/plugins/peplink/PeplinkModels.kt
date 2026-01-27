@@ -52,7 +52,8 @@ data class WanConnection(
     val ip: String?,  // Assigned IP address
     val statusLed: String?,  // LED status indicator
     val cellular: CellularInfo? = null,
-    val wifi: WifiInfo? = null
+    val wifi: WifiInfo? = null,
+    val simSlotCount: Int = 0  // Number of SIM slots (0 for non-cellular, 1+ for cellular)
 ) {
     companion object {
         /**

@@ -28,8 +28,8 @@ import kotlin.math.roundToInt
  *
  * Configuration:
  * - base_url: Router IP/hostname (e.g., "http://192.168.1.1")
- * - client_id: OAuth client ID from router
- * - client_secret: OAuth client secret from router
+ * - username: Admin username for router login
+ * - password: Admin password for router login
  * - polling_interval: Poll interval in seconds (default: 30)
  * - instance_name: Unique identifier for this router (e.g., "main", "towed")
  */
@@ -54,8 +54,8 @@ class PeplinkPlugin : PollingDevicePlugin {
     private lateinit var mqttPublisher: MqttPublisher
 
     private var baseUrl: String = ""
-    private var clientId: String = ""
-    private var clientSecret: String = ""
+    private var username: String = ""
+    private var password: String = ""
     private var pollingIntervalMs: Long = DEFAULT_POLLING_INTERVAL_MS
     private var instanceName: String = "main"
 
@@ -76,8 +76,8 @@ class PeplinkPlugin : PollingDevicePlugin {
     override fun initialize(context: Context, config: PluginConfig) {
         this.context = context
         this.baseUrl = config.getString("base_url", "")
-        this.clientId = config.getString("client_id", "")
-        this.clientSecret = config.getString("client_secret", "")
+        this.username = config.getString("username", "")
+        this.password = config.getString("password", "")
         this.instanceName = config.getString("instance_name", "main")
         this.pollingIntervalMs = (config.getString("polling_interval", "30").toLongOrNull() ?: 30) * 1000
         this.instanceId = "peplink_$instanceName"
@@ -99,7 +99,7 @@ class PeplinkPlugin : PollingDevicePlugin {
     override suspend fun startPolling(mqttPublisher: MqttPublisher): Result<Unit> {
         return try {
             this.mqttPublisher = mqttPublisher
-            this.apiClient = PeplinkApiClient(baseUrl, clientId, clientSecret)
+            this.apiClient = PeplinkApiClient(baseUrl, username, password)
 
             Log.i(TAG, "[$instanceId] Starting polling...")
 
@@ -236,11 +236,14 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             // Publish state for each WAN connection
             for ((connId, connection) in wanStatus) {
+                // Get enriched connection from hardware config (has simSlotCount set)
+                val enrichedConnection = hardwareConfig?.wanConnections?.get(connId) ?: connection
+                
                 // Publish availability per WAN (enabled -> online/offline)
                 val baseTopic = getMqttBaseTopic()
                 mqttPublisher.publishAvailability("$baseTopic/wan/$connId/availability", connection.enabled)
 
-                publishWanState(connId, connection)
+                publishWanState(connId, enrichedConnection)
 
                 // Note: Usage is now published in publishWanState() method
             }
@@ -530,63 +533,47 @@ class PeplinkPlugin : PollingDevicePlugin {
                 )
             }
 
-            // Sensor: Usage (GB) - base per WAN
-            payloads.add(
-                "homeassistant/sensor/${uniqueId}_usage/config" to JSONObject().apply {
-                    put("name", "${connection.name} Usage (GB)")
-                    put("unique_id", "${uniqueId}_usage")
-                    put("state_topic", "$fullBaseTopic/wan/$connId/usage_gb")
-                    put("unit_of_measurement", "GB")
-                    put("icon", "mdi:gauge")
-                    put("availability_topic", availabilityTopic)
-                    put("payload_available", "online")
-                    put("payload_not_available", "offline")
-                    put("device", deviceInfo)
-                }.toString()
-            )
+            // Sensor: Usage - base per WAN (state=Enabled/Disabled, attributes carry usage/allowance/percent/start)
+            // Skip for multi-SIM cellular connections (use per-SIM sensors instead)
+            val hasMultipleSims = connection.simSlotCount > 1
+            if (!hasMultipleSims) {
+                payloads.add(
+                    "homeassistant/sensor/${uniqueId}_usage/config" to JSONObject().apply {
+                        put("name", "${connection.name}")
+                        put("unique_id", "${uniqueId}_usage")
+                        put("state_topic", "$fullBaseTopic/wan/$connId/usage_state")
+                        put("json_attributes_topic", "$fullBaseTopic/wan/$connId/usage_attributes")
+                        put("icon", "mdi:gauge")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+            }
 
-            // Sensor: Allowance (GB) - plan limit
-            payloads.add(
-                "homeassistant/sensor/${uniqueId}_allowance/config" to JSONObject().apply {
-                    put("name", "${connection.name} Plan Allowance (GB)")
-                    put("unique_id", "${uniqueId}_allowance")
-                    put("state_topic", "$fullBaseTopic/wan/$connId/allowance_gb")
-                    put("icon", "mdi:folder-lock")
-                    put("availability_topic", availabilityTopic)
-                    put("payload_available", "online")
-                    put("payload_not_available", "offline")
-                    put("device", deviceInfo)
-                }.toString()
-            )
+            // Per-SIM slot sensors (for multi-SIM cellular modems)
+            // Peplink supports up to 5 SIM slots: SIM A, SIM B, RemoteSIM, FusionSIM, Peplink eSIM
+            if (connection.simSlotCount > 1) {
+                for (slotId in 1..connection.simSlotCount) {
+                    val simUniqueId = "${uniqueId}_sim${slotId}"
+                    val slotName = getSimSlotName(slotId)
 
-            // Sensor: Usage Percent
-            payloads.add(
-                "homeassistant/sensor/${uniqueId}_usage_percent/config" to JSONObject().apply {
-                    put("name", "${connection.name} Usage Percent")
-                    put("unique_id", "${uniqueId}_usage_percent")
-                    put("state_topic", "$fullBaseTopic/wan/$connId/usage_percent")
-                    put("unit_of_measurement", "%")
-                    put("icon", "mdi:percent")
-                    put("availability_topic", availabilityTopic)
-                    put("payload_available", "online")
-                    put("payload_not_available", "offline")
-                    put("device", deviceInfo)
-                }.toString()
-            )
-
-            // Sensor: Plan Start Date
-            payloads.add(
-                "homeassistant/sensor/${uniqueId}_plan_start_day/config" to JSONObject().apply {
-                    put("name", "${connection.name} Plan Start Day")
-                    put("unique_id", "${uniqueId}_plan_start_day")
-                    put("state_topic", "$fullBaseTopic/wan/$connId/plan_start_day")
-                    put("icon", "mdi:calendar")
-                    put("availability_topic", availabilityTopic)
-                    put("payload_available", "online")
-                    put("payload_not_available", "offline")
-                    put("device", deviceInfo)
-                }.toString()
-            )
+                    payloads.add(
+                        "homeassistant/sensor/${simUniqueId}_usage/config" to JSONObject().apply {
+                            put("name", "${connection.name} $slotName")
+                            put("unique_id", "${simUniqueId}_usage")
+                            put("state_topic", "$fullBaseTopic/wan/$connId/sim/$slotId/usage_state")
+                            put("json_attributes_topic", "$fullBaseTopic/wan/$connId/sim/$slotId/usage_attributes")
+                            put("icon", "mdi:sim")
+                            put("availability_topic", availabilityTopic)
+                            put("payload_available", "online")
+                            put("payload_not_available", "offline")
+                            put("device", deviceInfo)
+                        }.toString()
+                    )
+                }
+            }
         }
 
         Log.i(TAG, "[$instanceId] Generated ${payloads.size} discovery payloads")
@@ -777,31 +764,52 @@ class PeplinkPlugin : PollingDevicePlugin {
             mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/bands", bandsValue)
         }
 
-        // Usage and allowance (published separately with usage data)
+        // Usage and attributes
         lastWanUsage[connId]?.let { usage ->
-            // For multi-SIM cellular, use the first enabled SIM slot's data
-            val activeSlot = usage.simSlots?.values?.firstOrNull { it.enabled && it.hasUsageTracking }
-            val usageMb = activeSlot?.usage ?: usage.usage
-            val limitMb = activeSlot?.limit ?: usage.limit
-            val startDay = activeSlot?.startDate ?: usage.startDate
-            
-            // Usage: Convert to GB and display
-            val usageGb = if (usageMb != null) formatUsageGb(usageMb) else "0"
-            mqttPublisher.publishState("$baseTopic/wan/$connId/usage_gb", usageGb)
-            
-            // Allowance (limit): Convert to GB and display
-            val limitGb = if (limitMb != null) formatUsageGb(limitMb) else "unlimited"
-            mqttPublisher.publishState("$baseTopic/wan/$connId/allowance_gb", limitGb)
+            // For non-multi-SIM connections
+            val hasMultipleSims = usage.simSlots?.isNotEmpty() == true
+            if (!hasMultipleSims) {
+                val isEnabled = usage.enabled
+                mqttPublisher.publishState("$baseTopic/wan/$connId/usage_state", if (isEnabled) "Enabled" else "Disabled")
 
-            // Usage percent
-            val percent = activeSlot?.percent ?: usage.percent ?: computeUsagePercent(usageMb, limitMb)
-            if (percent != null) {
-                mqttPublisher.publishState("$baseTopic/wan/$connId/usage_percent", percent.toString())
+                // Attributes
+                val percent = usage.percent ?: computeUsagePercent(usage.usage, usage.limit)
+                val startOrdinal = formatOrdinalDay(parseStartDay(usage.startDate))
+                val attributesJson = JSONObject().apply {
+                    put("usage", if (usage.usage != null) "${formatUsageGb(usage.usage)} GB" else "0 GB")
+                    put("allowance", if (usage.limit != null) "${formatUsageGb(usage.limit)} GB" else "unlimited")
+                    put("percent_used", if (percent != null) "$percent%" else "0%")
+                    put("start_day", startOrdinal ?: "unknown")
+                }
+                mqttPublisher.publishState("$baseTopic/wan/$connId/usage_attributes", attributesJson.toString())
             }
-            
-            // Plan start day (day of month)
-            formatStartDay(startDay)?.let { formattedDay ->
-                mqttPublisher.publishState("$baseTopic/wan/$connId/plan_start_day", formattedDay)
+        }
+
+        // Per-SIM publishing: Always loop through all slots
+        // This ensures disabled/missing slots always show "Disabled" state
+        Log.d(TAG, "[$instanceId] WAN $connId: simSlotCount=${connection.simSlotCount}, type=${connection.type}")
+        if (connection.simSlotCount > 1) {
+            Log.d(TAG, "[$instanceId] WAN $connId: Publishing per-SIM states (slotCount=${connection.simSlotCount})")
+            for (slotId in 1..connection.simSlotCount) {
+                val slot = lastWanUsage[connId]?.simSlots?.get(slotId)
+                Log.d(TAG, "[$instanceId] WAN $connId SIM $slotId: slot=$slot")
+                if (slot != null) {
+                    mqttPublisher.publishState("$baseTopic/wan/$connId/sim/$slotId/usage_state", if (slot.enabled) "Enabled" else "Disabled")
+                    if (slot.enabled && slot.hasUsageTracking) {
+                        val simPercent = slot.percent ?: computeUsagePercent(slot.usage, slot.limit)
+                        val simStartOrdinal = formatOrdinalDay(parseStartDay(slot.startDate))
+                        val simAttributes = JSONObject().apply {
+                            put("usage", if (slot.usage != null) "${formatUsageGb(slot.usage)} GB" else "0 GB")
+                            put("allowance", if (slot.limit != null) "${formatUsageGb(slot.limit)} GB" else "unlimited")
+                            put("percent_used", if (simPercent != null) "$simPercent%" else "0%")
+                            put("start_day", simStartOrdinal ?: "unknown")
+                        }
+                        mqttPublisher.publishState("$baseTopic/wan/$connId/sim/$slotId/usage_attributes", simAttributes.toString())
+                    }
+                } else {
+                    // Slot not in usage data - always publish Disabled
+                    mqttPublisher.publishState("$baseTopic/wan/$connId/sim/$slotId/usage_state", "Disabled")
+                }
             }
         }
     }
@@ -834,21 +842,34 @@ class PeplinkPlugin : PollingDevicePlugin {
         }
     }
 
-    private fun formatStartDay(start: String?): String? {
+    private fun parseStartDay(start: String?): Int? {
         if (start.isNullOrBlank()) return null
-        // Try epoch seconds
-        val epoch = start.toLongOrNull()
-        if (epoch != null) {
-            val day = Instant.ofEpochSecond(epoch).atZone(ZoneId.systemDefault()).dayOfMonth
-            return day.toString()
-        }
+        return start.toIntOrNull()?.takeIf { it in 1..31 }
+    }
 
-        // Try ISO date/time (YYYY-MM-DD or ISO datetime)
-        return try {
-            val date = LocalDate.parse(start.substring(0, minOf(start.length, 10)))
-            date.dayOfMonth.toString()
-        } catch (e: Exception) {
-            null
+    private fun formatOrdinalDay(day: Int?): String? {
+        if (day == null) return null
+        if (day in 11..13) return "${day}th"
+        return when (day % 10) {
+            1 -> "${day}st"
+            2 -> "${day}nd"
+            3 -> "${day}rd"
+            else -> "${day}th"
+        }
+    }
+
+    /**
+     * Map SIM slot ID to Peplink slot name.
+     * Peplink routers use these slot names in their UI.
+     */
+    private fun getSimSlotName(slotId: Int): String {
+        return when (slotId) {
+            1 -> "SIM A"
+            2 -> "SIM B"
+            3 -> "RemoteSIM"
+            4 -> "FusionSIM"
+            5 -> "Peplink eSIM"
+            else -> "SIM $slotId"
         }
     }
 }

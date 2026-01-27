@@ -92,17 +92,9 @@ object PeplinkDiscovery {
             val wanConnections = wanStatusResult.getOrThrow().toMutableMap()
             DiscoveryLogger.logInitialConnections(wanConnections.size)
 
-            // Step 2: Query usage data to detect SIM slots for cellular connections
-            val cellularConns = wanConnections.values.filter { it.type == WanType.CELLULAR }
-            if (cellularConns.isNotEmpty()) {
-                val usageResult = apiClient.getWanUsage()
-                if (usageResult.isSuccess) {
-                    val usageData = usageResult.getOrThrow()
-                    enrichCellularWithSimSlots(wanConnections, usageData)
-                } else {
-                    Log.w(TAG, "Usage query failed, SIM slot detection unavailable")
-                }
-            }
+            // Step 2: Enrich cellular connections with SIM slot count (always 2 for Peplink cellular modems)
+            // This happens regardless of usage API availability, ensuring per-SIM discovery always works
+            enrichCellularWithSimSlots(wanConnections)
 
             // Step 3: Log each discovered connection
             wanConnections.values.sortedBy { it.connId }.forEach { conn ->
@@ -123,23 +115,19 @@ object PeplinkDiscovery {
     }
 
     /**
-     * Enrich cellular connections with SIM slot information from usage data.
-     *
-     * Usage API response structure reveals SIM slot configuration:
-     * - Single SIM: response['2'] = flat object
-     * - Dual SIM: response['2']['1'] and response['2']['2']
+     * Enrich cellular connections with SIM slot information.
+     * Peplink cellular modems support up to 5 SIM slots:
+     * 1=SIM A, 2=SIM B, 3=RemoteSIM, 4=FusionSIM, 5=Peplink eSIM
+     * This is not dependent on usage data availability.
      */
     private fun enrichCellularWithSimSlots(
-        wanConnections: MutableMap<Int, WanConnection>,
-        usageData: Map<Int, WanUsage>
+        wanConnections: MutableMap<Int, WanConnection>
     ) {
         wanConnections.forEach { (connId, conn) ->
             if (conn.type == WanType.CELLULAR) {
-                val usage = usageData[connId]
-                if (usage != null && usage.simSlots != null) {
-                    // This is a dual-SIM cellular connection
-                    Log.d(TAG, "WAN $connId has ${usage.simSlots.size} SIM slot(s)")
-                }
+                // All Peplink cellular connections support up to 5 SIM slots
+                Log.d(TAG, "WAN $connId (cellular) has 5 possible SIM slots")
+                wanConnections[connId] = conn.copy(simSlotCount = 5)
             }
         }
     }

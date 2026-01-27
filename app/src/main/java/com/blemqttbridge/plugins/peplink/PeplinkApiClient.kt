@@ -11,11 +11,11 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Peplink Router API Client with automatic token management.
+ * Peplink Router API Client with automatic cookie-based authentication.
  *
  * Handles:
- * - OAuth2-like token authentication with 48-hour expiration
- * - Automatic token refresh with exponential backoff
+ * - Cookie-based session authentication using admin username/password
+ * - Automatic re-authentication on session expiration (401 errors)
  * - All API endpoint calls (status, control, info)
  * - Error handling and retry logic
  *
@@ -23,8 +23,8 @@ import java.util.concurrent.TimeUnit
  */
 class PeplinkApiClient(
     private val baseUrl: String,  // e.g., "http://192.168.1.1"
-    private val clientId: String,
-    private val clientSecret: String
+    private val username: String,
+    private val password: String
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -34,19 +34,14 @@ class PeplinkApiClient(
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    // Token management
-    private var accessToken: String? = null
-    private var tokenExpiresAt: Long = 0  // System.currentTimeMillis() when token expires
-    private val tokenMutex = Mutex()
-
-    // Retry configuration
-    private var tokenRefreshAttempts = 0
-    private val maxTokenRefreshAttempts = 3
-    private val tokenRefreshBackoffMs = longArrayOf(1000, 5000, 15000)
+    // Cookie-based authentication management
+    private var authCookie: String? = null  // pauth cookie value
+    private var isConnected: Boolean = false
+    private val authMutex = Mutex()
 
     companion object {
         private const val TAG = "PeplinkApiClient"
-        private const val TOKEN_GRANT_PATH = "/api/auth.token.grant"
+        private const val LOGIN_PATH = "/api/login"
         private const val WAN_STATUS_PATH = "/api/status.wan.connection"
         private const val WAN_USAGE_PATH = "/api/status.wan.connection.allowance"
         private const val WAN_PRIORITY_PATH = "/api/config.wan.connection.priority"
@@ -56,43 +51,186 @@ class PeplinkApiClient(
         private const val STATUS_PEPVPN_PATH = "/api/status.pepvpn"
     }
 
-    // ===== TOKEN MANAGEMENT =====
+    // ===== AUTHENTICATION MANAGEMENT =====
 
     /**
-     * Get a valid access token, refreshing if necessary.
-     * Thread-safe with mutex to prevent concurrent refresh attempts.
+     * Ensure connected with valid session cookie.
+     * Thread-safe with mutex to prevent concurrent login attempts.
      */
-    private suspend fun getAccessToken(): Result<String> = tokenMutex.withLock {
-        // Check if current token is still valid (with 5-minute buffer)
-        val now = System.currentTimeMillis()
-        if (accessToken != null && tokenExpiresAt > now + (5 * 60 * 1000)) {
-            return Result.success(accessToken!!)
+    private suspend fun ensureConnected(forceReconnect: Boolean = false): Result<Unit> = authMutex.withLock {
+        if (isConnected && authCookie != null && !forceReconnect) {
+            return Result.success(Unit)
         }
 
-        // Token expired or doesn't exist, refresh it
-        Log.i(TAG, "Access token expired or missing, refreshing...")
-        return refreshToken()
+        // Not connected or forced reconnect, authenticate
+        Log.i(TAG, "Authenticating with router...")
+        return login()
     }
-    /**
-     * Get number of currently connected clients.
-     */
-    suspend fun getConnectedDevicesCount(): Result<Int> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
 
-        val url = "$baseUrl$STATUS_CLIENT_PATH?accessToken=$token"
+    /**
+     * Login to router and extract auth cookie.
+     */
+    private suspend fun login(): Result<Unit> {
+        val payload = JSONObject().apply {
+            put("username", username)
+            put("password", password)
+            put("challenge", "challenge")  // Required by Peplink API
+        }.toString()
+
         val request = Request.Builder()
-            .url(url)
-            .get()
+            .url("$baseUrl$LOGIN_PATH")
+            .post(payload.toRequestBody(jsonMediaType))
             .build()
 
         return try {
             val response = httpClient.newCall(request).execute()
             val responseBody = response.body?.string()
 
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("Client status request failed: HTTP ${response.code}"))
+            if (response.code == 401) {
+                Log.e(TAG, "Login failed: Invalid credentials (401)")
+                isConnected = false
+                return Result.failure(Exception("Authentication failed: Invalid username or password"))
             }
 
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Login failed: HTTP ${response.code}")
+                isConnected = false
+                return Result.failure(Exception("Login failed: HTTP ${response.code}"))
+            }
+
+            if (responseBody == null) {
+                Log.e(TAG, "Login failed: Empty response body")
+                isConnected = false
+                return Result.failure(Exception("Login failed: Empty response"))
+            }
+
+            val json = JSONObject(responseBody)
+            if (json.optString("stat") != "ok") {
+                val errorMsg = json.optString("message", "Unknown error")
+                Log.e(TAG, "Login failed: $errorMsg")
+                isConnected = false
+                return Result.failure(Exception("Login failed: $errorMsg"))
+            }
+
+            // Extract pauth cookie from response headers
+            Log.d(TAG, "Response headers: ${response.headers}")
+            val setCookieHeaders = response.headers("Set-Cookie")
+            Log.d(TAG, "Set-Cookie headers count: ${setCookieHeaders.size}")
+            setCookieHeaders.forEachIndexed { idx, header ->
+                Log.d(TAG, "Set-Cookie[$idx]: $header")
+            }
+            
+            val cookieHeader = setCookieHeaders.find { it.contains("pauth=") }
+            if (cookieHeader != null) {
+                Log.d(TAG, "Found pauth cookie header: $cookieHeader")
+                // Parse cookie value (format: "pauth=VALUE; HttpOnly; SameSite=Strict")
+                val cookieParts = cookieHeader.split(';')
+                for (part in cookieParts) {
+                    if (part.trim().startsWith("pauth=")) {
+                        authCookie = part.trim().substring(6)  // Remove "pauth=" prefix
+                        Log.d(TAG, "Extracted cookie value (length: ${authCookie?.length})")
+                        break
+                    }
+                }
+            } else {
+                Log.w(TAG, "No Set-Cookie header with pauth found")
+            }
+
+            if (authCookie == null) {
+                Log.e(TAG, "Login failed: No auth cookie received")
+                isConnected = false
+                return Result.failure(Exception("Login failed: No auth cookie"))
+            }
+
+            isConnected = true
+            Log.i(TAG, "Successfully authenticated with router")
+            Result.success(Unit)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Login exception: ${e.message}", e)
+            isConnected = false
+            Result.failure(e)
+        }
+    }
+    // ===== API CALLS =====
+
+    /**
+     * Make an API request with automatic authentication and re-authentication on 401.
+     */
+    private suspend fun makeAuthenticatedRequest(url: String, method: String = "GET", body: String? = null): Result<String> {
+        // Ensure we're connected
+        ensureConnected().getOrElse { return Result.failure(it) }
+
+        val requestBuilder = Request.Builder().url(url)
+        
+        // Add auth cookie header
+        authCookie?.let {
+            requestBuilder.addHeader("Cookie", "pauth=$it")
+        }
+
+        // Add body if provided
+        if (method == "POST" && body != null) {
+            requestBuilder.post(body.toRequestBody(jsonMediaType))
+        } else if (method == "GET") {
+            requestBuilder.get()
+        }
+
+        val request = requestBuilder.build()
+
+        return try {
+            val response = httpClient.newCall(request).execute()
+            val responseBody = response.body?.string()
+
+            // Check for 401 - session expired, try to re-authenticate once
+            if (response.code == 401) {
+                Log.w(TAG, "Session expired (401), re-authenticating...")
+                ensureConnected(forceReconnect = true).getOrElse { return Result.failure(it) }
+
+                // Retry request with new cookie
+                val retryRequest = Request.Builder()
+                    .url(url)
+                    .addHeader("Cookie", "pauth=$authCookie")
+
+                if (method == "POST" && body != null) {
+                    retryRequest.post(body.toRequestBody(jsonMediaType))
+                } else {
+                    retryRequest.get()
+                }
+
+                val retryResponse = httpClient.newCall(retryRequest.build()).execute()
+                val retryBody = retryResponse.body?.string()
+
+                if (retryResponse.code == 401) {
+                    return Result.failure(Exception("Authentication failed after retry"))
+                }
+
+                if (!retryResponse.isSuccessful || retryBody == null) {
+                    return Result.failure(Exception("Request failed after retry: HTTP ${retryResponse.code}"))
+                }
+
+                return Result.success(retryBody)
+            }
+
+            if (!response.isSuccessful || responseBody == null) {
+                return Result.failure(Exception("Request failed: HTTP ${response.code}"))
+            }
+
+            Result.success(responseBody)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Request exception: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Get number of currently connected clients.
+     */
+    suspend fun getConnectedDevicesCount(): Result<Int> {
+        val url = "$baseUrl$STATUS_CLIENT_PATH"
+        val responseBody = makeAuthenticatedRequest(url).getOrElse { return Result.failure(it) }
+
+        return try {
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -115,22 +253,10 @@ class PeplinkApiClient(
      * Returns a map of profileId to Triple(name, type, status).
      */
     suspend fun getPepVpnProfiles(): Result<Map<String, Triple<String, String, String>>> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
-        val url = "$baseUrl$STATUS_PEPVPN_PATH?accessToken=$token"
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
+        val url = "$baseUrl$STATUS_PEPVPN_PATH"
+        val responseBody = makeAuthenticatedRequest(url).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("PepVPN status request failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -158,83 +284,6 @@ class PeplinkApiClient(
         }
     }
 
-
-    /**
-     * Request a new access token from the router.
-     * Uses exponential backoff on failures.
-     */
-    private suspend fun refreshToken(): Result<String> {
-        val payload = JSONObject().apply {
-            put("clientId", clientId)
-            put("clientSecret", clientSecret)
-            put("scope", "api")
-        }.toString()
-
-        val request = Request.Builder()
-            .url("$baseUrl$TOKEN_GRANT_PATH")
-            .post(payload.toRequestBody(jsonMediaType))
-            .build()
-
-        return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful) {
-                Log.e(TAG, "Token grant failed: HTTP ${response.code}")
-                return handleTokenRefreshFailure()
-            }
-
-            if (responseBody == null) {
-                Log.e(TAG, "Token grant failed: Empty response body")
-                return handleTokenRefreshFailure()
-            }
-
-            val json = JSONObject(responseBody)
-            if (json.optString("stat") != "ok") {
-                val errorMsg = json.optString("message", "Unknown error")
-                Log.e(TAG, "Token grant failed: $errorMsg")
-                return handleTokenRefreshFailure()
-            }
-
-            val responseObj = json.getJSONObject("response")
-            val token = responseObj.getString("accessToken")
-            val expiresIn = responseObj.optInt("expiresIn", 172800)  // Default 48 hours
-
-            // Store token with expiration time
-            accessToken = token
-            tokenExpiresAt = System.currentTimeMillis() + (expiresIn * 1000L)
-            tokenRefreshAttempts = 0  // Reset failure counter
-
-            Log.i(TAG, "Access token refreshed successfully (expires in ${expiresIn}s)")
-            Result.success(token)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Token grant exception: ${e.message}", e)
-            handleTokenRefreshFailure()
-        }
-    }
-
-    /**
-     * Handle token refresh failure with exponential backoff.
-     */
-    private suspend fun handleTokenRefreshFailure(): Result<String> {
-        tokenRefreshAttempts++
-        if (tokenRefreshAttempts >= maxTokenRefreshAttempts) {
-            val error = "Token refresh failed after $maxTokenRefreshAttempts attempts"
-            Log.e(TAG, error)
-            tokenRefreshAttempts = 0  // Reset for next cycle
-            return Result.failure(Exception(error))
-        }
-
-        val backoffMs = tokenRefreshBackoffMs[tokenRefreshAttempts - 1]
-        Log.w(TAG, "Token refresh attempt $tokenRefreshAttempts failed, retrying in ${backoffMs}ms...")
-        kotlinx.coroutines.delay(backoffMs)
-
-        return refreshToken()
-    }
-
-    // ===== API CALLS =====
-
     /**
      * Get WAN connection status for specified connection IDs.
      *
@@ -242,22 +291,10 @@ class PeplinkApiClient(
      * @return Map of connId to WanConnection, or error
      */
     suspend fun getWanStatus(connIds: String = "1 2 3 4 5"): Result<Map<Int, WanConnection>> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
-        val url = "$baseUrl$WAN_STATUS_PATH?accessToken=$token&id=$connIds"
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
+        val url = "$baseUrl$WAN_STATUS_PATH?id=$connIds"
+        val responseBody = makeAuthenticatedRequest(url).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("WAN status request failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -290,22 +327,10 @@ class PeplinkApiClient(
      * @return Map of connId to WanUsage, or error
      */
     suspend fun getWanUsage(): Result<Map<Int, WanUsage>> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
-        val url = "$baseUrl$WAN_USAGE_PATH?accessToken=$token"
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
+        val url = "$baseUrl$WAN_USAGE_PATH"
+        val responseBody = makeAuthenticatedRequest(url).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("WAN usage request failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -340,8 +365,6 @@ class PeplinkApiClient(
      * @return Result indicating success or error
      */
     suspend fun setWanPriority(connId: Int, priority: Int?): Result<Unit> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
         val payload = JSONObject().apply {
             put("instantActive", true)
             put("list", org.json.JSONArray().apply {
@@ -356,20 +379,10 @@ class PeplinkApiClient(
             })
         }.toString()
 
-        val url = "$baseUrl$WAN_PRIORITY_PATH?accessToken=$token"
-        val request = Request.Builder()
-            .url(url)
-            .post(payload.toRequestBody(jsonMediaType))
-            .build()
+        val url = "$baseUrl$WAN_PRIORITY_PATH"
+        val responseBody = makeAuthenticatedRequest(url, "POST", payload).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("Priority change failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -392,26 +405,14 @@ class PeplinkApiClient(
      * @return Result indicating success or error
      */
     suspend fun resetCellularModem(connId: Int): Result<Unit> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
         val payload = JSONObject().apply {
             put("connId", connId.toString())
         }.toString()
 
-        val url = "$baseUrl$CELLULAR_RESET_PATH?accessToken=$token"
-        val request = Request.Builder()
-            .url(url)
-            .post(payload.toRequestBody(jsonMediaType))
-            .build()
+        val url = "$baseUrl$CELLULAR_RESET_PATH"
+        val responseBody = makeAuthenticatedRequest(url, "POST", payload).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("Modem reset failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))
@@ -431,22 +432,10 @@ class PeplinkApiClient(
      * Parses /api/info.firmware and returns the version of the entry with inUse=true.
      */
     suspend fun getFirmwareVersion(): Result<String> {
-        val token = getAccessToken().getOrElse { return Result.failure(it) }
-
-        val url = "$baseUrl$INFO_FIRMWARE_PATH?accessToken=$token"
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .build()
+        val url = "$baseUrl$INFO_FIRMWARE_PATH"
+        val responseBody = makeAuthenticatedRequest(url).getOrElse { return Result.failure(it) }
 
         return try {
-            val response = httpClient.newCall(request).execute()
-            val responseBody = response.body?.string()
-
-            if (!response.isSuccessful || responseBody == null) {
-                return Result.failure(Exception("Firmware info request failed: HTTP ${response.code}"))
-            }
-
             val json = JSONObject(responseBody)
             if (json.optString("stat") != "ok") {
                 return Result.failure(Exception("API error: ${json.optString("message")}"))

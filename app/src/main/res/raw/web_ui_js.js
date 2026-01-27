@@ -616,12 +616,12 @@ async function confirmAddInstance() {
     } else if (pluginType === 'peplink') {
         // Peplink is a polling plugin - collect REST API config
         let baseUrl = document.getElementById('new-base-url')?.value.trim();
-        const clientId = document.getElementById('new-client-id')?.value.trim();
-        const clientSecret = document.getElementById('new-client-secret')?.value.trim();
+        const username = document.getElementById('new-username')?.value.trim();
+        const password = document.getElementById('new-password')?.value.trim();
         const pollingInterval = document.getElementById('new-polling-interval')?.value.trim();
 
-        if (!baseUrl || !clientId || !clientSecret) {
-            alert('Please fill in all required Peplink fields (URL, Client ID, Client Secret)');
+        if (!baseUrl || !username || !password) {
+            alert('Please fill in all required Peplink fields (URL, Username, Password)');
             return;
         }
 
@@ -631,8 +631,8 @@ async function confirmAddInstance() {
         }
 
         config.base_url = baseUrl;
-        config.client_id = clientId;
-        config.client_secret = clientSecret;
+        config.username = username;
+        config.password = password;
         if (pollingInterval) config.polling_interval = pollingInterval;
 
         // Use polling plugin API instead of regular instance API
@@ -926,12 +926,12 @@ function updatePluginSpecificFields() {
                 <div style="margin-top: 4px; font-size: 12px; color: #666;">Router's local IP address or hostname</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client ID: <span style="color: #f44336;">*</span></label>
-                <input type="text" id="new-client-id" placeholder="OAuth2 Client ID from router" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username: <span style="color: #f44336;">*</span></label>
+                <input type="text" id="new-username" placeholder="admin" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client Secret: <span style="color: #f44336;">*</span></label>
-                <input type="password" id="new-client-secret" placeholder="OAuth2 Client Secret from router" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password: <span style="color: #f44336;">*</span></label>
+                <input type="password" id="new-password" placeholder="Admin password" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Interval (seconds):</label>
