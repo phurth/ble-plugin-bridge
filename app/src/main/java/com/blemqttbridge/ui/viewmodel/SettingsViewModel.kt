@@ -9,6 +9,7 @@ import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
 import kotlinx.coroutines.flow.*
+import com.blemqttbridge.core.MqttService
 import kotlinx.coroutines.launch
 
 /**
@@ -87,7 +88,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _pluginStatuses = MutableStateFlow<Map<String, BaseBleService.Companion.PluginStatus>>(emptyMap())
     val pluginStatuses: StateFlow<Map<String, BaseBleService.Companion.PluginStatus>> = _pluginStatuses
     
-    private val _mqttConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.mqttConnected.value)
+    private val _mqttConnectedStatus = MutableStateFlow(MqttService.connectionStatus.value)
     val mqttConnectedStatus: StateFlow<Boolean> = _mqttConnectedStatus
     
     // BLE scanning status
@@ -129,16 +130,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
         }
         
-        // Combine serviceRunning with mqttConnected
+        // Observe MQTT connection independently of BLE service
         viewModelScope.launch {
-            combine(
-                BaseBleService.serviceRunning,
-                BaseBleService.mqttConnected
-            ) { running, connected ->
-                Pair(running, connected)
-            }.collect { (running, connected) ->
-                android.util.Log.i("SettingsViewModel", "MQTT status updated: $connected (service running: $running)")
-                _mqttConnectedStatus.value = running && connected
+            MqttService.connectionStatus.collect { connected ->
+                android.util.Log.i("SettingsViewModel", "MQTT status updated: $connected")
+                _mqttConnectedStatus.value = connected
             }
         }
         

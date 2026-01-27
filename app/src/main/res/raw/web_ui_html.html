@@ -17,28 +17,32 @@
         </div>
 
         <div class="card">
-            <h2>BLE Service Status</h2>
-            <div class="section-helper">Start/stop BLE independently from MQTT and polling</div>
-            <div id="service-status" class="loading">Loading...</div>
-        </div>
-
-        <div class="card">
-            <h2>HTTP Polling Plugins</h2>
-            <div class="section-helper">Control HTTP/REST-based plugins (Peplink, etc.) independently from BLE service</div>
-            <div id="polling-status" class="loading">Loading...</div>
-        </div>
-
-        <div class="card">
-            <h2>MQTT Configuration</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">MQTT Configuration</h2>
+                <div id="mqtt-toggle-container"></div>
+            </div>
             <div class="section-helper">Note: MQTT service must be stopped to edit the MQTT configuration</div>
             <div id="config-info" class="loading">Loading...</div>
         </div>
 
         <div class="card">
-            <h2>Plugin Instances</h2>
-            <div class="section-helper">Note: Service must be stopped to add/remove/edit plugin instances</div>
-            <button id="add-instance-btn" class="add-instance-btn" onclick="showAddInstanceDialog()" disabled style="margin-bottom: 15px;">+ Add Plugin Instance</button>
-            <div id="plugin-status" class="loading">Loading...</div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">BLE Plugins</h2>
+                <div id="ble-toggle-container"></div>
+            </div>
+            <div class="section-helper">Note: BLE service must be stopped to add/remove/edit</div>
+            <button id="add-ble-instance-btn" class="add-instance-btn" onclick="showAddInstanceDialog('ble')" disabled style="margin-bottom: 15px;">+ Add BLE Plugin Instance</button>
+            <div id="ble-plugin-status" class="loading">Loading...</div>
+        </div>
+
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">HTTP Plugins</h2>
+                <div id="http-toggle-container"></div>
+            </div>
+            <div class="section-helper">Note: HTTP polling service must be stopped to add/remove/edit</div>
+            <button id="add-http-instance-btn" class="add-instance-btn" onclick="showAddInstanceDialog('http')" disabled style="margin-bottom: 15px;">+ Add HTTP Plugin Instance</button>
+            <div id="http-plugin-status" class="loading">Loading...</div>
         </div>
 
         <!-- Add Instance Modal -->

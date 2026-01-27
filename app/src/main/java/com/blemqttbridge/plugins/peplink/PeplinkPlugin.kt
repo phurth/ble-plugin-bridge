@@ -134,7 +134,17 @@ class PeplinkPlugin : PollingDevicePlugin {
         return try {
             // Query WAN status
             val statusResult = apiClient.getWanStatus("1 2 3 4 5 6 7 8 9 10")
+            
+            // Report API connectivity status
+            val connected = statusResult.isSuccess
+            val authenticated = true  // OAuth is handled by apiClient; if we got here, auth succeeded
+            val dataHealthy = statusResult.isSuccess && statusResult.getOrNull()?.isNotEmpty() == true
+            
+            // Report status to the service for health tracking
+            mqttPublisher.updatePluginStatus(instanceId, connected, authenticated, dataHealthy)
+            
             if (statusResult.isFailure) {
+                Log.w(TAG, "[$instanceId] API call failed: ${statusResult.exceptionOrNull()?.message}")
                 return statusResult.map { Unit }
             }
 
@@ -151,6 +161,8 @@ class PeplinkPlugin : PollingDevicePlugin {
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "[$instanceId] Poll failed", e)
+            // Report unhealthy status on exception
+            mqttPublisher.updatePluginStatus(instanceId, false, false, false)
             Result.failure(e)
         }
     }

@@ -47,6 +47,20 @@ class MqttService : Service() {
         private var instance: MqttService? = null
         
         fun getInstance(): MqttService? = instance
+        
+        /**
+         * Global StateFlow tracking MQTT connection status across all components.
+         * BaseBleService observes this to update its mqttConnected state.
+         */
+        private val _connectionStatus = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val connectionStatus: kotlinx.coroutines.flow.StateFlow<Boolean> = _connectionStatus
+        
+        fun setConnectionStatus(connected: Boolean) {
+            if (_connectionStatus.value != connected) {
+                Log.i(TAG, "🔌 Global MQTT connection status changed: $connected")
+                _connectionStatus.value = connected
+            }
+        }
     }
     
     override fun onCreate() {
@@ -123,6 +137,7 @@ class MqttService : Service() {
                 setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                     override fun onConnectionStatusChanged(connected: Boolean) {
                         isConnected = connected
+                        setConnectionStatus(connected)  // Notify all observers globally
                         updateNotification(if (connected) "Connected" else "Disconnected")
                     }
                 })
@@ -132,15 +147,18 @@ class MqttService : Service() {
             if (result?.isSuccess == true) {
                 Log.i(TAG, "MQTT connected successfully")
                 isConnected = true
+                setConnectionStatus(true)  // Notify all observers globally
                 updateNotification("Connected")
             } else {
                 Log.e(TAG, "Failed to connect to MQTT: ${result?.exceptionOrNull()}")
                 isConnected = false
+                setConnectionStatus(false)  // Notify all observers globally
                 updateNotification("Connection Failed")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to MQTT", e)
             isConnected = false
+            setConnectionStatus(false)  // Notify all observers globally
             updateNotification("Error: ${e.message}")
         }
     }
@@ -152,6 +170,7 @@ class MqttService : Service() {
         }
         mqttPlugin = null
         isConnected = false
+        setConnectionStatus(false)  // Notify all observers globally
     }
     
     /**

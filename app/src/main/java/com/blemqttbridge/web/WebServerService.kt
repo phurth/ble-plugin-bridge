@@ -73,7 +73,35 @@ class WebServerService : Service() {
             Log.i(TAG, "Web server started on port $port")
             updateNotification("Web UI running on port $port")
 
-            // Auto-start polling if it was enabled
+            // Auto-start MQTT if it was enabled (start first to provide publisher)
+            val mqttEnabled = settings.mqttEnabled.first()
+            if (mqttEnabled) {
+                Log.i(TAG, "Auto-starting MQTT service (was enabled)")
+                val mqttIntent = Intent(applicationContext, com.blemqttbridge.core.MqttService::class.java).apply {
+                    action = com.blemqttbridge.core.MqttService.ACTION_START
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(mqttIntent)
+                } else {
+                    startService(mqttIntent)
+                }
+            }
+
+            // Auto-start BLE if it was enabled
+            val bleEnabled = settings.bleEnabled.first()
+            if (bleEnabled) {
+                Log.i(TAG, "Auto-starting BLE service (was enabled)")
+                val bleIntent = Intent(applicationContext, BaseBleService::class.java).apply {
+                    action = BaseBleService.ACTION_START_SCAN
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(bleIntent)
+                } else {
+                    startService(bleIntent)
+                }
+            }
+
+            // Auto-start polling if it was enabled (after starting MQTT)
             val pollingEnabled = settings.pollingEnabled.first()
             if (pollingEnabled) {
                 Log.i(TAG, "Auto-starting polling service (was enabled)")

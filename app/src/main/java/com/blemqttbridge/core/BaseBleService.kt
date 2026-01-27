@@ -100,6 +100,10 @@ class BaseBleService : Service() {
         private val _pluginStatuses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
         val pluginStatuses: kotlinx.coroutines.flow.StateFlow<Map<String, PluginStatus>> = _pluginStatuses
         
+        // Polling (HTTP) plugin status tracking - for plugins like Peplink
+        private val _pollingPluginStatuses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
+        val pollingPluginStatuses: kotlinx.coroutines.flow.StateFlow<Map<String, PluginStatus>> = _pollingPluginStatuses
+        
         private val _mqttConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
         val mqttConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _mqttConnected
         
@@ -266,6 +270,22 @@ class BaseBleService : Service() {
             }
         }
         
+        /**
+         * Update polling (HTTP) plugin status (e.g., Peplink).
+         * Called by polling plugins to report their health status.
+         */
+        fun updatePollingPluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
+            val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
+            val newStatuses = _pollingPluginStatuses.value.toMutableMap()
+            newStatuses[pluginId] = status
+            
+            Log.d(TAG, "📊 Updated polling plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
+            _pollingPluginStatuses.value = newStatuses
+            if (connected && authenticated && dataHealthy) {
+                appendServiceLog("Polling plugin ready: $pluginId")
+            }
+        }
+        
         override fun updateMqttStatus(connected: Boolean) {
             Log.i(TAG, "📊 updateMqttStatus: connected=$connected (was ${_mqttConnected.value})")
             appendServiceLog("MQTT connection status: ${if (connected) "connected" else "disconnected"}")
@@ -364,6 +384,14 @@ class BaseBleService : Service() {
         } else {
             Log.i(TAG, "⏰ Keepalive is disabled, skipping schedule")
         }
+        
+        // Observe MqttService connection status changes globally
+        serviceScope.launch {
+            MqttService.connectionStatus.collect { connected ->
+                Log.i(TAG, "📊 Observed MQTT connection status change: $connected")
+                _mqttConnected.value = connected
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -385,12 +413,10 @@ class BaseBleService : Service() {
                 Log.i(TAG, "Service marked as running")
                 
                 val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
-                val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
-                val outputConfig = AppConfig.getMqttConfig(applicationContext)
                 
                 serviceScope.launch {
                     try {
-                        initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
+                        initializeMultiplePlugins(enabledBlePlugins)
                         if (isKeepAliveEnabled()) {
                             Log.i(TAG, "⏰ Scheduling keepalive from ACTION_START_SCAN (primary path)")
                             scheduleKeepAlive()
@@ -433,10 +459,8 @@ class BaseBleService : Service() {
                             _serviceRunning.value = true
                             
                             val enabledBlePlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
-                            val outputPluginId = "mqtt"
-                            val outputConfig = AppConfig.getMqttConfig(applicationContext)
                             
-                            initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
+                            initializeMultiplePlugins(enabledBlePlugins)
                             
                             if (isKeepAliveEnabled()) {
                                 Log.i(TAG, "⏰ Scheduling keepalive from auto-start path")
@@ -544,6 +568,7 @@ class BaseBleService : Service() {
         ServiceStateManager.setServiceRunning(applicationContext, false)
         _serviceRunning.value = false
         _pluginStatuses.value = emptyMap()
+        // Don't clear _pollingPluginStatuses - polling service is independent and should maintain its state
         _mqttConnected.value = false
         Log.i(TAG, "Service marked as stopped")
         
@@ -603,9 +628,7 @@ class BaseBleService : Service() {
      * Performs migration if needed, then creates instance-based plugins.
      */
     private suspend fun initializeMultiplePlugins(
-        _enabledBlePlugins: Set<String>,
-        outputPluginId: String,
-        outputConfig: Map<String, String>
+        _enabledBlePlugins: Set<String>
     ) {
         Log.i(TAG, "🔄 Phase 4: Initializing plugins from instances...")
         
@@ -837,6 +860,14 @@ class BaseBleService : Service() {
         val allInstances = ServiceStateManager.getAllInstances(applicationContext)
         Log.i(TAG, "🔄 Phase 4: Reconnecting ${allInstances.size} instances to their devices...")
         
+        // First, check if any passive scan plugins are enabled (e.g., Mopeka, BLE Scanner)
+        // Do this BEFORE checking for device connections, because we need to start scanning
+        // even if there are no devices to directly connect to
+        val hasPassivePlugins = allInstances.values.any { instance ->
+            val devicePlugin = pluginRegistry.getPluginInstance(instance.instanceId)
+            devicePlugin?.getConfiguredDevices()?.isEmpty() == true
+        }
+        
         // 1. For each instance, connect to its configured device MAC (if it requires GATT connection)
         for ((instanceId, instance) in allInstances) {
             // Check if this plugin requires GATT connection
@@ -877,39 +908,32 @@ class BaseBleService : Service() {
             }
         }
         
-        // 3. Connect to all known devices
-        if (devicesToConnect.isEmpty()) {
-            Log.w(TAG, "No known devices to connect to")
-            updateNotification("No devices configured")
-            return
-        }
-        
-        Log.i(TAG, "✓ Found ${devicesToConnect.size} device(s) to connect")
-        
-        for ((mac, instanceId) in devicesToConnect) {
-            serviceScope.launch {
-                try {
-                    val device = bluetoothAdapter.getRemoteDevice(mac)
-                    Log.i(TAG, "🔗 Connecting directly to $mac (instance: $instanceId)")
-                    // For instances, connect using instanceId instead of pluginId
-                    connectToDevice(device, instanceId)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to get remote device $mac: ${e.message}")
+        // 3. Connect to all known devices (skip if none, but don't return yet - we might have passive plugins)
+        if (devicesToConnect.isNotEmpty()) {
+            Log.i(TAG, "✓ Found ${devicesToConnect.size} device(s) to connect")
+            
+            for ((mac, instanceId) in devicesToConnect) {
+                serviceScope.launch {
+                    try {
+                        val device = bluetoothAdapter.getRemoteDevice(mac)
+                        Log.i(TAG, "🔗 Connecting directly to $mac (instance: $instanceId)")
+                        // For instances, connect using instanceId instead of pluginId
+                        connectToDevice(device, instanceId)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to get remote device $mac: ${e.message}")
+                    }
                 }
             }
+        } else {
+            Log.w(TAG, "No known devices to connect to")
+            updateNotification("No devices configured")
         }
         
-        // 4. Check if any passive scan plugins are enabled (e.g., Mopeka)
-        // If so, start BLE scanning to receive advertisements
-        val hasPassivePlugins = allInstances.values.any { instance ->
-            val devicePlugin = pluginRegistry.getPluginInstance(instance.instanceId)
-            devicePlugin?.getConfiguredDevices()?.isEmpty() == true
-        }
-        
+        // 4. Start BLE scanning if we have passive plugins (do this even if no devices to connect)
         if (hasPassivePlugins) {
             Log.i(TAG, "📊 Passive scan plugins detected - starting BLE scanning for advertisements")
             serviceScope.launch {
-                // Give active plugins time to establish GATT connections first
+                // Give active plugins time to establish GATT connections first (if any)
                 delay(BLE_RECONNECT_DELAY_MS)
                 startScanning()
             }
@@ -1181,6 +1205,9 @@ class BaseBleService : Service() {
                 Log.d(TAG, "📡 Scan result #$scanResultCount: ${device.address} (name: ${deviceName ?: "?"})")
             }
             
+            // ALWAYS feed scan results to BLE Scanner plugin (it collects all discovered devices)
+            bleScannerPlugin?.onScanResult(device, result.rssi, deviceName)
+            
             // Check if we already have this device
             if (connectedDevices.containsKey(device.address)) {
                 return
@@ -1217,6 +1244,7 @@ class BaseBleService : Service() {
                         // Update plugin status to show data is being received
                         mqttPublisher.updatePluginStatus(instanceId, connected = false, authenticated = false, dataHealthy = true)
                     } ?: Log.w(TAG, "⚠️ No scan record in result!")
+                    
                     return  // Continue scanning for more advertisements
                 }
                 

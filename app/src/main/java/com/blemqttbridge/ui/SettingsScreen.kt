@@ -45,6 +45,7 @@ fun SettingsScreen(
     // Collect state flows
     val mqttEnabled by viewModel.mqttEnabled.collectAsState()
     val serviceEnabled by viewModel.serviceEnabled.collectAsState()
+    val serviceRunning by viewModel.serviceRunningStatus.collectAsState()
     val webServerPort by viewModel.webServerPort.collectAsState()
     val webAuthEnabled by viewModel.webAuthEnabled.collectAsState()
     val webAuthUsername by viewModel.webAuthUsername.collectAsState()
@@ -339,7 +340,7 @@ fun SettingsScreen(
                             )
                             // 3-state indicator based on serviceEnabled, bleScanningActive, bluetoothAvailable
                             val (statusText, statusColor) = when {
-                                !serviceEnabled -> "⚫ Stopped" to MaterialTheme.colorScheme.onSurfaceVariant
+                                !serviceRunning -> "⚫ Stopped" to MaterialTheme.colorScheme.onSurfaceVariant
                                 !bluetoothAvailable -> "⚠️ Bluetooth OFF" to Color(0xFFFF9800) // Orange
                                 bleScanningActive -> "🟢 Scanning" to Color(0xFF4CAF50) // Green
                                 else -> "🟡 Running (not scanning)" to Color(0xFFFFC107) // Yellow
@@ -351,13 +352,13 @@ fun SettingsScreen(
                             )
                         }
                         Switch(
-                            checked = serviceEnabled,
+                            checked = serviceRunning,
                             onCheckedChange = { viewModel.setServiceEnabled(it) }
                         )
                     }
                     
-                    // Warning message when service enabled but not scanning
-                    if (serviceEnabled && !bleScanningActive && bluetoothAvailable) {
+                    // Warning message when service running but not scanning
+                    if (serviceRunning && !bleScanningActive && bluetoothAvailable) {
                         Text(
                             text = "⚠️ Service is enabled but not scanning. Try toggling Bluetooth or the service.",
                             style = MaterialTheme.typography.bodySmall,

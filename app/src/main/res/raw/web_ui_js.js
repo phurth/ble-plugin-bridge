@@ -25,6 +25,8 @@ initTheme();
 
 // Global state
 let serviceRunning = false;
+let bleEnabled = false;  // Track BLE service state separately
+let pollingRunning = false; // Track HTTP polling service state
 let configChanged = {}; // Track which configs have changed
 let editingFields = {}; // Track which fields are currently being edited
 let instanceToRemove = null;
@@ -42,6 +44,18 @@ const PLUGIN_TYPE_NAMES = {
 
 const MULTI_INSTANCE_PLUGINS = ['easytouch', 'mopeka', 'peplink']; // Plugins supporting multiple instances
 
+// Plugin type categorization
+const BLE_PLUGINS = ['onecontrol', 'easytouch', 'gopower', 'hughes_watchdog', 'blescanner', 'mopeka'];
+const HTTP_PLUGINS = ['peplink'];
+
+function isBlePlugin(pluginType) {
+    return BLE_PLUGINS.includes(pluginType);
+}
+
+function isHttpPlugin(pluginType) {
+    return HTTP_PLUGINS.includes(pluginType);
+}
+
 // Load status on page load
 window.addEventListener('load', () => {
     loadStatus();
@@ -49,12 +63,16 @@ window.addEventListener('load', () => {
     loadConfig();
     loadInstances();
     // Auto-refresh status every 5 seconds
-    setInterval(() => {
-        loadStatus();
-        loadPollingStatus();
-        // Only refresh instances if not currently editing
-        if (Object.keys(editingFields).length === 0) {
-            loadInstances();
+    setInterval(async () => {
+        try {
+            await loadStatus();
+            await loadPollingStatus();
+            // Only refresh instances if not currently editing
+            if (Object.keys(editingFields).length === 0) {
+                await loadInstances();
+            }
+        } catch (e) {
+            console.error('Auto-refresh error:', e);
         }
     }, 5000);
 });
@@ -64,33 +82,33 @@ async function loadStatus() {
         const response = await fetch('/api/status');
         const data = await response.json();
         serviceRunning = data.running;
-        const bleEnabled = data.bleEnabled ?? data.running;
-        const html = `
-            <div class="status-row">
-                <span class="status-label">BLE Bridge Service:</span>
-                <label class="toggle-switch">
-                    <input type="checkbox" ${bleEnabled ? 'checked' : ''} onchange="toggleService(this.checked)">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-            <div class="status-row">
-                <span class="status-label">MQTT Output Service:</span>
-                <label class="toggle-switch">
-                    <input type="checkbox" ${data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-        `;
-        document.getElementById('service-status').innerHTML = html;
+        bleEnabled = data.bleEnabled ?? data.running;  // Track BLE service state
         
-        // Update add instance button state
-        const addInstanceBtn = document.getElementById('add-instance-btn');
-        if (addInstanceBtn) {
-            addInstanceBtn.disabled = serviceRunning;
+        // Move BLE toggle to BLE Plugins header
+        const bleToggleHtml = `
+            <label class="toggle-switch">
+                <input type="checkbox" ${data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
+                <span class="toggle-slider"></span>
+            </label>
+        `;
+        document.getElementById('ble-toggle-container').innerHTML = bleToggleHtml;
+        
+        // Move MQTT toggle to MQTT Configuration header
+        const mqttToggleHtml = `
+            <label class="toggle-switch">
+                <input type="checkbox" ${data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
+                <span class="toggle-slider"></span>
+            </label>
+        `;
+        document.getElementById('mqtt-toggle-container').innerHTML = mqttToggleHtml;
+        
+        // Update add BLE instance button state (enabled when BLE service is DISABLED)
+        const addBleBtnBtn = document.getElementById('add-ble-instance-btn');
+        if (addBleBtnBtn) {
+            addBleBtnBtn.disabled = bleEnabled;  // Disabled when service is enabled, enabled when disabled
         }
     } catch (error) {
-        document.getElementById('service-status').innerHTML =
-            '<div style="color: #f44336;">Failed to load status</div>';
+        console.error('Failed to load status:', error);
     }
 }
 
@@ -99,27 +117,25 @@ async function loadPollingStatus() {
         const response = await fetch('/api/polling/status');
         const data = await response.json();
 
-        const runningCount = data.runningCount || 0;
-        const totalCount = data.totalCount || 0;
         const isRunning = data.running || false;
+        pollingRunning = isRunning;
 
-        const html = `
-            <div class="status-row">
-                <span class="status-label">Polling Service:</span>
-                <label class="toggle-switch">
-                    <input type="checkbox" ${isRunning ? 'checked' : ''} onchange="togglePolling(this.checked)">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-            <div class="status-row" style="margin-top: 10px;">
-                <span class="status-label">Active Instances:</span>
-                <span>${runningCount} / ${totalCount}</span>
-            </div>
+        // Move HTTP polling toggle to HTTP Plugins header
+        const httpToggleHtml = `
+            <label class="toggle-switch">
+                <input type="checkbox" ${isRunning ? 'checked' : ''} onchange="togglePolling(this.checked)">
+                <span class="toggle-slider"></span>
+            </label>
         `;
-        document.getElementById('polling-status').innerHTML = html;
+        document.getElementById('http-toggle-container').innerHTML = httpToggleHtml;
+        
+        // Update add HTTP instance button state (disabled when polling service is running)
+        const addHttpBtn = document.getElementById('add-http-instance-btn');
+        if (addHttpBtn) {
+            addHttpBtn.disabled = isRunning;
+        }
     } catch (error) {
-        document.getElementById('polling-status').innerHTML =
-            '<div style="color: #f44336;">Failed to load polling status</div>';
+        console.error('Failed to load polling status:', error);
     }
 }
 
@@ -137,10 +153,12 @@ async function togglePolling(enable) {
         } else {
             alert('Failed to ' + action + ' polling: ' + (result.error || 'Unknown error'));
             loadPollingStatus(); // Revert toggle
+            loadInstances();
         }
     } catch (error) {
         alert('Failed to toggle polling: ' + error.message);
         loadPollingStatus(); // Revert toggle
+        loadInstances();
     }
 }
 
@@ -197,144 +215,186 @@ async function loadInstances() {
             }))
         ];
         
-        // Check if service is running
-        const serviceRunning = statusData.running || false;
+        // Update service running states
+        serviceRunning = statusData.running || false; // legacy/main
+        // bleEnabled already tracked in loadStatus(); ensure fallback here
+        if (typeof statusData.bleEnabled !== 'undefined') {
+            bleEnabled = statusData.bleEnabled;
+        }
         
-        // Get plugin statuses
+        // Get plugin statuses (check both BLE and polling status maps)
         const pluginStatuses = {};
         for (const instance of allInstances) {
             const status = statusData.pluginStatuses?.[instance.instanceId] ||
-                           statusData.pluginStatuses?.[instance.pluginType] || {};
+                           statusData.pluginStatuses?.[instance.pluginType] ||
+                           statusData.pollingPluginStatuses?.[instance.instanceId] ||
+                           statusData.pollingPluginStatuses?.[instance.pluginType] || {};
             pluginStatuses[instance.instanceId] = status;
         }
 
-        // Group instances by plugin type
-        const grouped = {};
-        for (const instance of allInstances) {
-            if (!grouped[instance.pluginType]) {
-                grouped[instance.pluginType] = [];
-            }
-            grouped[instance.pluginType].push(instance);
-        }
+        // Separate BLE and HTTP instances
+        const bleInstances = allInstances.filter(i => isBlePlugin(i.pluginType));
+        const httpInstances = allInstances.filter(i => isHttpPlugin(i.pluginType));
         
-        let html = '';
-        
-        // Get saved plugin order from localStorage (or use default alphabetical)
-        const savedOrder = JSON.parse(localStorage.getItem('pluginOrder') || '[]');
-        const pluginTypes = Object.keys(grouped);
-        
-        // Sort by saved order, then alphabetically for new plugins
-        const sortedTypes = pluginTypes.sort((a, b) => {
-            const aIndex = savedOrder.indexOf(a);
-            const bIndex = savedOrder.indexOf(b);
-            if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
-            if (aIndex !== -1) return -1;
-            if (bIndex !== -1) return 1;
-            return a.localeCompare(b);
-        });
-        
-        // Render each plugin type section
-        for (const pluginType of sortedTypes) {
-            const typeInstances = grouped[pluginType];
-            const typeName = PLUGIN_TYPE_NAMES[pluginType] || pluginType;
-            
-            html += `
-                <div class="plugin-type-section" draggable="true" data-plugin-type="${pluginType}">
-                    <div class="plugin-type-header">
-                        <span class="plugin-type-title">⋮⋮ ${typeName}</span>
-                    </div>
-            `;
-            
-            // Render each instance
-            for (const instance of typeInstances) {
-                const status = pluginStatuses[instance.instanceId] || {};
-                const connected = status.connected || false;
-                const authenticated = status.authenticated || false;
-                const dataHealthy = status.dataHealthy || false;
-                
-                // Passive plugins (mopeka, gopower, blescanner) only need dataHealthy to be green
-                // Active plugins (onecontrol, easytouch) need full connection
-                const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner' || pluginType === 'hughes_watchdog';
-                
-                // If service is stopped, all instances are unhealthy
-                const healthy = serviceRunning ? (isPassive ? dataHealthy : (connected && authenticated && dataHealthy)) : false;
-                
-                const healthClass = healthy ? 'instance-healthy' : 'instance-unhealthy';
-                const displayName = instance.displayName || instance.instanceId;
-                
-                // Get plugin-specific config
-                let configDetails = '';
-                if (pluginType === 'onecontrol') {
-                    const pin = instance.config?.gateway_pin || 'Not set';
-                    configDetails = `<div class="instance-detail-line">PIN: ${pin}</div>`;
-                } else if (pluginType === 'easytouch') {
-                    const hasPassword = instance.config?.password ? 'Set' : 'Not set';
-                    configDetails = `<div class="instance-detail-line">Password: ${hasPassword}</div>`;
-                } else if (pluginType === 'hughes_watchdog') {
-                    const expectedName = instance.config?.expected_name || 'Any';
-                    const forceVersion = instance.config?.force_version || 'Auto';
-                    configDetails = `<div class="instance-detail-line">Name: ${expectedName} | Gen: ${forceVersion}</div>`;
-                } else if (pluginType === 'mopeka') {
-                    const mediumType = instance.config?.medium_type || 'propane';
-                    const tankType = instance.config?.tank_type || '20lb_v';
-                    configDetails = `<div class="instance-detail-line">Medium: ${mediumType} | Tank: ${tankType}</div>`;
-                } else if (pluginType === 'peplink') {
-                    configDetails = `<div class="instance-detail-line">Polling plugin (REST API)</div>`;
+        // Group instances by plugin type within each category
+        const groupInstances = (instList) => {
+            const grouped = {};
+            for (const instance of instList) {
+                if (!grouped[instance.pluginType]) {
+                    grouped[instance.pluginType] = [];
                 }
-
-                html += `
-                    <div class="instance-card ${healthClass}">
-                        <div class="instance-header">
-                            <div>
-                                <span class="instance-name">${displayName}</span>
-                            </div>
-                            <div class="instance-actions">
-                                <button class="icon-btn edit-icon-btn" onclick="showEditInstanceDialog('${instance.instanceId}')" ${serviceRunning ? 'disabled' : ''} title="Edit">
-                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-                                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-                                    </svg>
-                                </button>
-                                <button class="icon-btn delete-icon-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}', ${instance.isPolling || false})" ${serviceRunning ? 'disabled' : ''} title="Remove">
-                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <polyline points="3 6 5 6 21 6"></polyline>
-                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                                        <line x1="10" y1="11" x2="10" y2="17"></line>
-                                        <line x1="14" y1="11" x2="14" y2="17"></line>
-                                    </svg>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="instance-details">
-                            <div class="instance-detail-line">ID: ${instance.instanceId}</div>
-                            ${pluginType !== 'blescanner' ? `<div class="instance-detail-line">MAC: ${instance.deviceMac}</div>` : ''}
-                            ${configDetails}
-                            ${!isPassive ? `<div class="instance-detail-line">
-                                Connected: <span class="${connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${connected ? 'Yes' : 'No'}</span>
-                                | Authenticated: <span class="${authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${authenticated ? 'Yes' : 'No'}</span>
-                                | Data: <span class="${dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${dataHealthy ? 'Healthy' : 'Unhealthy'}</span>
-                            </div>` : ''}
-                        </div>
-                    </div>
-                `;
+                grouped[instance.pluginType].push(instance);
             }
-            
-            html += '</div>';
-        }
+            return grouped;
+        };
         
-        if (html === '') {
-            html = '<div style="padding: 20px; text-align: center; color: #666;">No plugin instances configured.<br><br><button class="add-instance-btn" onclick="showAddInstanceDialog()" ' + (serviceRunning ? 'disabled' : '') + '>Add First Instance</button></div>';
-        }
+        const bleGrouped = groupInstances(bleInstances);
+        const httpGrouped = groupInstances(httpInstances);
         
-        document.getElementById('plugin-status').innerHTML = html;
+        // Render BLE plugins section (buttons disabled when bleEnabled)
+        const bleHtml = renderPluginSection(bleGrouped, pluginStatuses, /*isBleSection=*/true);
+        document.getElementById('ble-plugin-status').innerHTML = bleHtml;
+        
+        // Render HTTP plugins section (buttons disabled when pollingRunning)
+        const httpHtml = renderPluginSection(httpGrouped, pluginStatuses, /*isBleSection=*/false);
+        document.getElementById('http-plugin-status').innerHTML = httpHtml;
         
         // Setup drag-and-drop for plugin sections
         setupDragAndDrop();
     } catch (error) {
         console.error('Failed to load instances:', error);
-        document.getElementById('plugin-status').innerHTML = 
-            '<div style="color: #f44336;">Failed to load plugin instances. Ensure the app and web service are running.</div>';
+        document.getElementById('ble-plugin-status').innerHTML = 
+            '<div style="color: #f44336;">Failed to load BLE plugins. Ensure the app and web service are running.</div>';
+        document.getElementById('http-plugin-status').innerHTML = 
+            '<div style="color: #f44336;">Failed to load HTTP plugins. Ensure the app and web service are running.</div>';
     }
+}
+
+function renderPluginSection(grouped, pluginStatuses, isBleSection) {
+    if (Object.keys(grouped).length === 0) {
+        return '<div style="padding: 20px; text-align: center; color: #666;">No plugins configured.</div>';
+    }
+    
+    let html = '';
+    
+    // Get saved plugin order from localStorage (or use default alphabetical)
+    const savedOrder = JSON.parse(localStorage.getItem('pluginOrder') || '[]');
+    const pluginTypes = Object.keys(grouped);
+    
+    // Sort by saved order, then alphabetically for new plugins
+    const sortedTypes = pluginTypes.sort((a, b) => {
+        const aIndex = savedOrder.indexOf(a);
+        const bIndex = savedOrder.indexOf(b);
+        if (aIndex !== -1 && bIndex !== -1) return aIndex - bIndex;
+        if (aIndex !== -1) return -1;
+        if (bIndex !== -1) return 1;
+        return a.localeCompare(b);
+    });
+    
+    // Render each plugin type section
+    for (const pluginType of sortedTypes) {
+        const typeInstances = grouped[pluginType];
+        const typeName = PLUGIN_TYPE_NAMES[pluginType] || pluginType;
+        
+        html += `
+            <div class="plugin-type-section" draggable="true" data-plugin-type="${pluginType}">
+                <div class="plugin-type-header">
+                    <span class="plugin-type-title">⋮⋮ ${typeName}</span>
+                </div>
+        `;
+        
+        // Render each instance
+        for (const instance of typeInstances) {
+            const status = pluginStatuses[instance.instanceId] || {};
+            const connected = status.connected || false;
+            const authenticated = status.authenticated || false;
+            const dataHealthy = status.dataHealthy || false;
+            
+            // Passive plugins (mopeka, gopower, blescanner) only need dataHealthy to be green
+            // Active plugins (onecontrol, easytouch) need full connection
+            // HTTP plugins (peplink) need all three flags
+            const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner' || pluginType === 'hughes_watchdog';
+            const isHttpPlugin = pluginType === 'peplink';
+            
+            // Use correct service state per section
+            const sectionActive = isBleSection ? bleEnabled : pollingRunning;
+            // If corresponding service is stopped, all instances are unhealthy
+            let healthy = false;
+            if (sectionActive) {
+                if (isPassive) {
+                    healthy = dataHealthy;
+                } else if (isHttpPlugin) {
+                    healthy = connected && authenticated && dataHealthy;
+                } else {
+                    healthy = connected && authenticated && dataHealthy;
+                }
+            }
+            
+            const healthClass = healthy ? 'instance-healthy' : 'instance-unhealthy';
+            const displayName = instance.displayName || instance.instanceId;
+            
+            // Get plugin-specific config
+            let configDetails = '';
+            if (pluginType === 'onecontrol') {
+                const pin = instance.config?.gateway_pin || 'Not set';
+                configDetails = `<div class="instance-detail-line">PIN: ${pin}</div>`;
+            } else if (pluginType === 'easytouch') {
+                const hasPassword = instance.config?.password ? 'Set' : 'Not set';
+                configDetails = `<div class="instance-detail-line">Password: ${hasPassword}</div>`;
+            } else if (pluginType === 'hughes_watchdog') {
+                const expectedName = instance.config?.expected_name || 'Any';
+                const forceVersion = instance.config?.force_version || 'Auto';
+                configDetails = `<div class="instance-detail-line">Name: ${expectedName} | Gen: ${forceVersion}</div>`;
+            } else if (pluginType === 'mopeka') {
+                const mediumType = instance.config?.medium_type || 'propane';
+                const tankType = instance.config?.tank_type || '20lb_v';
+                configDetails = `<div class="instance-detail-line">Medium: ${mediumType} | Tank: ${tankType}</div>`;
+            } else if (pluginType === 'peplink') {
+                configDetails = `<div class="instance-detail-line">Polling plugin (REST API)</div>`;
+            }
+
+            const buttonsDisabled = isBleSection ? bleEnabled : pollingRunning;
+            html += `
+                <div class="instance-card ${healthClass}">
+                    <div class="instance-header">
+                        <div>
+                            <span class="instance-name">${displayName}</span>
+                        </div>
+                        <div class="instance-actions">
+                            <button class="icon-btn edit-icon-btn" onclick="showEditInstanceDialog('${instance.instanceId}')" ${buttonsDisabled ? 'disabled' : ''} title="Edit">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                                </svg>
+                            </button>
+                            <button class="icon-btn delete-icon-btn" onclick="showRemoveInstanceDialog('${instance.instanceId}', '${displayName}', ${instance.isPolling || false})" ${buttonsDisabled ? 'disabled' : ''} title="Remove">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                    <line x1="10" y1="11" x2="10" y2="17"></line>
+                                    <line x1="14" y1="11" x2="14" y2="17"></line>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="instance-details">
+                        <div class="instance-detail-line">ID: ${instance.instanceId}</div>
+                        ${pluginType !== 'blescanner' && pluginType !== 'peplink' ? `<div class="instance-detail-line">MAC: ${instance.deviceMac}</div>` : ''}
+                        ${configDetails}
+                        ${(!isPassive) ? `<div class="instance-detail-line">
+                            Connected: <span class="${connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${connected ? 'Yes' : 'No'}</span>
+                            | Authenticated: <span class="${authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${authenticated ? 'Yes' : 'No'}</span>
+                            | Data: <span class="${dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${dataHealthy ? 'Healthy' : 'Unhealthy'}</span>
+                        </div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        
+        html += '</div>';
+    }
+    
+    return html;
 }
 
 function setupDragAndDrop() {
@@ -451,9 +511,9 @@ function getDragAfterElement(container, y) {
     }, { offset: null, element: null }).element;
 }
 
-async function showAddInstanceDialog(pluginType = '') {
+async function showAddInstanceDialog(serviceType = '') {
     // Reset form
-    document.getElementById('new-plugin-type').value = pluginType;
+    document.getElementById('new-plugin-type').value = '';
     document.getElementById('new-display-name').value = '';
     document.getElementById('new-device-mac').value = '';
     document.getElementById('multi-instance-warning').style.display = 'none';
@@ -465,19 +525,31 @@ async function showAddInstanceDialog(pluginType = '') {
         const instances = await response.json();
         const existingTypes = [...new Set(instances.map(i => i.pluginType))];
         
-        // Update select options based on existing instances
+        // Update select options based on service type and existing instances
         const select = document.getElementById('new-plugin-type');
         for (const option of select.options) {
             if (option.value) {
-                const isMulti = option.getAttribute('data-multi') === 'true';
-                const alreadyExists = existingTypes.includes(option.value);
+                // Filter options by service type
+                let shouldShow = true;
+                if (serviceType === 'ble') {
+                    shouldShow = isBlePlugin(option.value);
+                } else if (serviceType === 'http') {
+                    shouldShow = isHttpPlugin(option.value);
+                }
                 
-                // Disable if it already exists and doesn't support multiple instances
-                if (alreadyExists && !isMulti) {
-                    option.disabled = true;
-                    option.text = option.text.replace(' - Supports multiple', '') + ' (Already configured)';
-                } else {
-                    option.disabled = false;
+                option.style.display = shouldShow ? '' : 'none';
+                
+                if (shouldShow) {
+                    const isMulti = option.getAttribute('data-multi') === 'true';
+                    const alreadyExists = existingTypes.includes(option.value);
+                    
+                    // Disable if it already exists and doesn't support multiple instances
+                    if (alreadyExists && !isMulti) {
+                        option.disabled = true;
+                        option.text = option.text.replace(' - Supports multiple', '') + ' (Already configured)';
+                    } else {
+                        option.disabled = false;
+                    }
                 }
             }
         }
@@ -1085,12 +1157,20 @@ async function toggleService(enable) {
         if (!result.success) {
             alert('Failed to ' + (enable ? 'start' : 'stop') + ' service: ' + (result.error || 'Unknown error'));
             loadStatus();
+            loadInstances();
         } else if (enable) {
             configChanged = {};
+            loadStatus();
+            loadInstances();
+        } else {
+            // on disable, refresh to enable editing
+            loadStatus();
+            loadInstances();
         }
     } catch (error) {
         alert('Error controlling service: ' + error.message);
         loadStatus();
+        loadInstances();
     }
 }
 

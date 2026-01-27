@@ -296,25 +296,45 @@ class WebServerManager(
     private fun serveStatus(): Response {
         val settings = AppSettings(context)
         val mqttEnabled = runBlocking { settings.mqttEnabled.first() }
-        val bleEnabled = runBlocking { settings.bleEnabled.first() }
+        val running = BaseBleService.serviceRunning.value
         val json = JSONObject().apply {
-            put("running", BaseBleService.serviceRunning.value)
-            put("bleEnabled", bleEnabled)
-            put("mqttEnabled", mqttEnabled) // Setting, not connection status
-            put("mqttConnected", BaseBleService.mqttConnected.value) // Actual connection status
+            // Running reflects actual BLE service state
+            put("running", running)
+            // Expose BLE enabled reflecting actual service state for UI toggle consistency
+            put("bleEnabled", running)
+            // MQTT enabled is the setting; connection status from MqttService
+            put("mqttEnabled", mqttEnabled)
+            put("mqttConnected", com.blemqttbridge.core.MqttService.connectionStatus.value)
             put("bleTraceActive", getService()?.isBleTraceActive() ?: false)
+            // BLE health indicators
+            put("bluetoothAvailable", BaseBleService.bluetoothAvailable.value)
+            put("bleScanningActive", BaseBleService.bleScanningActive.value)
             
-            // Include plugin statuses for the UI
-            val statuses = BaseBleService.pluginStatuses.value
-            val statusesJson = JSONObject()
-            for ((pluginId, status) in statuses) {
-                statusesJson.put(pluginId, JSONObject().apply {
+            // Get all plugin statuses and split by type
+            val allStatuses = BaseBleService.pluginStatuses.value
+            val httpPluginTypes = setOf("peplink")  // HTTP polling plugins
+            
+            val bleStatusesJson = JSONObject()
+            val pollingStatusesJson = JSONObject()
+            
+            for ((pluginId, status) in allStatuses) {
+                val statusObj = JSONObject().apply {
                     put("connected", status.connected)
                     put("authenticated", status.authenticated)
                     put("dataHealthy", status.dataHealthy)
-                })
+                }
+                
+                // Classify by plugin type (extract from instanceId if needed)
+                val pluginType = pluginId.takeWhile { it.isLetter() }
+                if (httpPluginTypes.contains(pluginType)) {
+                    pollingStatusesJson.put(pluginId, statusObj)
+                } else {
+                    bleStatusesJson.put(pluginId, statusObj)
+                }
             }
-            put("pluginStatuses", statusesJson)
+            
+            put("pluginStatuses", bleStatusesJson)
+            put("pollingPluginStatuses", pollingStatusesJson)
         }
         return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
     }
@@ -566,6 +586,48 @@ class WebServerManager(
         }
     }
 
+    /**
+     * Check if a plugin can be edited based on service state.
+     * BLE plugins can only be edited when BLE service is OFF (bleEnabled=false)
+     * HTTP Polling plugins can only be edited when Polling is OFF (no running instances)
+     * MQTT can only be edited when MQTT service is OFF (mqttEnabled=false)
+     */
+    private fun canEditPlugin(pluginId: String): Pair<Boolean, String> {
+        return when {
+            // BLE plugins - check bleEnabled setting only (BLE service independent from overall service)
+            pluginId in listOf("onecontrol", "easytouch", "gopower", "blescanner") -> {
+                val bleEnabled = runBlocking { appSettings.bleEnabled.first() }
+                if (bleEnabled) {
+                    Pair(false, "BLE service must be stopped before editing $pluginId configuration")
+                } else {
+                    Pair(true, "")
+                }
+            }
+            // HTTP Polling plugins - check if any polling is running
+            pluginId in listOf("mopeka") -> {
+                val registry = PluginRegistry.getInstance()
+                val runningInstances = registry.getAllPollingPluginInstances()
+                if (runningInstances.isNotEmpty()) {
+                    Pair(false, "HTTP Polling service must be stopped before editing $pluginId configuration")
+                } else {
+                    Pair(true, "")
+                }
+            }
+            // MQTT plugin - check if MQTT is enabled
+            pluginId == "mqtt" -> {
+                runBlocking {
+                    val mqttEnabled = appSettings.mqttEnabled.first()
+                    if (mqttEnabled) {
+                        Pair(false, "MQTT service must be stopped before editing configuration")
+                    } else {
+                        Pair(true, "")
+                    }
+                }
+            }
+            else -> Pair(false, "Unknown plugin: $pluginId")
+        }
+    }
+
     private fun handleMqttConfig(session: IHTTPSession): Response {
         return try {
             // Parse request body
@@ -581,14 +643,13 @@ class WebServerManager(
             val field = json.getString("field")
             val value = json.getString("value")
 
-            // Verify MQTT service is stopped (check mqttEnabled setting)
-            val settings = AppSettings(context)
-            val mqttEnabled = runBlocking { settings.mqttEnabled.first() }
-            if (mqttEnabled) {
+            // Verify MQTT service is stopped using the new helper
+            val (canEdit, errorMsg) = canEditPlugin("mqtt")
+            if (!canEdit) {
                 return newFixedLengthResponse(
                     Response.Status.FORBIDDEN,
                     "application/json",
-                    """{"success":false,"error":"MQTT service must be stopped before editing configuration"}"""
+                    """{"success":false,"error":"$errorMsg"}"""
                 )
             }
 
@@ -612,6 +673,7 @@ class WebServerManager(
             }
 
             // Update the appropriate MQTT setting
+            val settings = AppSettings(context)
             runBlocking {
                 when (field) {
                     "broker" -> settings.setMqttBrokerHost(value)
@@ -619,6 +681,7 @@ class WebServerManager(
                     "topicPrefix" -> settings.setMqttTopicPrefix(value)
                     "username" -> settings.setMqttUsername(value)
                     "password" -> settings.setMqttPassword(value)
+                    else -> Unit  // Add else for exhaustive when
                 }
             }
 
@@ -654,12 +717,13 @@ class WebServerManager(
             val field = json.getString("field")
             val value = json.getString("value")
             
-            // Verify service is not running
-            if (BaseBleService.serviceRunning.value) {
+            // Verify the appropriate service is stopped using the helper
+            val (canEdit, errorMsg) = canEditPlugin(pluginId)
+            if (!canEdit) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    """{"success":false,"error":"Service must be stopped before editing configuration"}"""
+                    """{"success":false,"error":"$errorMsg"}"""
                 )
             }
             
@@ -715,13 +779,13 @@ class WebServerManager(
             val jsonObject = JSONObject(body)
             val plugin = jsonObject.getString("plugin")
 
-            // Validate service is stopped
-            val service = BaseBleService.getInstance()
-            if (service != null) {
+            // Verify the appropriate service is stopped using the helper
+            val (canEdit, errorMsg) = canEditPlugin(plugin)
+            if (!canEdit) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    """{"success":false,"error":"Service must be stopped to add plugins"}"""
+                    """{"success":false,"error":"$errorMsg"}"""
                 )
             }
 
@@ -783,13 +847,13 @@ class WebServerManager(
             val jsonObject = JSONObject(body)
             val plugin = jsonObject.getString("plugin")
 
-            // Validate service is stopped
-            val service = BaseBleService.getInstance()
-            if (service != null && runBlocking { BaseBleService.serviceRunning.first() }) {
+            // Verify the appropriate service is stopped using the helper
+            val (canEdit, errorMsg) = canEditPlugin(plugin)
+            if (!canEdit) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    """{"success":false,"error":"Service must be stopped to remove plugins"}"""
+                    """{"success":false,"error":"$errorMsg"}"""
                 )
             }
 
@@ -972,9 +1036,10 @@ class WebServerManager(
             val jsonObject = JSONObject(body)
             val instanceId = jsonObject.getString("instanceId")
 
-            // Validate service is stopped
+            // Validate BLE service is stopped (use running flag, not null instance)
             val service = BaseBleService.getInstance()
-            if (service != null) {
+            val isRunning = if (service != null) runBlocking { BaseBleService.serviceRunning.first() } else false
+            if (isRunning) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
@@ -1203,6 +1268,7 @@ class WebServerManager(
             val persistedInstances = ServiceStateManager.getAllPollingInstances(context)
             val registry = PluginRegistry.getInstance()
             val jsonArray = JSONArray()
+            val allStatuses = BaseBleService.pluginStatuses.value
 
             for ((instanceId, config) in persistedInstances) {
                 // Check if instance is running in memory
@@ -1222,6 +1288,14 @@ class WebServerManager(
                         put("baseTopic", "homeassistant")  // Default
                         put("pollingInterval", config.config["polling_interval"]?.toLongOrNull()?.times(1000) ?: 30000)
                         put("running", false)
+                    }
+                    
+                    // Include health status if available
+                    val status = allStatuses[instanceId]
+                    if (status != null) {
+                        put("connected", status.connected)
+                        put("authenticated", status.authenticated)
+                        put("dataHealthy", status.dataHealthy)
                     }
                 }
                 jsonArray.put(instanceJson)
@@ -1254,6 +1328,17 @@ class WebServerManager(
 
             val jsonObject = JSONObject(body)
             val pluginType = jsonObject.getString("pluginType")
+            
+            // Verify polling is not running before allowing instance configuration
+            val (canEdit, errorMsg) = canEditPlugin(pluginType)
+            if (!canEdit) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"$errorMsg"}"""
+                )
+            }
+            
             val instanceName = jsonObject.optString("instanceName", "main")
             val displayName = jsonObject.optString("displayName", instanceName)
             val config = jsonObject.optJSONObject("config")?.let {
@@ -1293,11 +1378,14 @@ class WebServerManager(
             )
             ServiceStateManager.savePollingInstance(context, pollingConfig)
 
-            // Start polling if MQTT is available
-            getService()?.let { bleService ->
+            // Start polling if MQTT is available via standalone MqttService
+            val mqttPublisher = getMqttService()?.getMqttPublisher()
+            if (mqttPublisher != null) {
                 runBlocking {
-                    pluginInstance.startPolling(bleService.getMqttPublisher())
+                    pluginInstance.startPolling(mqttPublisher)
                 }
+            } else {
+                Log.w(TAG, "MQTT service not available; instance added but polling not started: $instanceId")
             }
 
             Log.i(TAG, "Polling plugin instance added and persisted: $instanceId")
@@ -1332,6 +1420,16 @@ class WebServerManager(
 
             val jsonObject = JSONObject(body)
             val instanceId = jsonObject.getString("instanceId")
+
+            // Verify polling is not running before allowing instance removal
+            val (canEdit, errorMsg) = canEditPlugin("mopeka")
+            if (!canEdit) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"$errorMsg"}"""
+                )
+            }
 
             // Stop and remove instance
             val registry = PluginRegistry.getInstance()
@@ -1393,16 +1491,15 @@ class WebServerManager(
                 )
             }
 
-            // Start polling
-            getService()?.let { bleService ->
-                runBlocking {
-                    plugin.startPolling(bleService.getMqttPublisher())
-                }
-            } ?: return newFixedLengthResponse(
+            // Start polling using MQTT from standalone MqttService
+            val mqttPublisher = getMqttService()?.getMqttPublisher() ?: return newFixedLengthResponse(
                 Response.Status.BAD_REQUEST,
                 "application/json",
-                """{"success":false,"error":"Service not available"}"""
+                """{"success":false,"error":"MQTT service not available"}"""
             )
+            runBlocking {
+                plugin.startPolling(mqttPublisher)
+            }
 
             Log.i(TAG, "Polling started for instance: $instanceId")
             newFixedLengthResponse(
@@ -1604,7 +1701,7 @@ class WebServerManager(
             }
 
             // Check if MQTT service is available
-            val mqttPublisher = getService()?.getMqttPublisher()
+            val mqttPublisher = getMqttService()?.getMqttPublisher()
             if (mqttPublisher == null) {
                 Log.w(TAG, "MQTT service not available for polling auto-start, will retry later")
                 return

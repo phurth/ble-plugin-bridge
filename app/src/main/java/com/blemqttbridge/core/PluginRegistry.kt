@@ -432,12 +432,8 @@ class PluginRegistry {
         outputPlugin?.disconnect()
         outputPlugin = null
 
-        // Clear polling plugins
-        for ((instanceId, plugin) in pollingPluginInstances) {
-            Log.i(TAG, "Cleaning up polling plugin instance: $instanceId")
-            plugin.destroy()
-        }
-        pollingPluginInstances.clear()
+        // Don't clear polling plugins - they are managed independently by the polling service
+        // Polling plugins should continue running even when BLE service stops
 
         System.gc()
     }

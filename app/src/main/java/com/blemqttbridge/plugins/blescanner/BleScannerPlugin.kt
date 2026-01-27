@@ -134,7 +134,29 @@ class BleScannerPlugin(
         publishScanningState()
         publishDeviceList()
         
+        // Schedule periodic publishing of device list (every 5 seconds)
+        // This allows Home Assistant to see discovered devices in real-time
+        handler.postDelayed(periodicPublishRunnable, 5000)
+        
         return true
+    }
+    
+    /**
+     * Receive a scan result from the BLE service's shared scanner.
+     * This is called by BaseBleService when it discovers a BLE device.
+     */
+    fun onScanResult(device: android.bluetooth.BluetoothDevice, rssi: Int, name: String?) {
+        val mac = device.address
+        discoveredDevices[mac] = DiscoveredDevice(
+            mac = mac,
+            name = name ?: device.name,
+            rssi = rssi,
+            lastSeen = System.currentTimeMillis()
+        )
+        Log.d(TAG, "📡 Received scan result: $mac - ${name ?: device.name ?: "Unknown"} (RSSI: $rssi)")
+        
+        // Update plugin status to show we're receiving scan results
+        mqttPublisher.updatePluginStatus(PLUGIN_ID, connected = true, authenticated = true, dataHealthy = true)
     }
     
     /**
@@ -203,10 +225,10 @@ class BleScannerPlugin(
     
     private val periodicPublishRunnable = object : Runnable {
         override fun run() {
-            if (isScanning) {
-                publishDeviceList()
-                handler.postDelayed(this, 5000) // Update every 5 seconds during scan
-            }
+            // Always publish device list (not just during active scan)
+            // This keeps Home Assistant updated with discovered devices
+            publishDeviceList()
+            handler.postDelayed(this, 5000) // Update every 5 seconds
         }
     }
     
@@ -219,6 +241,7 @@ class BleScannerPlugin(
      */
     fun cleanup() {
         stopScan()
+        handler.removeCallbacks(periodicPublishRunnable)  // Stop periodic publishing
         Log.i(TAG, "BLE Scanner Plugin cleaned up")
     }
     
