@@ -8,6 +8,10 @@ import com.blemqttbridge.core.interfaces.PollingDevicePlugin
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import kotlin.math.roundToInt
 
 /**
  * Peplink Router Plugin for BLE-MQTT Bridge.
@@ -59,6 +63,11 @@ class PeplinkPlugin : PollingDevicePlugin {
     private var hardwareConfig: PeplinkDiscovery.HardwareConfig? = null
     private var pollingJob: Job? = null
     private var lastWanState: Map<Int, WanConnection> = emptyMap()
+    private var lastWanUsage: Map<Int, WanUsage> = emptyMap()
+    private var lastUsagePollAt: Long = 0L
+    private var routerFirmwareVersion: String = "unknown"
+    private var connectedDevicesCount: Int = 0
+    private var pepVpnProfiles: Map<String, Triple<String, String, String>> = emptyMap()
 
     // ===== LIFECYCLE =====
 
@@ -92,18 +101,65 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             Log.i(TAG, "[$instanceId] Starting polling...")
 
-            // Step 1: Discover hardware configuration
-            val discoveryResult = discoverHardware()
-            if (discoveryResult.isFailure) {
-                Log.e(TAG, "[$instanceId] Hardware discovery failed: ${discoveryResult.exceptionOrNull()?.message}")
-                return discoveryResult
+            // Subscribe to command topics for this instance
+            val baseTopic = getMqttBaseTopic()
+            mqttPublisher.subscribeToCommands("$baseTopic/#") { topic, payload ->
+                GlobalScope.launch(Dispatchers.IO) {
+                    try {
+                        handleCommand(topic, payload)
+                    } catch (_: Exception) {}
+                }
             }
 
-            // Step 2: Publish Home Assistant discovery payloads
-            publishDiscoveryPayloads()
-
-            // Step 3: Start periodic polling
+            // Start polling job (runs discovery and polling in background)
             pollingJob = CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                // Step 1: Discover hardware configuration
+                val discoveryResult = discoverHardware()
+                if (discoveryResult.isFailure) {
+                    Log.e(TAG, "[$instanceId] Hardware discovery failed: ${discoveryResult.exceptionOrNull()?.message}")
+                    return@launch
+                }
+
+                // Fetch firmware version
+                try {
+                    val fw = apiClient.getFirmwareVersion()
+                    if (fw.isSuccess) {
+                        routerFirmwareVersion = fw.getOrThrow()
+                        Log.i(TAG, "[$instanceId] Firmware version: $routerFirmwareVersion")
+                    } else {
+                        Log.w(TAG, "[$instanceId] Firmware fetch failed: ${fw.exceptionOrNull()?.message}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$instanceId] Firmware fetch exception: ${e.message}")
+                }
+
+                // Fetch initial diagnostic data: clients and VPN profiles
+                try {
+                    apiClient.getConnectedDevicesCount().onSuccess { connectedDevicesCount = it }
+                    apiClient.getPepVpnProfiles().onSuccess { pepVpnProfiles = it }
+                } catch (_: Exception) {}
+
+                // Step 2: Publish Home Assistant discovery payloads
+                publishDiscoveryPayloads()
+
+                // Publish firmware state once
+                try {
+                    val base = getMqttBaseTopic()
+                    mqttPublisher.publishState("$base/firmware", routerFirmwareVersion)
+                    mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
+                    pepVpnProfiles.forEach { (id, triple) ->
+                        mqttPublisher.publishState("$base/diagnostic/vpn/$id/status", triple.third)
+                    }
+                } catch (_: Exception) {}
+
+                // Step 3: Force an immediate poll so data is available at startup
+                try {
+                    poll()
+                } catch (e: Exception) {
+                    Log.w(TAG, "[$instanceId] Initial poll failed: ${e.message}", e)
+                }
+
+                // Continue with periodic polling
                 while (isActive) {
                     try {
                         poll()
@@ -150,13 +206,47 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             val wanStatus = statusResult.getOrThrow()
 
+            // Optionally query usage data at slower cadence (~60s)
+            val now = System.currentTimeMillis()
+            if (now - lastUsagePollAt >= 60_000) {
+                val usageResult = apiClient.getWanUsage()
+                if (usageResult.isSuccess) {
+                    lastWanUsage = usageResult.getOrThrow()
+                    lastUsagePollAt = now
+                } else {
+                    Log.w(TAG, "[$instanceId] WAN usage fetch failed: ${usageResult.exceptionOrNull()?.message}")
+                }
+            }
+
             // Publish state for each WAN connection
             for ((connId, connection) in wanStatus) {
+                // Publish availability per WAN (enabled -> online/offline)
+                val baseTopic = getMqttBaseTopic()
+                mqttPublisher.publishAvailability("$baseTopic/wan/$connId/availability", connection.enabled)
+
                 publishWanState(connId, connection)
+
+                // Note: Usage is now published in publishWanState() method
             }
 
             // Update cached state
             lastWanState = wanStatus
+
+            // Fetch diagnostics on each poll (lightweight requests)
+            try {
+                apiClient.getConnectedDevicesCount().onSuccess { count ->
+                    connectedDevicesCount = count
+                    val base = getMqttBaseTopic()
+                    mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
+                }
+                apiClient.getPepVpnProfiles().onSuccess { profiles ->
+                    pepVpnProfiles = profiles
+                    val base = getMqttBaseTopic()
+                    pepVpnProfiles.forEach { (id, triple) ->
+                        mqttPublisher.publishState("$base/diagnostic/vpn/$id/status", triple.third)
+                    }
+                }
+            } catch (_: Exception) {}
 
             Result.success(Unit)
         } catch (e: Exception) {
@@ -181,11 +271,54 @@ class PeplinkPlugin : PollingDevicePlugin {
             put("name", "Peplink Router ($instanceName)")
             put("manufacturer", "Peplink")
             put("model", "Router")
-            put("sw_version", "8.5.0+")
+            put("sw_version", routerFirmwareVersion)
         }
 
         // Get full topic prefix (e.g., "homeassistant")
         val topicPrefix = mqttPublisher.topicPrefix
+
+        // Global diagnostic sensor: Firmware version
+        run {
+            val topicPrefix = mqttPublisher.topicPrefix
+            val baseTopic = getMqttBaseTopic()
+            val fullBaseTopic = "$topicPrefix/$baseTopic"
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_firmware/config" to JSONObject().apply {
+                    put("name", "Router Firmware Version")
+                    put("unique_id", "${instanceId}_firmware")
+                    put("state_topic", "$fullBaseTopic/firmware")
+                    put("icon", "mdi:update")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Connected devices (diagnostic)
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_connected_devices/config" to JSONObject().apply {
+                    put("name", "Connected Devices")
+                    put("unique_id", "${instanceId}_connected_devices")
+                    put("state_topic", "$fullBaseTopic/diagnostic/connected_devices")
+                    put("icon", "mdi:devices")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // VPN profile statuses (diagnostic)
+            pepVpnProfiles.forEach { (id, triple) ->
+                payloads.add(
+                    "homeassistant/sensor/${instanceId}_vpn_${id}_status/config" to JSONObject().apply {
+                        put("name", "VPN: ${triple.first}")
+                        put("unique_id", "${instanceId}_vpn_${id}_status")
+                        put("state_topic", "$fullBaseTopic/diagnostic/vpn/$id/status")
+                        put("icon", "mdi:vpn")
+                        put("entity_category", "diagnostic")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+            }
+        }
 
         for ((connId, connection) in config.wanConnections) {
             val baseTopic = getMqttBaseTopic()
@@ -193,16 +326,18 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             // Full state topic includes the MQTT prefix
             val fullBaseTopic = "$topicPrefix/$baseTopic"
+            val availabilityTopic = "$fullBaseTopic/wan/$connId/availability"
 
-            // Binary Sensor: Connection Status
+            // Sensor: Connection Status (raw message)
             payloads.add(
-                "homeassistant/binary_sensor/${uniqueId}_status/config" to JSONObject().apply {
+                "homeassistant/sensor/${uniqueId}_status/config" to JSONObject().apply {
                     put("name", "${connection.name} Status")
                     put("unique_id", "${uniqueId}_status")
                     put("state_topic", "$fullBaseTopic/wan/$connId/status")
-                    put("payload_on", "connected")
-                    put("payload_off", "disconnected")
-                    put("device_class", "connectivity")
+                    put("icon", "mdi:lan")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -214,6 +349,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("unique_id", "${uniqueId}_priority")
                     put("state_topic", "$fullBaseTopic/wan/$connId/priority")
                     put("icon", "mdi:sort-numeric-ascending")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -225,6 +363,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("unique_id", "${uniqueId}_ip")
                     put("state_topic", "$fullBaseTopic/wan/$connId/ip")
                     put("icon", "mdi:ip-network")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -235,9 +376,24 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "${connection.name} Uptime")
                     put("unique_id", "${uniqueId}_uptime")
                     put("state_topic", "$fullBaseTopic/wan/$connId/uptime")
-                    put("unit_of_measurement", "s")
-                    put("device_class", "duration")
                     put("icon", "mdi:clock-outline")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Sensor: Status LED (color indicator)
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_status_led/config" to JSONObject().apply {
+                    put("name", "${connection.name} Status LED")
+                    put("unique_id", "${uniqueId}_status_led")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/status_led")
+                    put("icon", "mdi:led-outline")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -249,7 +405,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("unique_id", "${uniqueId}_priority_control")
                     put("command_topic", "$fullBaseTopic/wan/$connId/priority/set")
                     put("state_topic", "$fullBaseTopic/wan/$connId/priority")
-                    put("options", JSONArray(listOf("1", "2", "3", "4")))
+                    put("options", JSONArray(listOf("1", "2", "3", "4", "Disabled")))
                     put("icon", "mdi:priority-high")
                     put("device", deviceInfo)
                 }.toString()
@@ -257,15 +413,32 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             // Cellular-specific sensors
             if (connection.type == WanType.CELLULAR) {
-                // Sensor: Signal Strength
+                // Sensor: Signal Strength (formatted as "X/5" or "XdBm")
                 payloads.add(
                     "homeassistant/sensor/${uniqueId}_signal/config" to JSONObject().apply {
                         put("name", "${connection.name} Signal")
                         put("unique_id", "${uniqueId}_signal")
                         put("state_topic", "$fullBaseTopic/wan/$connId/cellular/signal")
+                        put("icon", "mdi:signal-cellular-3")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+
+                // Sensor: Signal dBm (raw)
+                payloads.add(
+                    "homeassistant/sensor/${uniqueId}_signal_dbm/config" to JSONObject().apply {
+                        put("name", "${connection.name} Signal dBm")
+                        put("unique_id", "${uniqueId}_signal_dbm")
+                        put("state_topic", "$fullBaseTopic/wan/$connId/cellular/signal_dbm")
                         put("unit_of_measurement", "dBm")
                         put("device_class", "signal_strength")
-                        put("icon", "mdi:signal-cellular-3")
+                        put("icon", "mdi:signal" )
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("device", deviceInfo)
                     }.toString()
                 )
@@ -277,6 +450,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                         put("unique_id", "${uniqueId}_carrier")
                         put("state_topic", "$fullBaseTopic/wan/$connId/cellular/carrier")
                         put("icon", "mdi:sim")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("device", deviceInfo)
                     }.toString()
                 )
@@ -288,6 +464,39 @@ class PeplinkPlugin : PollingDevicePlugin {
                         put("unique_id", "${uniqueId}_network")
                         put("state_topic", "$fullBaseTopic/wan/$connId/cellular/network")
                         put("icon", "mdi:network")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+
+                // Sensor: Carrier Aggregation
+                payloads.add(
+                    "homeassistant/binary_sensor/${uniqueId}_carrier_agg/config" to JSONObject().apply {
+                        put("name", "${connection.name} Carrier Aggregation")
+                        put("unique_id", "${uniqueId}_carrier_agg")
+                        put("state_topic", "$fullBaseTopic/wan/$connId/cellular/carrier_aggregation")
+                        put("payload_on", "true")
+                        put("payload_off", "false")
+                        put("icon", "mdi:signal-variant")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+
+                // Sensor: Bands (active cellular bands)
+                payloads.add(
+                    "homeassistant/sensor/${uniqueId}_bands/config" to JSONObject().apply {
+                        put("name", "${connection.name} Bands")
+                        put("unique_id", "${uniqueId}_bands")
+                        put("state_topic", "$fullBaseTopic/wan/$connId/cellular/bands")
+                        put("icon", "mdi:radio-tower")
+                        put("availability_topic", availabilityTopic)
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("device", deviceInfo)
                     }.toString()
                 )
@@ -304,6 +513,64 @@ class PeplinkPlugin : PollingDevicePlugin {
                     }.toString()
                 )
             }
+
+            // Sensor: Usage (GB) - base per WAN
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_usage/config" to JSONObject().apply {
+                    put("name", "${connection.name} Usage (GB)")
+                    put("unique_id", "${uniqueId}_usage")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/usage_gb")
+                    put("unit_of_measurement", "GB")
+                    put("icon", "mdi:gauge")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Sensor: Allowance (GB) - plan limit
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_allowance/config" to JSONObject().apply {
+                    put("name", "${connection.name} Plan Allowance (GB)")
+                    put("unique_id", "${uniqueId}_allowance")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/allowance_gb")
+                    put("icon", "mdi:folder-lock")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Sensor: Usage Percent
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_usage_percent/config" to JSONObject().apply {
+                    put("name", "${connection.name} Usage Percent")
+                    put("unique_id", "${uniqueId}_usage_percent")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/usage_percent")
+                    put("unit_of_measurement", "%")
+                    put("icon", "mdi:percent")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Sensor: Plan Start Date
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_plan_start_day/config" to JSONObject().apply {
+                    put("name", "${connection.name} Plan Start Day")
+                    put("unique_id", "${uniqueId}_plan_start_day")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/plan_start_day")
+                    put("icon", "mdi:calendar")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
         }
 
         Log.i(TAG, "[$instanceId] Generated ${payloads.size} discovery payloads")
@@ -323,10 +590,21 @@ class PeplinkPlugin : PollingDevicePlugin {
                 topic.matches(Regex("$baseTopic/wan/(\\d+)/priority/set")) -> {
                     val connId = Regex("$baseTopic/wan/(\\d+)/priority/set").find(topic)?.groupValues?.get(1)?.toIntOrNull()
                         ?: return Result.failure(IllegalArgumentException("Invalid connId in topic"))
-                    val priority = payload.toIntOrNull()
-                        ?: return Result.failure(IllegalArgumentException("Invalid priority value"))
+                    val normalized = payload.trim()
+                    val result = if (normalized.equals("Disabled", ignoreCase = true)) {
+                        apiClient.setWanPriority(connId, null)
+                    } else {
+                        val priority = normalized.toIntOrNull()
+                            ?: return Result.failure(IllegalArgumentException("Invalid priority value"))
+                        apiClient.setWanPriority(connId, priority)
+                    }
 
-                    apiClient.setWanPriority(connId, priority)
+                    // On success, immediately flip availability to reflect enable/disable intent
+                    if (result.isSuccess) {
+                        val isEnabled = !normalized.equals("Disabled", ignoreCase = true)
+                        mqttPublisher.publishAvailability("$baseTopic/wan/$connId/availability", isEnabled)
+                    }
+                    result
                 }
 
                 // Cellular reset: peplink/main/wan/1/cellular/reset
@@ -377,14 +655,18 @@ class PeplinkPlugin : PollingDevicePlugin {
     private suspend fun publishWanState(connId: Int, connection: WanConnection) {
         val baseTopic = getMqttBaseTopic()
 
-        // Status
-        val status = when (connection.status) {
+        // Status: Use the raw message if available, otherwise map the enum
+        val status = connection.message ?: when (connection.status) {
             ConnectionStatus.CONNECTED -> "connected"
             ConnectionStatus.DISCONNECTED -> "disconnected"
             ConnectionStatus.DISABLED -> "disabled"
             else -> "unknown"
         }
         mqttPublisher.publishState("$baseTopic/wan/$connId/status", status)
+
+        // Status LED: Publish color indicator (e.g., "green", "red", "yellow")
+        val statusLed = connection.statusLed ?: ""
+        mqttPublisher.publishState("$baseTopic/wan/$connId/status_led", statusLed)
 
         // Priority (always publish, even if null)
         val priority = connection.priority?.toString() ?: ""
@@ -394,15 +676,121 @@ class PeplinkPlugin : PollingDevicePlugin {
         val ip = connection.ip ?: ""
         mqttPublisher.publishState("$baseTopic/wan/$connId/ip", ip)
 
-        // Uptime (always publish, even if null)
-        val uptime = connection.uptime?.toString() ?: "0"
-        mqttPublisher.publishState("$baseTopic/wan/$connId/uptime", uptime)
+        // Uptime: Format seconds to days:hours:minutes
+        val uptimeFormatted = if (connection.uptime != null) formatUptime(connection.uptime) else "0:00:00"
+        mqttPublisher.publishState("$baseTopic/wan/$connId/uptime", uptimeFormatted)
 
         // Cellular-specific data
         connection.cellular?.let { cellular ->
-            mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/signal", cellular.signalStrength.toString())
-            mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/carrier", cellular.carrier ?: "")
+            // Signal strength: format as "X/5" if it's a level (1-5), otherwise show dBm
+            if (cellular.signalStrength != null) {
+                val signalFormatted = if (cellular.signalStrength in 1..5) {
+                    "${cellular.signalStrength}/5"
+                } else {
+                    "${cellular.signalStrength} dBm"
+                }
+                mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/signal", signalFormatted)
+            }
+            // Raw dBm signal sensor: prefer top-level dBm, else rsrp, else rssi
+            run {
+                var dbmValue: Int? = null
+                val s = cellular.signalStrength
+                if (s != null && s !in 1..5) {
+                    dbmValue = s
+                }
+                if (dbmValue == null) {
+                    dbmValue = cellular.rsrpDbm ?: cellular.rssiDbm
+                }
+                mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/signal_dbm", dbmValue?.toString() ?: "")
+            }
+            // Carrier: parse JSON if present, extract name property
+            val carrierName = parseCarrierName(cellular.carrier)
+            mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/carrier", carrierName)
+            // Network type
             mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/network", cellular.networkType ?: "")
+            // Carrier aggregation
+            mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/carrier_aggregation", cellular.carrierAggregation.toString())
+            // Bands: Publish active bands or "unavailable" if none
+            val bandsValue = if (cellular.bands.isNotEmpty()) {
+                cellular.bands.joinToString(", ")
+            } else {
+                "unavailable"
+            }
+            mqttPublisher.publishState("$baseTopic/wan/$connId/cellular/bands", bandsValue)
+        }
+
+        // Usage and allowance (published separately with usage data)
+        lastWanUsage[connId]?.let { usage ->
+            // For multi-SIM cellular, use the first enabled SIM slot's data
+            val activeSlot = usage.simSlots?.values?.firstOrNull { it.enabled && it.hasUsageTracking }
+            val usageMb = activeSlot?.usage ?: usage.usage
+            val limitMb = activeSlot?.limit ?: usage.limit
+            val startDay = activeSlot?.startDate ?: usage.startDate
+            
+            // Usage: Convert to GB and display
+            val usageGb = if (usageMb != null) formatUsageGb(usageMb) else "0"
+            mqttPublisher.publishState("$baseTopic/wan/$connId/usage_gb", usageGb)
+            
+            // Allowance (limit): Convert to GB and display
+            val limitGb = if (limitMb != null) formatUsageGb(limitMb) else "unlimited"
+            mqttPublisher.publishState("$baseTopic/wan/$connId/allowance_gb", limitGb)
+
+            // Usage percent
+            val percent = activeSlot?.percent ?: usage.percent ?: computeUsagePercent(usageMb, limitMb)
+            if (percent != null) {
+                mqttPublisher.publishState("$baseTopic/wan/$connId/usage_percent", percent.toString())
+            }
+            
+            // Plan start day (day of month)
+            formatStartDay(startDay)?.let { formattedDay ->
+                mqttPublisher.publishState("$baseTopic/wan/$connId/plan_start_day", formattedDay)
+            }
+        }
+    }
+
+    private fun formatUptime(seconds: Int): String {
+        val totalSeconds = seconds
+        val days = totalSeconds / 86400
+        val hours = (totalSeconds % 86400) / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        return "$days:${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}"
+    }
+
+    private fun formatUsageGb(mb: Long): String {
+        return String.format("%.2f", mb / 1024.0)
+    }
+
+    private fun computeUsagePercent(usageMb: Long?, limitMb: Long?): Int? {
+        if (usageMb == null || limitMb == null || limitMb <= 0) return null
+        return ((usageMb.toDouble() / limitMb.toDouble()) * 100.0).roundToInt()
+    }
+
+    private fun parseCarrierName(carrierJson: String?): String {
+        if (carrierJson.isNullOrBlank()) return ""
+        return try {
+            val json = JSONObject(carrierJson)
+            json.optString("name", carrierJson)
+        } catch (e: Exception) {
+            // If parsing fails, return the original string
+            carrierJson
+        }
+    }
+
+    private fun formatStartDay(start: String?): String? {
+        if (start.isNullOrBlank()) return null
+        // Try epoch seconds
+        val epoch = start.toLongOrNull()
+        if (epoch != null) {
+            val day = Instant.ofEpochSecond(epoch).atZone(ZoneId.systemDefault()).dayOfMonth
+            return day.toString()
+        }
+
+        // Try ISO date/time (YYYY-MM-DD or ISO datetime)
+        return try {
+            val date = LocalDate.parse(start.substring(0, minOf(start.length, 10)))
+            date.dayOfMonth.toString()
+        } catch (e: Exception) {
+            null
         }
     }
 }
