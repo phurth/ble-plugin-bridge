@@ -70,6 +70,22 @@ class PeplinkPlugin : PollingDevicePlugin {
     private var routerFirmwareVersion: String = "unknown"
     private var connectedDevicesCount: Int = 0
     private var pepVpnProfiles: Map<String, Triple<String, String, String>> = emptyMap()
+    
+    // ===== BANDWIDTH TRACKING =====
+    
+    private data class BandwidthSnapshot(
+        val timestamp: Long,
+        val rxBytes: Long,
+        val txBytes: Long,
+        val connId: Int
+    )
+    private val lastBandwidthSnapshot = mutableMapOf<Int, BandwidthSnapshot>()
+    
+    // ===== DIAGNOSTICS STATE =====
+    
+    private var lastSystemDiagnostics: SystemDiagnostics? = null
+    private var lastDeviceInfo: DeviceInfo? = null
+    
     private val commandMutex = Mutex()  // Serialize command execution to prevent concurrent API calls
 
     // ===== POLLING CONFIGURATION =====
@@ -329,14 +345,96 @@ class PeplinkPlugin : PollingDevicePlugin {
 
     private suspend fun pollDiagnostics() {
         try {
+            val base = getMqttBaseTopic()
+            
+            // Get system diagnostics (temperature, fans)
+            apiClient.getSystemDiagnostics().onSuccess { diagnostics ->
+                lastSystemDiagnostics = diagnostics
+                
+                // Publish temperature and threshold
+                diagnostics.temperature?.let {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature", String.format("%.1f", it))
+                }
+                diagnostics.temperatureThreshold?.let {
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", String.format("%.0f", it))
+                }
+                
+                // Publish fan information
+                diagnostics.fans.forEach { fan ->
+                    mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/status", fan.status)
+                    fan.speedRpm?.let {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", it.toString())
+                    }
+                    fan.speedPercent?.let {
+                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", it.toString())
+                    }
+                }
+            }
+            
+            // Get device information (serial number, model)
+            apiClient.getDeviceInfo().onSuccess { deviceInfo ->
+                lastDeviceInfo = deviceInfo
+                mqttPublisher.publishState("$base/diagnostic/device/serial_number", deviceInfo.serialNumber)
+                mqttPublisher.publishState("$base/diagnostic/device/model", deviceInfo.model)
+                deviceInfo.hardwareVersion?.let {
+                    mqttPublisher.publishState("$base/diagnostic/device/hardware_version", it)
+                }
+            }
+            
+            // Get connected devices count
             apiClient.getConnectedDevicesCount().onSuccess { count ->
                 connectedDevicesCount = count
-                val base = getMqttBaseTopic()
                 mqttPublisher.publishState("$base/diagnostic/connected_devices", connectedDevicesCount.toString())
             }
+            
+            // Calculate and publish bandwidth rates from last WAN status
+            publishBandwidthRates()
+            
             Log.d(TAG, "[$instanceId] Diagnostics poll successful")
         } catch (e: Exception) {
             Log.e(TAG, "[$instanceId] Diagnostics poll exception: ${e.message}")
+        }
+    }
+    
+    /**
+     * Calculate bandwidth rates from WAN status byte counters and publish to MQTT.
+     * Uses delta calculation from previous snapshot.
+     */
+    private fun publishBandwidthRates() {
+        val base = getMqttBaseTopic()
+        val currentTime = System.currentTimeMillis()
+        
+        for ((connId, wanConn) in lastWanState) {
+            val rxBytes = wanConn.rxBytes ?: continue
+            val txBytes = wanConn.txBytes ?: continue
+            
+            val lastSnapshot = lastBandwidthSnapshot[connId]
+            
+            if (lastSnapshot != null) {
+                val timeDeltaSec = (currentTime - lastSnapshot.timestamp) / 1000.0
+                if (timeDeltaSec > 0) {
+                    // Calculate rates in bytes per second, then convert to Mbps
+                    val rxDelta = (rxBytes - lastSnapshot.rxBytes).coerceAtLeast(0L)
+                    val txDelta = (txBytes - lastSnapshot.txBytes).coerceAtLeast(0L)
+                    
+                    val downloadMbps = (rxDelta / timeDeltaSec * 8) / 1_000_000
+                    val uploadMbps = (txDelta / timeDeltaSec * 8) / 1_000_000
+                    
+                    // Publish bandwidth rates
+                    mqttPublisher.publishState("$base/wan/$connId/bandwidth/download_mbps", String.format("%.1f", downloadMbps))
+                    mqttPublisher.publishState("$base/wan/$connId/bandwidth/upload_mbps", String.format("%.1f", uploadMbps))
+                    
+                    Log.d(TAG, "[$instanceId] WAN $connId: ↓${String.format("%.1f", downloadMbps)} Mbps, ↑${String.format("%.1f", uploadMbps)} Mbps")
+                }
+            }
+            
+            // Update snapshot for next calculation
+            lastBandwidthSnapshot[connId] = BandwidthSnapshot(
+                timestamp = currentTime,
+                rxBytes = rxBytes,
+                txBytes = txBytes,
+                connId = connId
+            )
         }
     }
 
@@ -657,6 +755,127 @@ class PeplinkPlugin : PollingDevicePlugin {
                             put("availability_topic", availabilityTopic)
                             put("payload_available", "online")
                             put("payload_not_available", "offline")
+                            put("device", deviceInfo)
+                        }.toString()
+                    )
+                }
+            }
+
+            // Bandwidth sensors (per-WAN in Diagnostics section)
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_download_rate/config" to JSONObject().apply {
+                    put("name", "${connection.name} Download Rate")
+                    put("unique_id", "${uniqueId}_download_rate")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/bandwidth/download_mbps")
+                    put("unit_of_measurement", "Mbit/s")
+                    put("device_class", "data_rate")
+                    put("icon", "mdi:download")
+                    put("entity_category", "diagnostic")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            payloads.add(
+                "homeassistant/sensor/${uniqueId}_upload_rate/config" to JSONObject().apply {
+                    put("name", "${connection.name} Upload Rate")
+                    put("unique_id", "${uniqueId}_upload_rate")
+                    put("state_topic", "$fullBaseTopic/wan/$connId/bandwidth/upload_mbps")
+                    put("unit_of_measurement", "Mbit/s")
+                    put("device_class", "data_rate")
+                    put("icon", "mdi:upload")
+                    put("entity_category", "diagnostic")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+        }
+
+        // System diagnostic sensors
+        run {
+            val baseTopic = getMqttBaseTopic()
+            val fullBaseTopic = "$topicPrefix/$baseTopic"
+
+            // System temperature sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_system_temperature/config" to JSONObject().apply {
+                    put("name", "System Temperature")
+                    put("unique_id", "${instanceId}_system_temperature")
+                    put("state_topic", "$fullBaseTopic/diagnostic/system/temperature")
+                    put("unit_of_measurement", "°C")
+                    put("device_class", "temperature")
+                    put("icon", "mdi:thermometer")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Temperature threshold sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_temperature_threshold/config" to JSONObject().apply {
+                    put("name", "Temperature Threshold")
+                    put("unique_id", "${instanceId}_temperature_threshold")
+                    put("state_topic", "$fullBaseTopic/diagnostic/system/temperature_threshold")
+                    put("unit_of_measurement", "°C")
+                    put("device_class", "temperature")
+                    put("icon", "mdi:alert-thermometer")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Serial number sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_serial_number/config" to JSONObject().apply {
+                    put("name", "Serial Number")
+                    put("unique_id", "${instanceId}_serial_number")
+                    put("state_topic", "$fullBaseTopic/diagnostic/device/serial_number")
+                    put("icon", "mdi:numeric")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Model sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_model/config" to JSONObject().apply {
+                    put("name", "Model")
+                    put("unique_id", "${instanceId}_model")
+                    put("state_topic", "$fullBaseTopic/diagnostic/device/model")
+                    put("icon", "mdi:router-wireless")
+                    put("entity_category", "diagnostic")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // Dynamic fan sensors
+            if (lastSystemDiagnostics != null && lastSystemDiagnostics!!.fans.isNotEmpty()) {
+                lastSystemDiagnostics!!.fans.forEach { fan ->
+                    // Fan speed RPM sensor
+                    payloads.add(
+                        "homeassistant/sensor/${instanceId}_fan_${fan.id}_speed/config" to JSONObject().apply {
+                            put("name", "${fan.name} Speed")
+                            put("unique_id", "${instanceId}_fan_${fan.id}_speed")
+                            put("state_topic", "$fullBaseTopic/diagnostic/fan/${fan.id}/speed_rpm")
+                            put("unit_of_measurement", "rpm")
+                            put("icon", "mdi:fan")
+                            put("entity_category", "diagnostic")
+                            put("device", deviceInfo)
+                        }.toString()
+                    )
+
+                    // Fan status sensor
+                    payloads.add(
+                        "homeassistant/sensor/${instanceId}_fan_${fan.id}_status/config" to JSONObject().apply {
+                            put("name", "${fan.name} Status")
+                            put("unique_id", "${instanceId}_fan_${fan.id}_status")
+                            put("state_topic", "$fullBaseTopic/diagnostic/fan/${fan.id}/status")
+                            put("icon", "mdi:fan-alert")
+                            put("entity_category", "diagnostic")
                             put("device", deviceInfo)
                         }.toString()
                     )

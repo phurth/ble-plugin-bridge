@@ -53,7 +53,11 @@ data class WanConnection(
     val statusLed: String?,  // LED status indicator
     val cellular: CellularInfo? = null,
     val wifi: WifiInfo? = null,
-    val simSlotCount: Int = 0  // Number of SIM slots (0 for non-cellular, 1+ for cellular)
+    val simSlotCount: Int = 0,  // Number of SIM slots (0 for non-cellular, 1+ for cellular)
+    val downloadRateBps: Long? = null,      // Bytes per second
+    val uploadRateBps: Long? = null,        // Bytes per second
+    val rxBytes: Long? = null,              // Total received
+    val txBytes: Long? = null               // Total transmitted
 ) {
     companion object {
         /**
@@ -81,7 +85,21 @@ data class WanConnection(
                 } else null,
                 wifi = if (type == WanType.WIFI && json.has("wifi")) {
                     WifiInfo.fromJson(json.getJSONObject("wifi"))
-                } else null
+                } else null,
+                downloadRateBps = if (json.has("downloadRateBps")) json.optLong("downloadRateBps") else null,
+                uploadRateBps = if (json.has("uploadRateBps")) json.optLong("uploadRateBps") else null,
+                rxBytes = when {
+                    json.has("rxBytes") -> json.optLong("rxBytes")
+                    json.has("rx") -> json.optLong("rx")
+                    json.optJSONObject("stats")?.has("rx") == true -> json.getJSONObject("stats").optLong("rx")
+                    else -> null
+                },
+                txBytes = when {
+                    json.has("txBytes") -> json.optLong("txBytes")
+                    json.has("tx") -> json.optLong("tx")
+                    json.optJSONObject("stats")?.has("tx") == true -> json.getJSONObject("stats").optLong("tx")
+                    else -> null
+                }
             )
         }
 
@@ -311,6 +329,80 @@ data class ApiResponse<T>(
 
     val isFailure: Boolean
         get() = stat == "fail"
+}
+
+// ===== SYSTEM DIAGNOSTICS =====
+
+/**
+ * Fan speed information from /api/status.system or /api/info.status
+ */
+data class FanInfo(
+    val id: Int,
+    val name: String,
+    val speedRpm: Int? = null,              // RPM
+    val speedPercent: Int? = null,          // 0-100%
+    val status: String = "normal"           // normal, warning, critical
+) {
+    companion object {
+        fun fromJson(id: Int, json: JSONObject): FanInfo {
+            return FanInfo(
+                id = id,
+                name = json.optString("name", "Fan $id"),
+                speedRpm = if (json.has("speedRpm")) json.optInt("speedRpm") else null,
+                speedPercent = if (json.has("speedPercent")) json.optInt("speedPercent") else null,
+                status = json.optString("status", "normal")
+            )
+        }
+    }
+}
+
+/**
+ * System diagnostics including temperature and fan information
+ */
+data class SystemDiagnostics(
+    val temperature: Double?,               // °C
+    val temperatureThreshold: Double?,      // °C alarm point
+    val fans: List<FanInfo> = emptyList()
+) {
+    companion object {
+        fun fromJson(json: JSONObject): SystemDiagnostics {
+            val fans = mutableListOf<FanInfo>()
+            
+            // Parse fans array if present
+            val fansArray = json.optJSONArray("fans")
+            if (fansArray != null) {
+                for (i in 0 until fansArray.length()) {
+                    val fanObj = fansArray.getJSONObject(i)
+                    fans.add(FanInfo.fromJson(i + 1, fanObj))
+                }
+            }
+            
+            return SystemDiagnostics(
+                temperature = if (json.has("temperature")) json.optDouble("temperature") else null,
+                temperatureThreshold = if (json.has("temperatureThreshold")) json.optDouble("temperatureThreshold") else null,
+                fans = fans
+            )
+        }
+    }
+}
+
+/**
+ * Device information including serial number and hardware details
+ */
+data class DeviceInfo(
+    val serialNumber: String,
+    val model: String,
+    val hardwareVersion: String? = null
+) {
+    companion object {
+        fun fromJson(json: JSONObject): DeviceInfo {
+            return DeviceInfo(
+                serialNumber = json.optString("serialNumber", "unknown"),
+                model = json.optString("model", "unknown"),
+                hardwareVersion = json.optString("hardwareVersion", null)
+            )
+        }
+    }
 }
 
 // ===== HARDWARE CONFIGURATION =====

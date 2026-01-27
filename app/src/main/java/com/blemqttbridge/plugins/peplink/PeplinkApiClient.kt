@@ -467,6 +467,93 @@ class PeplinkApiClient(
     }
 
     /**
+     * Get system diagnostics (temperature, fans).
+     * Attempts multiple endpoints to find temperature and fan data.
+     */
+    suspend fun getSystemDiagnostics(): Result<SystemDiagnostics> {
+        // Try /api/status.system first, then /api/info.status
+        val urls = listOf(
+            "$baseUrl/api/status.system",
+            "$baseUrl/api/info.status",
+            "$baseUrl/api/status.status"
+        )
+
+        for (url in urls) {
+            try {
+                val responseBody = makeAuthenticatedRequest(url).getOrNull()
+                if (responseBody == null) {
+                    continue
+                }
+                
+                val json = JSONObject(responseBody)
+                
+                if (json.optString("stat") != "ok") {
+                    continue
+                }
+
+                val responseObj = json.optJSONObject("response") ?: json
+                
+                // Check if this response contains system info
+                if (responseObj.has("temperature") || responseObj.has("fans")) {
+                    Log.d(TAG, "Found system diagnostics at $url")
+                    return Result.success(SystemDiagnostics.fromJson(responseObj))
+                }
+            } catch (e: Exception) {
+                // Try next endpoint
+                Log.d(TAG, "Could not get diagnostics from $url: ${e.message}")
+            }
+        }
+
+        // Return empty diagnostics if no endpoint returns data
+        Log.w(TAG, "No system diagnostics endpoint available")
+        return Result.success(SystemDiagnostics(temperature = null, temperatureThreshold = null))
+    }
+
+    /**
+     * Get device information (serial number, model, hardware version).
+     * Attempts multiple endpoints to find device info.
+     */
+    suspend fun getDeviceInfo(): Result<DeviceInfo> {
+        // Try /api/info.device first, then /api/info.status
+        val urls = listOf(
+            "$baseUrl/api/info.device",
+            "$baseUrl/api/status.device",
+            "$baseUrl/api/info.status"
+        )
+
+        for (url in urls) {
+            try {
+                val responseBody = makeAuthenticatedRequest(url).getOrNull()
+                if (responseBody == null) {
+                    continue
+                }
+                
+                val json = JSONObject(responseBody)
+                
+                if (json.optString("stat") != "ok") {
+                    continue
+                }
+
+                val responseObj = json.optJSONObject("response") ?: json
+                
+                // Check if this response contains device info
+                if (responseObj.has("serialNumber") || responseObj.has("model")) {
+                    Log.d(TAG, "Found device info at $url")
+                    return Result.success(DeviceInfo.fromJson(responseObj))
+                }
+            } catch (e: Exception) {
+                // Try next endpoint
+                Log.d(TAG, "Could not get device info from $url: ${e.message}")
+                continue
+            }
+        }
+
+        // Return default device info if no endpoint returns data
+        Log.w(TAG, "No device info endpoint available")
+        return Result.success(DeviceInfo(serialNumber = "unknown", model = "unknown"))
+    }
+
+    /**
      * Close the HTTP client and release resources.
      */
     fun close() {
