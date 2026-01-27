@@ -6,6 +6,7 @@ import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.PollingDevicePlugin
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -68,6 +69,7 @@ class PeplinkPlugin : PollingDevicePlugin {
     private var routerFirmwareVersion: String = "unknown"
     private var connectedDevicesCount: Int = 0
     private var pepVpnProfiles: Map<String, Triple<String, String, String>> = emptyMap()
+    private val commandMutex = Mutex()  // Serialize command execution to prevent concurrent API calls
 
     // ===== LIFECYCLE =====
 
@@ -101,12 +103,20 @@ class PeplinkPlugin : PollingDevicePlugin {
 
             Log.i(TAG, "[$instanceId] Starting polling...")
 
-            // Subscribe to command topics for this instance
+            // Subscribe to command topics for this instance (prefix applied by publisher)
+            // Subscribe only to command-specific topics, not state topics, to avoid flooding from polls
             val baseTopic = getMqttBaseTopic()
-            mqttPublisher.subscribeToCommands("$baseTopic/#") { topic, payload ->
+            mqttPublisher.subscribeToCommands("$baseTopic/wan/+/priority/set") { topic, payload ->
                 GlobalScope.launch(Dispatchers.IO) {
                     try {
-                        handleCommand(topic, payload)
+                        handleCommandSerialized(topic, payload)
+                    } catch (_: Exception) {}
+                }
+            }
+            mqttPublisher.subscribeToCommands("$baseTopic/wan/+/cellular/reset") { topic, payload ->
+                GlobalScope.launch(Dispatchers.IO) {
+                    try {
+                        handleCommandSerialized(topic, payload)
                     } catch (_: Exception) {}
                 }
             }
@@ -579,25 +589,63 @@ class PeplinkPlugin : PollingDevicePlugin {
 
     // ===== COMMAND HANDLING =====
 
+    /**
+     * Serialized command handler that acquires a mutex lock to prevent concurrent API calls.
+     * This ensures that rapid successive commands (e.g., priority 3→2→1) are processed
+     * sequentially rather than in parallel, avoiding race conditions.
+     */
+    private suspend fun handleCommandSerialized(topic: String, payload: String): Result<Unit> {
+        commandMutex.lock()
+        return try {
+            handleCommand(topic, payload)
+        } finally {
+            commandMutex.unlock()
+        }
+    }
+
     override suspend fun handleCommand(topic: String, payload: String): Result<Unit> {
-        Log.i(TAG, "[$instanceId] Handling command: $topic = $payload")
+        Log.i(TAG, "[$instanceId] handleCommand called: topic=$topic, payload=$payload")
 
         return try {
             val baseTopic = getMqttBaseTopic()
+            val topicPrefix = mqttPublisher.topicPrefix
+            val normalizedTopic = if (topicPrefix.isNotBlank() && topic.startsWith("$topicPrefix/")) {
+                topic.removePrefix("$topicPrefix/")
+            } else topic
+
+            Log.d(TAG, "[$instanceId] normalized topic: $normalizedTopic")
+
+            // Ignore non-command state updates that flow through the same subscription
+            val priorityRegex = Regex("$baseTopic/wan/(\\d+)/priority/set")
+            val resetRegex = Regex("$baseTopic/wan/(\\d+)/cellular/reset")
+            
+            val isPriorityCommand = priorityRegex.matches(normalizedTopic)
+            val isResetCommand = resetRegex.matches(normalizedTopic)
+            Log.d(TAG, "[$instanceId] isPriority=$isPriorityCommand, isReset=$isResetCommand")
+            
+            if (!isPriorityCommand && !isResetCommand) {
+                Log.d(TAG, "[$instanceId] Ignoring non-command topic")
+                return Result.success(Unit)
+            }
+
 
             when {
-                // Priority switching: peplink/main/wan/1/priority/set
-                topic.matches(Regex("$baseTopic/wan/(\\d+)/priority/set")) -> {
-                    val connId = Regex("$baseTopic/wan/(\\d+)/priority/set").find(topic)?.groupValues?.get(1)?.toIntOrNull()
+                isPriorityCommand -> {
+                    Log.i(TAG, "[$instanceId] Processing priority command")
+                    val connId = priorityRegex.find(normalizedTopic)?.groupValues?.get(1)?.toIntOrNull()
                         ?: return Result.failure(IllegalArgumentException("Invalid connId in topic"))
                     val normalized = payload.trim()
+                    Log.d(TAG, "[$instanceId] Setting WAN $connId priority to: $normalized")
                     val result = if (normalized.equals("Disabled", ignoreCase = true)) {
+                        Log.d(TAG, "[$instanceId] Calling setWanPriority($connId, null)")
                         apiClient.setWanPriority(connId, null)
                     } else {
                         val priority = normalized.toIntOrNull()
-                            ?: return Result.failure(IllegalArgumentException("Invalid priority value"))
+                            ?: return Result.failure(IllegalArgumentException("Invalid priority value: $normalized"))
+                        Log.d(TAG, "[$instanceId] Calling setWanPriority($connId, $priority)")
                         apiClient.setWanPriority(connId, priority)
                     }
+                    Log.d(TAG, "[$instanceId] setWanPriority result: ${result.isSuccess}")
 
                     // On success, immediately flip availability to reflect enable/disable intent
                     if (result.isSuccess) {
@@ -608,10 +656,11 @@ class PeplinkPlugin : PollingDevicePlugin {
                 }
 
                 // Cellular reset: peplink/main/wan/1/cellular/reset
-                topic.matches(Regex("$baseTopic/wan/(\\d+)/cellular/reset")) -> {
-                    val connId = Regex("$baseTopic/wan/(\\d+)/cellular/reset").find(topic)?.groupValues?.get(1)?.toIntOrNull()
+                isResetCommand -> {
+                    Log.i(TAG, "[$instanceId] Processing reset command")
+                    val connId = resetRegex.find(normalizedTopic)?.groupValues?.get(1)?.toIntOrNull()
                         ?: return Result.failure(IllegalArgumentException("Invalid connId in topic"))
-
+                    Log.d(TAG, "[$instanceId] Calling resetCellularModem($connId)")
                     apiClient.resetCellularModem(connId)
                 }
 
