@@ -174,15 +174,21 @@ class MqttService : Service() {
     }
     
     /**
-     * Get the MQTT publisher interface for other components to use.
-     * Returns null if MQTT is not connected.
-     */
-    /**
      * Get MQTT publisher interface for other components.
-     * Returns null when MQTT is not connected.
+     * Returns null when MQTT is not connected or plugin is not initialized.
+     * 
+     * CRITICAL: Only returns the wrapper when both isConnected AND mqttPlugin are ready.
+     * This prevents race conditions where plugins try to use the wrapper before
+     * initialization completes.
      */
     fun getMqttPublisher(): MqttPublisher? {
-        return if (isConnected && mqttPlugin != null) mqttPublisherWrapper else null
+        return if (isConnected && mqttPlugin != null) {
+            Log.d(TAG, "✅ Returning MqttPublisher wrapper (connected=${isConnected}, plugin!=null=${mqttPlugin != null})")
+            mqttPublisherWrapper
+        } else {
+            Log.w(TAG, "⚠️ Cannot return MqttPublisher: connected=${isConnected}, plugin!=null=${mqttPlugin != null}")
+            null
+        }
     }
 
     /**

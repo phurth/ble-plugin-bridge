@@ -224,14 +224,19 @@ class BaseBleService : Service() {
             val mqtt = getMqttPublisherFromService()
             Log.d(TAG, "📤 publishDiscovery called: topic=$topic, mqttAvailable=${mqtt != null}")
             if (mqtt == null) {
-                Log.w(TAG, "❌ MQTT service not available, cannot publish discovery to: $topic")
+                Log.w(TAG, "⏳ MQTT not ready for discovery: $topic (will retry)")
+                // Will be retried through the connection observer in onCreate
             } else {
                 // Use runBlocking to ensure publish completes before returning
                 // This prevents plugins from thinking discovery succeeded when MQTT isn't ready
-                runBlocking {
-                    Log.d(TAG, "✅ Calling MQTT service publishDiscovery for: $topic")
-                    mqtt.publishDiscovery(topic, payload)
-                    Log.d(TAG, "✅ MQTT publishDiscovery completed for: $topic")
+                try {
+                    runBlocking {
+                        Log.d(TAG, "✅ Calling MQTT service publishDiscovery for: $topic")
+                        mqtt.publishDiscovery(topic, payload)
+                        Log.d(TAG, "✅ MQTT publishDiscovery completed for: $topic")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Discovery publish failed: $topic", e)
                 }
             }
         }
