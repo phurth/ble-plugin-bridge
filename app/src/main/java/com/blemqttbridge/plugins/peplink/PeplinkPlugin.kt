@@ -116,14 +116,19 @@ class PeplinkPlugin : PollingDevicePlugin {
         statusPollInterval = (config.getString("status_poll_interval", "10").toIntOrNull() ?: 10).coerceIn(5, 3600)
         usagePollInterval = (config.getString("usage_poll_interval", "60").toIntOrNull() ?: 60).coerceIn(5, 3600)
         diagnosticsPollInterval = (config.getString("diagnostics_poll_interval", "30").toIntOrNull() ?: 30).coerceIn(5, 3600)
-        vpnPollInterval = (config.getString("vpn_poll_interval", "60").toIntOrNull() ?: 60).coerceIn(5, 3600)
-        gpsPollInterval = (config.getString("gps_poll_interval", "120").toIntOrNull() ?: 120).coerceIn(5, 3600)
+        
+        // VPN and GPS polling: interval=0 means disabled, otherwise use the interval (min 5s if >0)
+        val vpnInterval = config.getString("vpn_poll_interval", "0").toIntOrNull() ?: 0
+        vpnPollInterval = if (vpnInterval > 0) vpnInterval.coerceIn(5, 3600) else 0
+        enableVpnPolling = vpnInterval > 0
+        
+        val gpsInterval = config.getString("gps_poll_interval", "0").toIntOrNull() ?: 0
+        gpsPollInterval = if (gpsInterval > 0) gpsInterval.coerceIn(5, 3600) else 0
+        enableGpsPolling = gpsInterval > 0
 
         enableStatusPolling = config.getString("enable_status_polling", "true").toBoolean()
         enableUsagePolling = config.getString("enable_usage_polling", "true").toBoolean()
         enableDiagnosticsPolling = config.getString("enable_diagnostics_polling", "true").toBoolean()
-        enableVpnPolling = config.getString("enable_vpn_polling", "false").toBoolean()
-        enableGpsPolling = config.getString("enable_gps_polling", "false").toBoolean()
 
         Log.i(TAG, "[$instanceId] Initialized - URL: $baseUrl, Polling: ${pollingIntervalMs}ms")
         Log.i(TAG, "[$instanceId] Polling config: status=${statusPollInterval}s(${if(enableStatusPolling) "ON" else "OFF"}), " +

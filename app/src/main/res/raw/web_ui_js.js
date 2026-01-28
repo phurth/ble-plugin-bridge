@@ -653,8 +653,8 @@ async function confirmAddInstance() {
         const statusPollInterval = document.getElementById('new-status-poll-interval')?.value.trim();
         const usagePollInterval = document.getElementById('new-usage-poll-interval')?.value.trim();
         const diagnosticsPollInterval = document.getElementById('new-diagnostics-poll-interval')?.value.trim();
-        const enableVpnPolling = document.getElementById('new-enable-vpn-polling')?.checked;
-        const enableGpsPolling = document.getElementById('new-enable-gps-polling')?.checked;
+        const vpnPollInterval = document.getElementById('new-vpn-poll-interval')?.value.trim();
+        const gpsPollInterval = document.getElementById('new-gps-poll-interval')?.value.trim();
 
         if (!baseUrl || !username || !password) {
             alert('Please fill in all required Peplink fields (URL, Username, Password)');
@@ -674,8 +674,8 @@ async function confirmAddInstance() {
         if (statusPollInterval) config.status_poll_interval = statusPollInterval;
         if (usagePollInterval) config.usage_poll_interval = usagePollInterval;
         if (diagnosticsPollInterval) config.diagnostics_poll_interval = diagnosticsPollInterval;
-        if (enableVpnPolling) config.enable_vpn_polling = 'true';
-        if (enableGpsPolling) config.enable_gps_polling = 'true';
+        if (vpnPollInterval) config.vpn_poll_interval = vpnPollInterval;
+        if (gpsPollInterval) config.gps_poll_interval = gpsPollInterval;
 
         // Use polling plugin API instead of regular instance API
         try {
@@ -792,8 +792,8 @@ async function confirmEditInstance() {
     const usernameField = document.getElementById('edit-username');
     const peplinkPasswordField = document.getElementById('edit-peplink-password');
     const instanceNameField = document.getElementById('edit-instance-name');
-    const enableGpsPollingField = document.getElementById('edit-enable-gps-polling');
-    const enableVpnPollingField = document.getElementById('edit-enable-vpn-polling');
+    const vpnPollIntervalField = document.getElementById('edit-vpn-poll-interval');
+    const gpsPollIntervalField = document.getElementById('edit-gps-poll-interval');
     
     if (pinField) {
         const pin = pinField.value.trim();
@@ -851,11 +851,11 @@ async function confirmEditInstance() {
         }
         config.instance_name = instanceName;
     }
-    if (enableGpsPollingField) {
-        config.enable_gps_polling = enableGpsPollingField.checked ? 'true' : 'false';
+    if (vpnPollIntervalField) {
+        config.vpn_poll_interval = vpnPollIntervalField.value.trim();
     }
-    if (enableVpnPollingField) {
-        config.enable_vpn_polling = enableVpnPollingField.checked ? 'true' : 'false';
+    if (gpsPollIntervalField) {
+        config.gps_poll_interval = gpsPollIntervalField.value.trim();
     }
     
     try {
@@ -1042,20 +1042,15 @@ function updatePluginSpecificFields() {
                         <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 30</div>
                     </div>
                     <div>
-                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">VPN Poll (sec)</div>
-                        <input type="number" id="new-vpn-poll-interval" value="60" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
-                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 60</div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">VPN Poll (sec, 0=disabled)</div>
+                        <input type="number" id="new-vpn-poll-interval" value="0" min="0" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 0 (off)</div>
                     </div>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <label style="display: flex; align-items: center; font-size: 12px;">
-                        <input type="checkbox" id="new-enable-vpn-polling" style="margin-right: 6px; cursor: pointer;">
-                        <span style="font-weight: 500;">Enable VPN</span>
-                    </label>
-                    <label style="display: flex; align-items: center; font-size: 12px;">
-                        <input type="checkbox" id="new-enable-gps-polling" style="margin-right: 6px; cursor: pointer;">
-                        <span style="font-weight: 500;">Enable GPS</span>
-                    </label>
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">GPS Poll (sec, 0=disabled)</div>
+                        <input type="number" id="new-gps-poll-interval" value="0" min="0" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 0 (off)</div>
+                    </div>
                 </div>
             </div>
         `;
@@ -1150,8 +1145,8 @@ function updateEditPluginSpecificFields(pluginType, config) {
         const username = config?.username || '';
         const password = config?.password || '';
         const instanceName = config?.instance_name || 'main';
-        const enableGpsPolling = config?.enable_gps_polling || 'false';
-        const enableVpnPolling = config?.enable_vpn_polling || 'false';
+        const vpnPollInterval = config?.vpn_poll_interval || '0';
+        const gpsPollInterval = config?.gps_poll_interval || '0';
         
         container.innerHTML = `
             <div style="margin-bottom: 15px;">
@@ -1173,18 +1168,14 @@ function updateEditPluginSpecificFields(pluginType, config) {
                 <div style="font-size: 12px; color: #666; margin-top: 4px;">Unique identifier (e.g., "main", "towed")</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: flex; align-items: center; font-weight: 500;">
-                    <input type="checkbox" id="edit-enable-gps-polling" ${enableGpsPolling === 'true' ? 'checked' : ''} style="margin-right: 8px;">
-                    Enable GPS Tracking
-                </label>
-                <div style="font-size: 12px; color: #666; margin-top: 4px; margin-left: 24px;">Privacy: GPS disabled by default, requires opt-in</div>
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">VPN Polling Interval (seconds, 0=disabled):</label>
+                <input type="number" id="edit-vpn-poll-interval" value="${vpnPollInterval}" min="0" max="3600" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666; margin-top: 4px;">Monitor PepVPN connection status. Set to 0 to disable.</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: flex; align-items: center; font-weight: 500;">
-                    <input type="checkbox" id="edit-enable-vpn-polling" ${enableVpnPolling === 'true' ? 'checked' : ''} style="margin-right: 8px;">
-                    Enable VPN Monitoring
-                </label>
-                <div style="font-size: 12px; color: #666; margin-top: 4px; margin-left: 24px;">Monitor PepVPN connection status</div>
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">GPS Polling Interval (seconds, 0=disabled):</label>
+                <input type="number" id="edit-gps-poll-interval" value="${gpsPollInterval}" min="0" max="3600" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666; margin-top: 4px;">Privacy: GPS tracking disabled by default. Set to 120+ for tracking, 0 to disable.</div>
             </div>
         `;
     } else {
