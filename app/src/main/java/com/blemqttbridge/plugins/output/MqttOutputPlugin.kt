@@ -48,25 +48,50 @@ class MqttOutputPlugin(
          */
         private fun getDeviceSuffix(context: Context): String {
             return try {
+                val prefs = context.getSharedPreferences("mqtt_device_id", Context.MODE_PRIVATE)
+                val cachedSuffix = prefs.getString("device_suffix", null)
+                
+                // If we have a cached suffix from a previous successful read, use it
+                if (!cachedSuffix.isNullOrEmpty()) {
+                    Log.d(TAG, "Using cached device suffix: $cachedSuffix")
+                    return cachedSuffix
+                }
+                
                 val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-                val btMac = bluetoothAdapter?.address
+                
+                // Try to get BT MAC address (may not work on Android 12+ due to privacy restrictions)
+                val btMac = try {
+                    bluetoothAdapter?.address
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "SecurityException getting BT address", e)
+                    null
+                }
 
-                // Always use BT MAC if available - it's stable and device-specific
-                // The BT MAC is the physical radio address and won't change with Android system updates
+                // If we got a real BT MAC (not the placeholder), use and cache it
                 if (!btMac.isNullOrEmpty() && btMac != "02:00:00:00:00:00") {
                     val suffix = btMac.replace(":", "").takeLast(6).lowercase()
-                    Log.d(TAG, "Using Bluetooth MAC suffix for device identification: $suffix")
+                    Log.i(TAG, "✅ Using Bluetooth MAC suffix for device identification: $suffix (MAC: $btMac)")
+                    // Cache it for future use
+                    prefs.edit().putString("device_suffix", suffix).apply()
                     suffix
                 } else {
-                    // Fallback only if BT MAC truly unavailable
-                    // This should rarely happen, but provides safety net
-                    Log.w(TAG, "Bluetooth MAC unavailable (btMac=$btMac), falling back to Android ID")
+                    // BT MAC unavailable (Android 12+ privacy restriction)
+                    // Generate a stable UUID-based suffix and cache it
+                    Log.w(TAG, "Bluetooth MAC unavailable (btMac=$btMac), generating stable UUID suffix")
+                    
+                    // Use Android ID as seed for UUID to ensure it's stable across app launches
                     val androidId = Settings.Secure.getString(
                         context.contentResolver,
                         Settings.Secure.ANDROID_ID
-                    )
-                    val suffix = androidId?.takeLast(6)?.lowercase() ?: "unknown"
-                    Log.w(TAG, "Using Android ID suffix (temporary fallback): $suffix")
+                    ) ?: "default"
+                    
+                    // Generate UUID from Android ID and take last 6 chars
+                    // This gives us a stable identifier that won't change unless device is factory reset
+                    val uuid = java.util.UUID.nameUUIDFromBytes(androidId.toByteArray())
+                    val suffix = uuid.toString().replace("-", "").takeLast(6).lowercase()
+                    
+                    Log.i(TAG, "✅ Generated and cached UUID-based suffix: $suffix")
+                    prefs.edit().putString("device_suffix", suffix).apply()
                     suffix
                 }
             } catch (e: Exception) {
@@ -133,7 +158,7 @@ class MqttOutputPlugin(
                     }
 
                     override fun connectComplete(reconnect: Boolean, serverURI: String?) {
-                        Log.i(TAG, "✅ connectComplete callback: reconnect=$reconnect, serverURI=$serverURI")
+                        Log.i(TAG, "✅ connectComplete callback: reconnect=$reconnect, serverURI=$serverURI, continuationResumed=$continuationResumed")
                         
                         // If this is the first connection (not a reconnect), resume continuation if not already resumed
                         if (!reconnect && !continuationResumed) {
@@ -147,6 +172,11 @@ class MqttOutputPlugin(
                             Log.i(TAG, "🔄 MQTT reconnected to $serverURI")
                             onMqttConnected()
                             resubscribeAll()
+                            connectionStatusListener?.onConnectionStatusChanged(true)
+                        } else if (!reconnect && continuationResumed) {
+                            // First connect but continuation already resumed by onSuccess - still need to publish discovery
+                            Log.i(TAG, "✅ MQTT first connect (continuation already resumed) - publishing discovery")
+                            onMqttConnected()
                             connectionStatusListener?.onConnectionStatusChanged(true)
                         }
                     }
