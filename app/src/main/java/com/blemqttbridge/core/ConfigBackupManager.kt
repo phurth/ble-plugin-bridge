@@ -59,6 +59,10 @@ object ConfigBackupManager {
             val pluginInstancesJson = exportPluginInstances(context)
             backup.put("pluginInstances", pluginInstancesJson)
             
+            // Export polling plugin instances (Peplink, etc.)
+            val pollingInstancesJson = exportPollingInstances(context)
+            backup.put("pollingInstances", pollingInstancesJson)
+            
             Log.i(TAG, "✅ Backup created successfully (version=$BACKUP_FORMAT_VERSION, appVersion=${BuildConfig.VERSION_NAME})")
             return backup.toString(2) // Pretty print with 2-space indent
             
@@ -180,6 +184,48 @@ object ConfigBackupManager {
     }
     
     /**
+     * Export all polling plugin instances from SharedPreferences as JSON.
+     * Polling instances (Peplink, etc.) are stored separately from BLE instances.
+     */
+    private fun exportPollingInstances(context: Context): JSONObject {
+        val instances = JSONObject()
+        
+        try {
+            val sharedPrefs = context.getSharedPreferences("service_state", Context.MODE_PRIVATE)
+            val jsonString = sharedPrefs.getString("polling_instances", "") ?: ""
+            
+            if (jsonString.isNotEmpty()) {
+                try {
+                    val json = JSONObject(jsonString)
+                    
+                    // json contains: { "instanceId1": "{json string}", "instanceId2": "{json string}" }
+                    json.keys().forEach { instanceId ->
+                        val instanceJsonString = json.getString(instanceId)
+                        try {
+                            // Parse and re-add to our export
+                            val pollingConfig = PollingPluginConfig.fromJson(instanceJsonString)
+                            if (pollingConfig != null) {
+                                instances.put(instanceId, JSONObject(instanceJsonString))
+                                Log.d(TAG, "Exported polling instance: $instanceId")
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Skipping invalid polling instance: $instanceId", e)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error parsing polling instances JSON", e)
+                }
+            }
+            
+            Log.i(TAG, "Exported ${instances.length()} polling instances")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error exporting polling instances", e)
+        }
+        
+        return instances
+    }
+    
+    /**
      * Export current plugin connection statuses (for informational purposes).
      * Note: These won't be restored, just included for reference.
      */
@@ -244,6 +290,18 @@ object ConfigBackupManager {
             } catch (e: Exception) {
                 errors.add("Plugin instances: ${e.message}")
                 Log.e(TAG, "Error restoring plugin instances", e)
+            }
+            
+            // Restore polling instances (Peplink, etc.)
+            try {
+                restorePollingInstances(
+                    backup.optJSONObject("pollingInstances"),
+                    sharedPrefs,
+                    replaceExisting
+                )
+            } catch (e: Exception) {
+                errors.add("Polling instances: ${e.message}")
+                Log.e(TAG, "Error restoring polling instances", e)
             }
             
             val message = if (errors.isEmpty()) {
@@ -386,6 +444,57 @@ object ConfigBackupManager {
         }
         
         Log.i(TAG, "✅ Restored $restoredCount plugin instances")
+    }
+    
+    /**
+     * Restore polling plugin instances from backup JSON.
+     * Polling instances (Peplink, etc.) are stored separately from BLE instances.
+     */
+    private fun restorePollingInstances(
+        instancesJson: JSONObject?,
+        sharedPrefs: SharedPreferences,
+        replaceExisting: Boolean
+    ) {
+        if (instancesJson == null || instancesJson.length() == 0) {
+            Log.i(TAG, "No polling instances to restore")
+            return
+        }
+        
+        Log.i(TAG, "Restoring polling instances...")
+        
+        // Build the nested JSON structure that ServiceStateManager expects
+        val nestJson = JSONObject()
+        var restoredCount = 0
+        
+        for (instanceId in instancesJson.keys()) {
+            try {
+                val instanceJson = instancesJson.getJSONObject(instanceId)
+                
+                // Validate the instance structure
+                val instance = PollingPluginConfig.fromJson(instanceJson.toString())
+                if (instance != null) {
+                    // Store as nested JSON string (the format ServiceStateManager uses)
+                    nestJson.put(instanceId, instanceJson.toString())
+                    restoredCount++
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to restore polling instance: $instanceId", e)
+            }
+        }
+        
+        // Save the nested JSON to SharedPreferences under "polling_instances" key
+        if (restoredCount > 0) {
+            sharedPrefs.edit()
+                .putString("polling_instances", nestJson.toString())
+                .apply()
+        } else if (replaceExisting) {
+            // If replacing and no instances to restore, clear existing
+            sharedPrefs.edit()
+                .remove("polling_instances")
+                .apply()
+        }
+        
+        Log.i(TAG, "✅ Restored $restoredCount polling instances")
     }
     
     /**
