@@ -170,6 +170,14 @@ class BaseBleService : Service() {
     private var retryDiscoveryRunnable: Runnable? = null
     private val DISCOVERY_RETRY_DELAY_MS = 500L
     
+    // Pending availability messages (until MQTT is ready)
+    private data class PendingAvailabilityMessage(
+        val topic: String,
+        val payload: String,
+        val retained: Boolean
+    )
+    private val pendingAvailabilityMessages = mutableMapOf<String, PendingAvailabilityMessage>()
+    
     // BLE trace logging (for BLE events only)
     // Thread-safe: uses ConcurrentLinkedDeque to protect against concurrent access
     // from BLE callbacks and web server threads
@@ -222,7 +230,15 @@ class BaseBleService : Service() {
             Log.v(TAG, "📤 publishState called: topic=$topic, mqttAvailable=${mqtt != null}")
             serviceScope.launch {
                 if (mqtt == null) {
-                    Log.w(TAG, "❌ MQTT service not available, cannot publish state to: $topic")
+                    // Queue availability messages to retry when MQTT connects
+                    if (topic.endsWith("/availability")) {
+                        Log.w(TAG, "⏳ MQTT not ready, queueing availability message: $topic = $payload")
+                        synchronized(pendingAvailabilityMessages) {
+                            pendingAvailabilityMessages[topic] = PendingAvailabilityMessage(topic, payload, retained)
+                        }
+                    } else {
+                        Log.w(TAG, "❌ MQTT service not available, cannot publish state to: $topic")
+                    }
                 } else {
                     mqtt.publishState(topic, payload, retained)
                 }
@@ -453,8 +469,9 @@ class BaseBleService : Service() {
                 
                 // Retry pending command subscriptions when MQTT connects
                 if (connected) {
-                    Log.i(TAG, "🔌 MQTT connected - retrying pending command subscriptions")
+                    Log.i(TAG, "🔌 MQTT connected - retrying pending command subscriptions and republishing availability")
                     retryPendingSubscriptions()
+                    republishAvailabilityForConnectedDevices()
                 }
             }
         }
@@ -492,6 +509,44 @@ class BaseBleService : Service() {
                 Log.d(TAG, "✅ Retried subscription: ${sub.topicPattern}")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to retry subscription: ${sub.topicPattern}", e)
+            }
+        }
+    }
+    
+    /**
+     * Republish availability messages for connected devices.
+     * Called when MQTT connection is established.
+     */
+    private fun republishAvailabilityForConnectedDevices() {
+        val pending = synchronized(pendingAvailabilityMessages) {
+            val copy = pendingAvailabilityMessages.values.toList()
+            pendingAvailabilityMessages.clear()
+            copy
+        }
+        
+        if (pending.isEmpty()) {
+            Log.d(TAG, "No pending availability messages to republish")
+            return
+        }
+        
+        Log.i(TAG, "🔄 Republishing ${pending.size} queued availability messages")
+        val mqtt = getMqttPublisherFromService()
+        if (mqtt == null) {
+            Log.w(TAG, "❌ MQTT still not available during republish, re-queuing availability messages")
+            synchronized(pendingAvailabilityMessages) {
+                pending.forEach { msg ->
+                    pendingAvailabilityMessages[msg.topic] = msg
+                }
+            }
+            return
+        }
+        
+        pending.forEach { msg ->
+            try {
+                mqtt.publishState(msg.topic, msg.payload, msg.retained)
+                Log.i(TAG, "✅ Republished availability: ${msg.topic} = ${msg.payload}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to republish availability: ${msg.topic}", e)
             }
         }
     }

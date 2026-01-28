@@ -48,6 +48,77 @@ const PLUGIN_TYPE_NAMES = {
 
 const MULTI_INSTANCE_PLUGINS = ['easytouch', 'mopeka', 'peplink']; // Plugins supporting multiple instances
 
+// MAC address field handlers
+function setupMacFieldHandlers(prefix) {
+    for (let i = 0; i < 6; i++) {
+        const field = document.getElementById(`${prefix}-${i}`);
+        if (!field) continue;
+        
+        // Handle input - only allow hex characters
+        field.addEventListener('input', function(e) {
+            this.value = this.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+            
+            // Auto-advance to next field when 2 characters entered
+            if (this.value.length === 2 && i < 5) {
+                document.getElementById(`${prefix}-${i + 1}`).focus();
+            }
+        });
+        
+        // Handle backspace - move to previous field if empty
+        field.addEventListener('keydown', function(e) {
+            if (e.key === 'Backspace' && this.value.length === 0 && i > 0) {
+                const prevField = document.getElementById(`${prefix}-${i - 1}`);
+                prevField.focus();
+                prevField.setSelectionRange(prevField.value.length, prevField.value.length);
+            }
+        });
+        
+        // Handle paste - split MAC address across fields
+        field.addEventListener('paste', function(e) {
+            e.preventDefault();
+            const pastedText = e.clipboardData.getData('text').trim();
+            
+            // Try to parse MAC address (handles AA:BB:CC:DD:EE:FF or AABBCCDDEEFF)
+            const cleanMac = pastedText.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+            if (cleanMac.length === 12) {
+                for (let j = 0; j < 6; j++) {
+                    const macField = document.getElementById(`${prefix}-${j}`);
+                    if (macField) {
+                        macField.value = cleanMac.substring(j * 2, j * 2 + 2);
+                    }
+                }
+                document.getElementById(`${prefix}-5`).focus();
+            }
+        });
+    }
+}
+
+function getMacAddress(prefix) {
+    const parts = [];
+    for (let i = 0; i < 6; i++) {
+        const field = document.getElementById(`${prefix}-${i}`);
+        if (!field || !field.value) return '';
+        parts.push(field.value);
+    }
+    return parts.join(':');
+}
+
+function setMacAddress(prefix, mac) {
+    if (!mac) {
+        for (let i = 0; i < 6; i++) {
+            const field = document.getElementById(`${prefix}-${i}`);
+            if (field) field.value = '';
+        }
+        return;
+    }
+    
+    const parts = mac.split(':');
+    for (let i = 0; i < 6 && i < parts.length; i++) {
+        const field = document.getElementById(`${prefix}-${i}`);
+        if (field) field.value = parts[i].toUpperCase();
+    }
+}
+
 // Plugin type categorization
 const BLE_PLUGINS = ['onecontrol', 'easytouch', 'gopower', 'hughes_watchdog', 'blescanner', 'mopeka'];
 const HTTP_PLUGINS = ['peplink'];
@@ -560,9 +631,12 @@ async function showAddInstanceDialog(serviceType = '') {
     // Reset form
     document.getElementById('new-plugin-type').value = '';
     document.getElementById('new-display-name').value = '';
-    document.getElementById('new-device-mac').value = '';
+    setMacAddress('new-mac', ''); // Clear MAC fields
     document.getElementById('multi-instance-warning').style.display = 'none';
     updatePluginSpecificFields();
+    
+    // Set up MAC field handlers
+    setupMacFieldHandlers('new-mac');
     
     // Fetch current instances to check which plugin types exist
     try {
@@ -612,7 +686,7 @@ function closeAddInstanceDialog() {
 async function confirmAddInstance() {
     const pluginType = document.getElementById('new-plugin-type').value;
     const displayName = document.getElementById('new-display-name').value.trim();
-    const deviceMac = document.getElementById('new-device-mac').value.trim().toUpperCase();
+    const deviceMac = getMacAddress('new-mac').toUpperCase();
     
     if (!pluginType) {
         alert('Please select a plugin type');
@@ -754,7 +828,10 @@ async function showEditInstanceDialog(instanceId) {
         document.getElementById('edit-instance-id').value = instanceId;
         document.getElementById('edit-plugin-type').value = instance.pluginType;
         document.getElementById('edit-display-name').value = instance.displayName || '';
-        document.getElementById('edit-device-mac').value = instance.deviceMac || '';
+        setMacAddress('edit-mac', instance.deviceMac || ''); // Set MAC fields
+        
+        // Set up MAC field handlers
+        setupMacFieldHandlers('edit-mac');
         
         // Hide MAC field for BLE Scanner
         const macContainer = document.getElementById('edit-mac-container');
@@ -779,7 +856,7 @@ async function confirmEditInstance() {
     const instanceId = document.getElementById('edit-instance-id').value;
     const pluginType = document.getElementById('edit-plugin-type').value;
     const displayName = document.getElementById('edit-display-name').value.trim();
-    const deviceMac = document.getElementById('edit-device-mac').value.trim().toUpperCase();
+    const deviceMac = getMacAddress('edit-mac').toUpperCase();
     
     if (!displayName) {
         alert('Please enter a display name');
