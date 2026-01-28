@@ -223,12 +223,15 @@ class BaseBleService : Service() {
         override fun publishDiscovery(topic: String, payload: String) {
             val mqtt = getMqttPublisherFromService()
             Log.d(TAG, "📤 publishDiscovery called: topic=$topic, mqttAvailable=${mqtt != null}")
-            serviceScope.launch {
-                if (mqtt == null) {
-                    Log.w(TAG, "❌ MQTT service not available, cannot publish discovery to: $topic")
-                } else {
+            if (mqtt == null) {
+                Log.w(TAG, "❌ MQTT service not available, cannot publish discovery to: $topic")
+            } else {
+                // Use runBlocking to ensure publish completes before returning
+                // This prevents plugins from thinking discovery succeeded when MQTT isn't ready
+                runBlocking {
                     Log.d(TAG, "✅ Calling MQTT service publishDiscovery for: $topic")
                     mqtt.publishDiscovery(topic, payload)
+                    Log.d(TAG, "✅ MQTT publishDiscovery completed for: $topic")
                 }
             }
         }
