@@ -71,6 +71,7 @@ window.addEventListener('load', () => {
         try {
             await loadStatus();
             await loadPollingStatus();
+            await loadConfig();  // Also refresh MQTT config to update health indicator
             // Only refresh instances if not currently editing and no recent toggle
             // Skip during service transitions to avoid showing error state
             if (Object.keys(editingFields).length === 0 && recentlyToggledSwitches.size === 0) {
@@ -168,6 +169,10 @@ async function togglePolling(enable) {
         if (result.success) {
             // Success - just update state tracking, UI already reflects the change
             pollingRunning = enable;
+            // Show warning if MQTT is not connected but service is enabled
+            if (result.warning) {
+                alert('Note: ' + result.warning + '\n\nHTTP Plugins will begin polling when MQTT connects.');
+            }
             // Update add button state without full reload
             const addHttpBtn = document.getElementById('add-http-instance-btn');
             if (addHttpBtn) {
@@ -242,7 +247,7 @@ async function loadInstances() {
                 pluginType: p.pluginId,
                 deviceMac: '',  // Polling plugins don't have MAC
                 displayName: p.displayName,
-                config: {},  // Config not exposed for polling plugins
+                config: p.config || {},  // Include config for display
                 isPolling: true
             }))
         ];
@@ -382,7 +387,15 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
                 const tankType = instance.config?.tank_type || '20lb_v';
                 configDetails = `<div class="instance-detail-line">Medium: ${mediumType} | Tank: ${tankType}</div>`;
             } else if (pluginType === 'peplink') {
-                configDetails = `<div class="instance-detail-line">Polling plugin (REST API)</div>`;
+                const baseUrl = instance.config?.base_url || 'Not set';
+                const statusPoll = instance.config?.status_poll_interval || '10';
+                const usagePoll = instance.config?.usage_poll_interval || '60';
+                const diagPoll = instance.config?.diagnostics_poll_interval || '30';
+                const vpnPoll = instance.config?.vpn_poll_interval || '0';
+                const gpsPoll = instance.config?.gps_poll_interval || '0';
+                
+                configDetails = `<div class="instance-detail-line">URL: ${baseUrl}</div>`;
+                configDetails += `<div class="instance-detail-line">Polling: Status=${statusPoll}s, Usage=${usagePoll}s, Diag=${diagPoll}s, VPN=${vpnPoll}s, GPS=${gpsPoll}s</div>`;
             }
 
             const buttonsDisabled = isBleSection ? bleEnabled : pollingRunning;
@@ -589,11 +602,11 @@ async function showAddInstanceDialog(serviceType = '') {
         console.error('Failed to load instances:', error);
     }
     
-    document.getElementById('addInstanceModal').style.display = 'block';
+    document.getElementById('addInstanceModal').classList.add('show');
 }
 
 function closeAddInstanceDialog() {
-    document.getElementById('addInstanceModal').style.display = 'none';
+    document.getElementById('addInstanceModal').classList.remove('show');
 }
 
 async function confirmAddInstance() {
@@ -752,14 +765,14 @@ async function showEditInstanceDialog(instanceId) {
         // Populate plugin-specific fields
         updateEditPluginSpecificFields(instance.pluginType, instance.config);
         
-        document.getElementById('editInstanceModal').style.display = 'block';
+        document.getElementById('editInstanceModal').classList.add('show');
     } catch (error) {
         alert('Error loading instance: ' + error.message);
     }
 }
 
 function closeEditInstanceDialog() {
-    document.getElementById('editInstanceModal').style.display = 'none';
+    document.getElementById('editInstanceModal').classList.remove('show');
 }
 
 async function confirmEditInstance() {
@@ -886,13 +899,13 @@ function showRemoveInstanceDialog(instanceId, displayName, isPolling = false) {
     instanceToRemoveIsPolling = isPolling;
     document.getElementById('remove-message').textContent =
         `Are you sure you want to remove "${displayName}"?`;
-    document.getElementById('confirmRemoveModal').style.display = 'block';
+    document.getElementById('confirmRemoveModal').classList.add('show');
 }
 
 function closeRemoveDialog() {
     instanceToRemove = null;
     instanceToRemoveIsPolling = false;
-    document.getElementById('confirmRemoveModal').style.display = 'none';
+    document.getElementById('confirmRemoveModal').classList.remove('show');
 }
 
 async function confirmRemove() {

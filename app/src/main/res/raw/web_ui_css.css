@@ -660,19 +660,26 @@ button:hover { background: #1565c0; }
     width: 100%;
     height: 100%;
     background-color: var(--modal-overlay);
+    padding: 20px;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.show {
+    display: flex;
 }
 
 .modal-content {
     background-color: var(--bg-card);
-    margin: 15% auto;
     padding: 0;
     border-radius: 8px;
-    width: 90%;
+    width: 100%;
     max-width: 400px;
-    max-height: 90vh;
+    max-height: 80vh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 4px 6px var(--shadow-strong);
+    overflow: hidden;
 }
 
 .modal-content > h3 {
@@ -682,18 +689,11 @@ button:hover { background: #1565c0; }
     flex-shrink: 0;
 }
 
-.modal-content > div:not(.modal-buttons) {
-    padding: 0 20px;
-}
-
-.modal-content > div:first-of-type {
-    padding-top: 15px;
-}
-
 .modal-body {
     overflow-y: auto;
     flex: 1;
-    padding: 0 20px;
+    padding: 15px 20px 0 20px;
+    min-height: 0;
 }
 
 .modal-body > div {

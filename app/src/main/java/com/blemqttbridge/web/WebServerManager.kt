@@ -1289,6 +1289,13 @@ class WebServerManager(
                         put("running", false)
                     }
                     
+                    // Include config data for display in web UI
+                    val configJson = JSONObject()
+                    for ((key, value) in config.config) {
+                        configJson.put(key, value)
+                    }
+                    put("config", configJson)
+                    
                     // Include health status if available
                     val status = allStatuses[instanceId]
                     if (status != null) {
@@ -1612,12 +1619,17 @@ class WebServerManager(
                 )
             }
 
-            // Check if MQTT service is available
-            val mqttPublisher = getMqttService()?.getMqttPublisher() ?: return newFixedLengthResponse(
-                Response.Status.BAD_REQUEST,
-                "application/json",
-                """{"success":false,"error":"MQTT service not available"}"""
-            )
+            // Get MQTT publisher - polling plugins require MQTT to publish data
+            val mqttPublisher = getMqttService()?.getMqttPublisher()
+            if (mqttPublisher == null) {
+                // MQTT not available - polling can't publish, so we'll wait
+                Log.w(TAG, "MQTT service not available - polling plugins will start when MQTT connects")
+                return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    """{"success":true,"message":"Polling service started but waiting for MQTT connection to begin polling","started":0,"warning":"MQTT service not yet connected"}"""
+                )
+            }
 
             var successCount = 0
             val errors = mutableListOf<String>()
