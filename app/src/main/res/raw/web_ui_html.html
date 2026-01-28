@@ -49,31 +49,33 @@
         <div id="addInstanceModal" class="modal">
             <div class="modal-content">
                 <h3>Add Plugin Instance</h3>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Plugin Type:</label>
-                    <select id="new-plugin-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                        <option value="">-- Select Plugin Type --</option>
-                        <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
-                        <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
-                        <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
-                        <option value="hughes_watchdog" data-multi="false">Hughes Power Watchdog (Surge protector)</option>
-                        <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
-                        <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
-                        <option value="peplink" data-multi="true" data-polling="true">Peplink Router (REST API monitoring) - Supports multiple</option>
-                    </select>
-                    <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
-                        ⚠️ This plugin type already exists and does not support multiple instances.
+                <div class="modal-body">
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Plugin Type:</label>
+                        <select id="new-plugin-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="">-- Select Plugin Type --</option>
+                            <option value="onecontrol" data-multi="false">OneControl (LCI RV control system)</option>
+                            <option value="easytouch" data-multi="true">EasyTouch (Micro-Air thermostat) - Supports multiple</option>
+                            <option value="gopower" data-multi="false">GoPower (Solar controller)</option>
+                            <option value="hughes_watchdog" data-multi="false">Hughes Power Watchdog (Surge protector)</option>
+                            <option value="mopeka" data-multi="true">Mopeka (Tank level sensor) - Supports multiple</option>
+                            <option value="blescanner" data-multi="false">BLE Scanner (Generic BLE device scanner)</option>
+                            <option value="peplink" data-multi="true" data-polling="true">Peplink Router (REST API monitoring) - Supports multiple</option>
+                        </select>
+                        <div id="multi-instance-warning" style="display: none; margin-top: 8px; padding: 8px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">
+                            ⚠️ This plugin type already exists and does not support multiple instances.
+                        </div>
                     </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                        <input type="text" id="new-display-name" placeholder="e.g., Living Room Thermostat" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div id="new-mac-container" style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                        <input type="text" id="new-device-mac" placeholder="e.g., AA:BB:CC:DD:EE:FF" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div id="plugin-specific-fields"></div>
                 </div>
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
-                    <input type="text" id="new-display-name" placeholder="e.g., Living Room Thermostat" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div id="new-mac-container" style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
-                    <input type="text" id="new-device-mac" placeholder="e.g., AA:BB:CC:DD:EE:FF" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div id="plugin-specific-fields"></div>
                 <div class="modal-buttons">
                     <button class="modal-btn modal-btn-secondary" onclick="closeAddInstanceDialog()">Cancel</button>
                     <button class="modal-btn modal-btn-primary" onclick="confirmAddInstance()">Add Instance</button>
@@ -85,17 +87,19 @@
         <div id="editInstanceModal" class="modal">
             <div class="modal-content">
                 <h3>Edit Instance</h3>
-                <input type="hidden" id="edit-instance-id">
-                <input type="hidden" id="edit-plugin-type">
-                <div style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
-                    <input type="text" id="edit-display-name" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div class="modal-body">
+                    <input type="hidden" id="edit-instance-id">
+                    <input type="hidden" id="edit-plugin-type">
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Display Name:</label>
+                        <input type="text" id="edit-display-name" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div id="edit-mac-container" style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
+                        <input type="text" id="edit-device-mac" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div id="edit-plugin-specific-fields"></div>
                 </div>
-                <div id="edit-mac-container" style="margin-bottom: 15px;">
-                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Device MAC Address:</label>
-                    <input type="text" id="edit-device-mac" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                </div>
-                <div id="edit-plugin-specific-fields"></div>
                 <div class="modal-buttons">
                     <button class="modal-btn modal-btn-secondary" onclick="closeEditInstanceDialog()">Cancel</button>
                     <button class="modal-btn modal-btn-primary" onclick="confirmEditInstance()">Save Changes</button>

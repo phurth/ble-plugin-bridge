@@ -665,45 +665,50 @@ button:hover { background: #1565c0; }
 .modal-content {
     background-color: var(--bg-card);
     margin: 15% auto;
-    padding: 20px;
+    padding: 0;
     border-radius: 8px;
     width: 90%;
     max-width: 400px;
     max-height: 90vh;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
     box-shadow: 0 4px 6px var(--shadow-strong);
 }
 
-@media (max-width: 480px) {
-    .modal-content {
-        width: 95%;
-        margin: 30% auto;
-        padding: 15px;
-    }
-}
-
-.modal-content h3 {
+.modal-content > h3 {
+    padding: 20px 20px 0 20px;
     margin-top: 0;
     color: var(--text-primary);
+    flex-shrink: 0;
 }
 
-.modal-content label {
-    color: var(--text-primary);
+.modal-content > div:not(.modal-buttons) {
+    padding: 0 20px;
 }
 
-.modal-content input,
-.modal-content select {
-    background: var(--bg-input);
-    color: var(--text-primary);
-    border: 1px solid var(--border-light);
+.modal-content > div:first-of-type {
+    padding-top: 15px;
+}
+
+.modal-body {
+    overflow-y: auto;
+    flex: 1;
+    padding: 0 20px;
+}
+
+.modal-body > div {
+    margin-bottom: 15px;
 }
 
 .modal-buttons {
-    margin-top: 20px;
+    margin-top: 0;
+    padding: 15px 20px 20px 20px;
     display: flex;
     gap: 10px;
     justify-content: flex-end;
     flex-wrap: wrap;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border-color);
 }
 
 @media (max-width: 480px) {
@@ -750,6 +755,24 @@ button:hover { background: #1565c0; }
 }
 
 .modal-btn-danger:hover { background: #d32f2f; }
+
+.modal-content label {
+    color: var(--text-primary);
+}
+
+.modal-content input,
+.modal-content select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border-light);
+}
+
+@media (max-width: 480px) {
+    .modal-content {
+        width: 95%;
+        margin: 30% auto;
+    }
+}
 
 .plugin-list {
     margin: 15px 0;
