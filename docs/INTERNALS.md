@@ -2,8 +2,9 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.16-pre3  
-> **Last Updated:** January 24, 2026  
+> **Current Version:** v2.6  
+> **Last Updated:** January 28, 2026  
+> **Notable Addition:** Service Separation Architecture and Peplink Router Plugin documentation  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -34,6 +35,8 @@
 4. [Plugin System](#4-plugin-system)
    - [Plugin Interfaces](#plugin-interfaces)
    - [BleDevicePlugin (New Architecture)](#bledeviceplugin-new-architecture)
+   - [HTTP Polling Plugin Interface](#http-polling-plugin-interface)
+   - [PollingDevicePlugin](#pollingdeviceplugin)
    - [MqttPublisher Interface](#mqttpublisher-interface)
    - [PluginRegistry](#pluginregistry)
 
@@ -112,7 +115,23 @@
    - [Command Handling with Entity Models](#command-handling-with-entity-models)
    - [Step-by-Step: Adding a New Entity Type](#step-by-step-adding-a-new-entity-type-example-rgb-light)
 
-10. [State Management & Status Indicators](#10-state-management--status-indicators)
+10. [Service Separation Architecture](#10-service-separation-architecture)
+    - [Overview: Service Separation](#overview-service-separation)
+    - [BLE Service (BaseBleService)](#ble-service-basebleservice)
+    - [HTTP Polling Service](#http-polling-service)
+    - [Independent Operation](#independent-operation)
+    - [MQTT Publisher Abstraction](#mqtt-publisher-abstraction)
+
+11. [Peplink Router Plugin](#11-peplink-router-plugin)
+    - [Overview: Peplink](#overview-peplink)
+    - [Architecture: Peplink](#architecture-peplink)
+    - [Polling Manager Pattern](#polling-manager-pattern)
+    - [Implementation Details: Peplink](#implementation-details-peplink)
+    - [Home Assistant Discovery: Peplink](#home-assistant-discovery-peplink)
+    - [Configuration & Extensibility: Peplink](#configuration--extensibility-peplink)
+    - [Testing Strategy: Peplink](#testing-strategy-peplink)
+
+12. [State Management & Status Indicators](#12-state-management--status-indicators)
     - [Per-Plugin Status Architecture](#per-plugin-status-architecture)
     - [MQTT Diagnostic Sensors](#mqtt-diagnostic-sensors-per-plugin)
     - [SettingsViewModel UI](#settingsviewmodel-ui-per-plugin-status)
@@ -121,18 +140,18 @@
     - [System Diagnostic Sensors](#system-diagnostic-sensors)
     - [Settings Screen](#settings-screen)
 
-11. [Testing Infrastructure](#11-testing-infrastructure)
+13. [Testing Infrastructure](#13-testing-infrastructure)
     - [Overview](#testing-overview)
     - [Test Framework](#test-framework)
     - [TestContextHelper](#testcontexthelper)
     - [Unit Tests](#unit-tests)
     - [Adding New Tests](#adding-new-tests)
 
-12. [Creating New Plugins](#12-creating-new-plugins)
+14. [Creating New Plugins](#14-creating-new-plugins)
     - [Plugin Template](#plugin-template)
     - [Register the Plugin](#register-the-plugin)
 
-13. [Debug Logging & Performance](#13-debug-logging--performance)
+15. [Debug Logging & Performance](#15-debug-logging--performance)
     - [Overview](#overview-5)
     - [DebugLog Utility](#debuglog-utility)
     - [Usage Guidelines](#usage-guidelines)
@@ -140,7 +159,7 @@
     - [Performance Impact](#performance-impact)
     - [Best Practices](#best-practices)
 
-14. [Common Pitfalls & Solutions](#14-common-pitfalls--solutions)
+16. [Common Pitfalls & Solutions](#16-common-pitfalls--solutions)
     - [MQTT Publish Exceptions](#mqtt-publish-exceptions)
     - [Stale Status Indicators](#stale-status-indicators)
     - [BLE GATT Error 133](#ble-gatt-error-133)
@@ -148,7 +167,7 @@
     - [Missing COBS Encoding](#missing-cobs-encoding)
     - [Notification Subscription Race Condition](#notification-subscription-race-condition)
 
-15. [Background Operation](#15-background-operation)
+17. [Background Operation](#17-background-operation)
     - [Battery Optimization & Background Execution](#battery-optimization--background-execution)
     - [Defense Layers](#defense-layers)
     - [Recommended Settings](#recommended-settings)
@@ -3864,8 +3883,661 @@ private fun controlRgbLight(tableId: Byte, deviceId: Byte, payload: String): Res
 ```
 
 ---
+## 9. Service Separation Architecture
 
-## 9. State Management & Status Indicators
+### Overview: Service Separation
+
+**Location:** 
+- `app/src/main/java/com/blemqttbridge/core/BaseBleService.kt` (BLE service)
+- `app/src/main/java/com/blemqttbridge/web/WebServerManager.kt` (HTTP polling control)
+- `app/src/main/java/com/blemqttbridge/core/` (Plugin registry and interfaces)
+
+The v2.6 architecture separates device communication into two independent services:
+
+**1. BLE Service (BaseBleService)**
+- Manages Bluetooth Low Energy connections
+- Handles BLE device plugins (OneControl, EasyTouch, GoPower, Mopeka, etc.)
+- Runs continuously (with WorkManager restart guarantee)
+- Provides per-plugin status tracking and health indicators
+- Reports diagnostics to MQTT
+
+**2. HTTP Polling Service**
+- Manages HTTP-based REST API device plugins (Peplink Router)
+- Runs independently from BLE service
+- Can be started/stopped without affecting BLE connections
+- Handles polling intervals, circuit breaking, and availability tracking
+
+### Why Service Separation?
+
+**Benefits:**
+- **Independent Operation:** HTTP devices don't depend on BLE service state
+- **Flexible Configuration:** Each service configured independently in UI
+- **Graceful Degradation:** BLE failures don't prevent HTTP polling
+- **Different Refresh Cycles:** BLE = event-driven, HTTP = poll intervals
+- **Reduced Coupling:** New protocol types (WiFi, Zigbee) can be added without affecting existing code
+
+**Key Design Principle:**
+Neither service requires the other to operate. MQTT is the only shared external dependency.
+
+### BLE Service (BaseBleService)
+
+**File:** `app/src/main/java/com/blemqttbridge/core/BaseBleService.kt`
+
+**Responsibilities:**
+- Scan for BLE devices matching configured plugin types
+- Establish and maintain BLE connections
+- Create plugin instances for connected devices
+- Delegate to plugins for protocol handling
+- Maintain per-plugin status (connected, authenticated, healthy)
+- Provide MqttPublisher interface to plugins
+- Recover from disconnections and OS-induced service kills
+- Report service-level diagnostics
+
+**Key Components:**
+
+```kotlin
+// Service state observable by UI/other components
+companion object {
+    private val _serviceRunning = MutableStateFlow(false)
+    val serviceRunning: StateFlow<Boolean> = _serviceRunning
+    
+    private val _pluginStatuses = MutableStateFlow<Map<String, PluginStatus>>(emptyMap())
+    val pluginStatuses: StateFlow<Map<String, PluginStatus>> = _pluginStatuses
+    
+    private val _mqttConnected = MutableStateFlow(false)
+    val mqttConnected: StateFlow<Boolean> = _mqttConnected
+}
+
+// Per-plugin status tracking
+data class PluginStatus(
+    val connected: Boolean = false,
+    val authenticated: Boolean = false,
+    val dataHealthy: Boolean = false,
+    val paired: Boolean = false  // BLE specific
+)
+```
+
+**Lifecycle:**
+1. Service starts (user toggle or WorkManager restart)
+2. Load enabled plugins from ServiceStateManager
+3. Start BLE scan with appropriate filters
+4. For each discovered device matching a plugin:
+   - Create plugin instance
+   - Establish BLE connection
+   - Plugin drives protocol-specific logic
+5. Monitor and report status via pluginStatuses StateFlow
+6. On stop: clean up all connections and plugins
+
+**MqttPublisher Provided to Plugins:**
+- `publishState(topic, payload)` - publish sensor/control state
+- `publishAvailability(topic, online)` - publish availability
+- `subscribeToCommands(topic, callback)` - listen for control commands
+- `updatePluginStatus(...)` - report connection/health status
+
+### HTTP Polling Service
+
+**File:** `app/src/main/java/com/blemqttbridge/web/WebServerManager.kt` (control)
+
+**Key Endpoints:**
+- `POST /api/polling/control/start` - Start all configured polling plugins
+- `POST /api/polling/control/stop` - Stop all polling plugins
+- `GET /api/polling/instances` - List polling plugin instances
+- `POST /api/polling/instances/add` - Create new instance
+- `POST /api/polling/instances/remove` - Delete instance
+- `POST /api/polling/instances/update` - Modify instance config
+
+**Implementation:**
+- Web UI calls `/api/polling/control/start`
+- WebServerManager loads all instances from ServiceStateManager
+- For each instance, creates PollingPluginInstance
+- Calls `startPolling(mqttPublisher)` on each plugin
+- Plugins handle periodic polling internally (via PeplinkPollingManager)
+
+**Critical Design: MQTT Independence**
+```kotlin
+// Old design (wrong)
+if (mqttPublisher == null) {
+    return error("MQTT not available"
+}
+startPolling(mqttPublisher)  // FAIL if MQTT missing
+
+// New design (correct)
+val mqttPublisher = getMqttService()?.getMqttPublisher()
+if (mqttPublisher == null) {
+    // Still succeed - polling can start, just won't publish yet
+    return success("Waiting for MQTT connection")
+}
+startPolling(mqttPublisher)
+```
+
+When MQTT becomes available later, plugins can publish accumulated data or reconnect publishing pipeline.
+
+### Independent Operation
+
+**Scenario 1: HTTP polling works, BLE fails**
+```
+User: Disables BLE service (toggle off)
+Result: OneControl/EasyTouch stop working
+Result: Peplink polling continues, publishes to MQTT
+User still gets router status, just not BLE devices
+```
+
+**Scenario 2: BLE works, MQTT temporarily down**
+```
+User: Restarts MQTT broker
+Result: BLE service detects MQTT reconnection
+Result: BLE plugins continue gathering data (in memory)
+Result: When MQTT reconnects, plugins publish accumulated state
+User sees brief stale state, then updates flow in
+```
+
+**Scenario 3: HTTP polling can't reach router**
+```
+Router goes down
+HTTP polling: Reports unhealthy status, retries per config
+BLE devices: Continue working normally
+Benefit: User still has local control via OneControl gateway
+```
+
+### MQTT Publisher Abstraction
+
+**File:** `app/src/main/java/com/blemqttbridge/core/interfaces/MqttPublisher.kt`
+
+**Why Abstraction?**
+- Plugins are protocol-agnostic
+- Can mock MQTT in tests
+- Multiple output plugins possible (MQTT, HTTP, syslog, etc.)
+- Decouples plugin logic from MQTT implementation
+
+**Interface:**
+```kotlin
+interface MqttPublisher {
+    suspend fun publishState(topic: String, payload: String)
+    suspend fun publishAvailability(topic: String, online: Boolean)
+    suspend fun subscribeToCommands(topic: String, callback: CommandCallback)
+    suspend fun updatePluginStatus(
+        instanceId: String,
+        connected: Boolean,
+        authenticated: Boolean,
+        dataHealthy: Boolean
+    )
+}
+```
+
+**Implementations:**
+- `MqttOutputPlugin` - Primary implementation via Paho MQTT client
+- Could add additional implementations for multi-broker scenarios
+
+---
+
+## 10. Peplink Router Plugin
+
+### Overview: Peplink
+
+**Files:**
+- `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkPlugin.kt` (main)
+- `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkApiClient.kt` (REST API)
+- `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkModels.kt` (data models)
+- `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkPollingManager.kt` (orchestration)
+- `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkDiscovery.kt` (HA discovery)
+
+**Purpose:** Monitor Peplink cellular/WAN router status via REST API
+
+**Features Implemented (v2.6):**
+- ✅ Multi-instance support (main router + towed vehicle)
+- ✅ Cookie-based authentication (username/password)
+- ✅ 5 independent polling types (configurable intervals)
+- ✅ WAN connection status (Ethernet, Cellular, WiFi, vWAN)
+- ✅ Real-time bandwidth monitoring
+- ✅ Data usage tracking (with multi-SIM support)
+- ✅ Diagnostics (temperature, device info)
+- ✅ VPN status monitoring
+- ✅ GPS location tracking (privacy-first, opt-in)
+- ✅ Priority switching (WAN failover control)
+- ✅ Cellular modem reset capability
+- ✅ ~95 Home Assistant discovery entities per instance
+
+### Architecture: Peplink
+
+**Design Pattern:** HTTP Polling with Configurable Intervals
+
+**Key Components:**
+
+```
+PeplinkPlugin (PollingDevicePlugin)
+├─ PeplinkApiClient
+│  ├─ Cookie-based auth management
+│  ├─ REST endpoint wrappers
+│  └─ JSON response parsing
+├─ PeplinkPollingManager
+│  ├─ Status polling (10s)
+│  ├─ Usage polling (60s)
+│  ├─ Diagnostics polling (30s)
+│  ├─ VPN polling (60s, disabled by default)
+│  └─ GPS polling (120s, disabled by default)
+└─ MQTT Discovery & Publishing
+   ├─ WAN entities (connection, priority, bandwidth, usage)
+   ├─ VPN entities
+   ├─ GPS entities (device_tracker + sensors)
+   └─ Diagnostic entities
+```
+
+### Polling Manager Pattern
+
+**File:** `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkPollingManager.kt`
+
+**Problem Solved:**
+Without PollManager: All data sources polled on same interval
+- Simple but inflexible
+- Can't optimize bandwidth vs temperature update frequency
+- Hard to add new data sources without restructuring
+
+**Solution: Independent Polling Jobs**
+
+```kotlin
+class PeplinkPollingManager(
+    private val instanceId: String,
+    private val scope: CoroutineScope
+) {
+    private var statusJob: Job? = null
+    private var usageJob: Job? = null
+    private var diagnosticsJob: Job? = null
+    private var vpnJob: Job? = null
+    private var gpsJob: Job? = null
+    
+    // Callbacks invoked on schedule
+    var onStatusPoll: (suspend () -> Unit)? = null
+    var onUsagePoll: (suspend () -> Unit)? = null
+    var onDiagnosticsPoll: (suspend () -> Unit)? = null
+    var onVpnPoll: (suspend () -> Unit)? = null
+    var onGpsPoll: (suspend () -> Unit)? = null
+    
+    fun configure(config: PollingConfig) {
+        // Create jobs with different intervals
+        if (config.enableStatusPolling) {
+            statusJob = startPeriodicPoll("status", config.statusInterval) {
+                onStatusPoll?.invoke()
+            }
+        }
+        // ... similar for usage, diagnostics, vpn, gps
+    }
+    
+    private fun startPeriodicPoll(
+        name: String,
+        intervalSeconds: Int,
+        action: suspend () -> Unit
+    ): Job = scope.launch {
+        var nextRunTime = System.currentTimeMillis()
+        while (isActive) {
+            val now = System.currentTimeMillis()
+            val delayMs = nextRunTime - now
+            if (delayMs > 0) {
+                delay(delayMs)
+            }
+            
+            try {
+                action()
+            } catch (e: Exception) {
+                Log.e(TAG, "Poll failed: $e")
+            }
+            
+            nextRunTime = System.currentTimeMillis() + (intervalSeconds * 1000)
+        }
+    }
+}
+```
+
+**Benefits:**
+- Status polling (10s) fast for real-time control
+- Usage polling (60s) slower to reduce API load
+- GPS polling (120s) separate from connectivity
+- Each can be disabled independently
+- All intervals user-configurable
+
+### Implementation Details: Peplink
+
+**Authentication Flow:**
+```
+1. PeplinkApiClient initialized with base_url, username, password
+2. On first API call:
+   - POST /api/login with credentials
+   - API returns session cookie (set-cookie header)
+   - Cookie cached in memory (PeplinkApiClient)
+3. Subsequent calls include cookie via OkHttp interceptor
+4. If 401 received: Clear cookie, re-authenticate automatically
+5. No manual token refresh needed
+```
+
+**API Endpoint Categories:**
+
+| Endpoint | Interval | Purpose |
+|----------|----------|---------|
+| `/api/status.wan.connection` | Status (10s) | WAN status, priority, uptime |
+| `/api/status.bandwidth.traffic` | Status (10s) | Real-time Mbps rates |
+| `/api/status.wan.usage` | Usage (60s) | Data usage per WAN |
+| `/api/status.diagnostics` | Diag (30s) | Temperature, device count |
+| `/api/info.device` | Once | Serial number, model, firmware |
+| `/api/status.pepvpn` | VPN (60s) | VPN connection status |
+| `/api/info.location` | GPS (120s) | Latitude, longitude, speed |
+
+**Data Model Hierarchy:**
+
+```kotlin
+// Core WAN data
+data class WanConnection(
+    val id: Int,                      // Connection ID (1-10)
+    val name: String,                 // "WAN Ethernet", "LTE"
+    val type: String,                 // "ethernet", "cellular", "wifi"
+    val enabled: Boolean,             // Enable/disable toggle
+    val connected: Boolean,           // Actually connected now?
+    val priority: Int,                // 1-4 (failover priority)
+    val uptime: Int?,                 // Seconds since connection
+    val bandwidth: Pair<Double, Double>? // (down Mbps, up Mbps)
+    val signalStrength: Int?          // 0-5 for cellular
+    val signalDescription: String?    // "Excellent", "Poor", etc.
+)
+
+// Usage tracking
+data class WanUsage(
+    val id: Int,
+    val enabled: Boolean,
+    val usage: Long,                  // MB
+    val limit: Long?,                 // MB
+    val billingCycleStart: LocalDate?,
+    val simSlots: List<SimSlotInfo>  // For dual-SIM
+)
+
+// System diagnostics
+data class SystemDiagnostics(
+    val temperature: Double?,         // °C
+    val temperatureThreshold: Double?,// °C alarm point
+    val connectedDevices: Int?       // Active clients
+)
+
+// Location (privacy-sensitive)
+data class LocationInfo(
+    val latitude: Double?,
+    val longitude: Double?,
+    val altitude: Double?,           // meters
+    val speed: Double?,              // m/s
+    val heading: Double?,            // degrees (0-360)
+    val accuracy: Double?,           // meters GPS accuracy
+    val timestamp: Long?
+) {
+    val hasValidFix: Boolean
+        get() = latitude != null && longitude != null
+}
+```
+
+**API Client Implementation Pattern:**
+
+```kotlin
+class PeplinkApiClient(
+    private val baseUrl: String,
+    private val username: String,
+    private val password: String
+) {
+    private var sessionCookie: String? = null
+    private val client = OkHttpClient.Builder()
+        .addInterceptor(cookieInterceptor)
+        .build()
+    
+    suspend fun getWanStatus(connIds: String): Result<Map<Int, WanConnection>> {
+        return makeAuthenticatedRequest(
+            url = "$baseUrl/api/status.wan.connection?connIds=$connIds"
+        ).mapCatching { response ->
+            parseWanConnections(JSONObject(response))
+        }
+    }
+    
+    suspend fun getLocation(): Result<LocationInfo?> {
+        return makeAuthenticatedRequest(
+            url = "$baseUrl/api/info.location"
+        ).mapCatching { response ->
+            val json = JSONObject(response)
+            LocationInfo.fromJson(json.optJSONObject("response")?.optJSONObject("location"))
+        }.onFailure { e ->
+            Log.d(TAG, "GPS not available (normal if router lacks GPS module)")
+        }
+    }
+    
+    private suspend fun makeAuthenticatedRequest(url: String): Result<String> {
+        // If no cookie, authenticate first
+        if (sessionCookie == null) {
+            val loginResult = login()
+            if (loginResult.isFailure) return Result.failure(loginResult.exceptionOrNull()!!)
+        }
+        
+        // Make request with cookie
+        return try {
+            val response = client.newCall(Request.Builder().url(url).build()).await()
+            when {
+                response.code == 401 -> {
+                    // Token expired, retry once
+                    sessionCookie = null
+                    makeAuthenticatedRequest(url)
+                }
+                response.isSuccessful -> Result.success(response.body!!.string())
+                else -> Result.failure(Exception("HTTP ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+}
+```
+
+### Home Assistant Discovery: Peplink
+
+**Entity Coverage:**
+
+| Entity Type | Count | Examples |
+|------------|-------|----------|
+| Binary Sensor | 10+ | Connection status per WAN |
+| Sensor | 30+ | Bandwidth (down/up per WAN), Usage (MB), Temperature |
+| Select | 5 | Priority switching (1-4) per WAN |
+| Button | 1 | Modem reset |
+| Device Tracker | 1 | Location (if GPS enabled) |
+| **Total** | **~95** | Per instance |
+
+**Discovery Payload Example (WAN Connection):**
+
+```json
+{
+  "topic": "homeassistant/binary_sensor/peplink_main_wan_1_connected/config",
+  "payload": {
+    "name": "WAN Ethernet Connected",
+    "unique_id": "peplink_main_wan_1_connected",
+    "state_topic": "peplink/main/wan/1/connected",
+    "availability_topic": "peplink/main/wan/1/availability",
+    "payload_available": "online",
+    "payload_not_available": "offline",
+    "payload_on": "true",
+    "payload_off": "false",
+    "device": {
+      "identifiers": ["peplink_main"],
+      "name": "Peplink Main Router",
+      "model": "MAX Transit",
+      "manufacturer": "Peplink"
+    }
+  }
+}
+```
+
+**Availability Strategy:**
+```
+Each WAN publishes availability based on enable state:
+- Topic: peplink/{instance}/wan/{id}/availability
+- Payload: "online" if enabled, "offline" if disabled
+- Retained: Yes (persists across disconnects)
+
+This prevents Home Assistant from marking "disconnected" for disabled WANs.
+Controls (select, button) remain available regardless of WAN state.
+```
+
+**Priority Select Entity:**
+
+```json
+{
+  "topic": "homeassistant/select/peplink_main_wan_1_priority/config",
+  "payload": {
+    "name": "WAN Ethernet Priority",
+    "unique_id": "peplink_main_wan_1_priority",
+    "state_topic": "peplink/main/wan/1/priority",
+    "command_topic": "peplink/main/wan/1/priority/set",
+    "options": ["1", "2", "3", "4"],
+    "device": {...}
+  }
+}
+```
+
+**GPS Device Tracker (opt-in):**
+
+```json
+{
+  "topic": "homeassistant/device_tracker/peplink_main_location/config",
+  "payload": {
+    "name": "Location",
+    "unique_id": "peplink_main_location",
+    "state_topic": "peplink/main/gps/position",
+    "json_attributes_topic": "peplink/main/gps/attributes",
+    "availability_topic": "peplink/main/gps/availability",
+    "icon": "mdi:crosshairs-gps",
+    "device": {...}
+  }
+}
+```
+
+Position state format: `"lat,lon"` for zone detection
+Attributes JSON includes: `latitude`, `longitude`, `altitude`, `speed`, `heading`, `accuracy`
+
+### Configuration & Extensibility: Peplink
+
+**Configuration Storage:**
+
+```kotlin
+// Loaded by ServiceStateManager into PluginConfig
+data class PeplinkInstance(
+    val instanceId: String,                 // "peplink_main", "peplink_towed"
+    val pluginType: String = "peplink",
+    val displayName: String,                // User-friendly name
+    val config: Map<String, String> = mapOf(
+        "base_url" to "http://192.168.1.1",
+        "username" to "admin",
+        "password" to "password",
+        "instance_name" to "main",
+        "status_poll_interval" to "10",
+        "usage_poll_interval" to "60",
+        "diagnostics_poll_interval" to "30",
+        "vpn_poll_interval" to "0",         // Disabled by default
+        "gps_poll_interval" to "0"          // Disabled for privacy
+    )
+)
+```
+
+**Adding a New Polling Source:**
+
+Example: Add "Firmware Check" polling (once per startup)
+
+```kotlin
+// 1. Add interval to config
+"firmware_poll_interval" to "once"  // or "3600" for periodic
+
+// 2. Extend PeplinkPollingManager
+class PeplinkPollingManager {
+    private var firmwareJob: Job? = null
+    var onFirmwarePoll: (suspend () -> Unit)? = null
+    
+    fun configure(config: PollingConfig) {
+        // ... existing jobs ...
+        if (config.enableFirmwarePolling) {
+            firmwareJob = startPeriodicPoll("firmware", config.firmwareInterval) {
+                onFirmwarePoll?.invoke()
+            }
+        }
+    }
+}
+
+// 3. Extend PeplinkPlugin
+class PeplinkPlugin {
+    private suspend fun pollFirmware() {
+        val fw = apiClient.getFirmwareInfo().getOrNull() ?: return
+        mqttPublisher.publishState("$baseTopic/firmware/version", fw.version)
+    }
+    
+    // In startPolling():
+    pollingManager.onFirmwarePoll = { pollFirmware() }
+}
+
+// 4. Add HA discovery
+fun getDiscoveryPayloads(): List<Pair<String, String>> {
+    // ... existing payloads ...
+    payloads.add(
+        "homeassistant/sensor/${instanceId}_firmware/config" to JSONObject().apply {
+            put("name", "Firmware Version")
+            put("unique_id", "${instanceId}_firmware")
+            put("state_topic", "$fullBaseTopic/firmware/version")
+            // ...
+        }.toString()
+    )
+}
+
+// 5. Update web UI config fields (optional)
+// web_ui_js.js: updatePluginSpecificFields() for "peplink" case
+```
+
+**Multi-Instance Example:**
+
+Two routers on same network:
+
+```
+Instance 1 (Main RV router)
+- base_url: http://192.168.1.1
+- instance_name: main
+- Topics: peplink/main/*
+- Entities: peplink_main_*
+
+Instance 2 (Towed vehicle)
+- base_url: http://192.168.2.1
+- instance_name: towed
+- Topics: peplink/towed/*
+- Entities: peplink_towed_*
+```
+
+Each instance:
+- Own authentication/session
+- Own polling manager with independent schedules
+- Own status tracking in Home Assistant
+- Can be added/removed without affecting others
+
+### Testing Strategy: Peplink
+
+**Unit Tests** (mocking):
+- `PeplinkApiClientTest.kt` - Mock HTTP responses, test parsing
+- `PeplinkModelsTest.kt` - Model serialization/deserialization
+- `PeplinkPollingManagerTest.kt` - Job scheduling, intervals
+
+**Integration Tests** (with real router):
+- End-to-end polling → MQTT → Home Assistant
+- Cookie renewal on 401
+- Bandwidth calculation accuracy
+- Multi-SIM usage detection
+- GPS fix validation
+
+**Manual Testing Checklist:**
+- [ ] Router accessible and credentials correct
+- [ ] Initial discovery publishes ~95 entities
+- [ ] Status updates flow within 2-3 seconds
+- [ ] Priority select changes take effect
+- [ ] Modem reset button triggers successfully
+- [ ] Usage polling works with disabled WANs
+- [ ] GPS only publishes when fix available
+- [ ] Polling stops cleanly on service stop
+- [ ] Config changes (intervals) take effect without restart
+
+---
+
+## 11. State Management & Status Indicators
 
 ### Per-Plugin Status Architecture (v2.3.1+)
 
@@ -3963,7 +4635,7 @@ init {
 
 ---
 
-## 10. Creating New Plugins
+## 12. Creating New Plugins
 
 ### Plugin Template
 
@@ -4258,7 +4930,7 @@ All system diagnostic sensors are published under the **"BLE MQTT Bridge"** devi
 
 ---
 
-## 11. Testing Infrastructure (v2.5.6)
+## 13. Testing Infrastructure (v2.5.6)
 
 ### Testing Overview
 
@@ -4608,7 +5280,7 @@ Log.i(TAG, "Starting status polling loop")
 
 ---
 
-## 12. Common Pitfalls & Solutions
+## 14. Common Pitfalls & Solutions
 
 ### 1. MQTT Publish Exceptions
 
@@ -4743,7 +5415,7 @@ override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: Bluetoot
 
 ---
 
-## 13. Background Operation
+## 15. Background Operation
 
 **The app runs as a foreground service, not a foreground app.** This means:
 - ✅ Continues running when you switch to other apps (e.g., Fully Kiosk Browser)
@@ -4853,14 +5525,23 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 | `GoPowerDevicePlugin.kt` | GoPower solar controller implementation |
 | `protocol/GoPowerConstants.kt` | Service/characteristic UUIDs, field indices |
 | `protocol/GoPowerGattCallback.kt` | BLE notification handler, data parsing |
+| **Peplink Plugin** | |
+| `PeplinkPlugin.kt` | Main Peplink HTTP polling implementation, 1387 lines |
+| `PeplinkApiClient.kt` | REST API client, cookie-based auth, 6+ endpoint wrappers |
+| `PeplinkModels.kt` | WAN/usage/diagnostics/location data models with JSON parsing |
+| `PeplinkPollingManager.kt` | Independent job orchestration for 5 poll types |
+| `PeplinkDiscovery.kt` | Home Assistant discovery payload generation (~95 entities) |
+| **Mopeka Plugin** | |
+| `MopekaPlugin.kt` | Passive BLE advertisement scanning, tank level sensors |
 | **BLE Scanner Plugin** | |
 | `BleScannerPlugin.kt` | Device discovery utility, **multi-gateway device ID suffix** |
 | **Output & UI** | |
+| `WebServerManager.kt` | HTTP server, REST API endpoints for polling control, web UI hosting |
 | `MqttOutputPlugin.kt` | Paho MQTT client wrapper, system diagnostics, **multi-gateway device ID suffix** |
 | `SettingsViewModel.kt` | UI state management, status aggregation |
 | `SettingsScreen.kt` | Main settings UI |
 
 ---
 
-*Document version: 2.5.6*  
-*Last updated: January 13, 2026 - Multi-instance plugin support and comprehensive testing infrastructure*  
+*Document version: 2.6*  
+*Last updated: January 28, 2026 - Service Separation Architecture and Peplink Router Plugin*
