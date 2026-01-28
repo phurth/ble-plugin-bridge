@@ -787,6 +787,14 @@ async function confirmEditInstance() {
     const mediumTypeField = document.getElementById('edit-medium-type');
     const tankTypeField = document.getElementById('edit-tank-type');
     
+    // Peplink-specific fields
+    const baseUrlField = document.getElementById('edit-base-url');
+    const usernameField = document.getElementById('edit-username');
+    const peplinkPasswordField = document.getElementById('edit-peplink-password');
+    const instanceNameField = document.getElementById('edit-instance-name');
+    const enableGpsPollingField = document.getElementById('edit-enable-gps-polling');
+    const enableVpnPollingField = document.getElementById('edit-enable-vpn-polling');
+    
     if (pinField) {
         const pin = pinField.value.trim();
         if (pin) config.gateway_pin = pin;
@@ -808,6 +816,46 @@ async function confirmEditInstance() {
     }
     if (tankTypeField) {
         config.tank_type = tankTypeField.value || '20lb_v';
+    }
+    
+    // Peplink config
+    if (baseUrlField) {
+        const baseUrl = baseUrlField.value.trim();
+        if (!baseUrl) {
+            alert('Please enter a router URL');
+            return;
+        }
+        config.base_url = baseUrl;
+    }
+    if (usernameField) {
+        const username = usernameField.value.trim();
+        if (!username) {
+            alert('Please enter an admin username');
+            return;
+        }
+        config.username = username;
+    }
+    if (peplinkPasswordField) {
+        const password = peplinkPasswordField.value.trim();
+        if (!password) {
+            alert('Please enter an admin password');
+            return;
+        }
+        config.password = password;
+    }
+    if (instanceNameField) {
+        const instanceName = instanceNameField.value.trim();
+        if (!instanceName) {
+            alert('Please enter an instance name');
+            return;
+        }
+        config.instance_name = instanceName;
+    }
+    if (enableGpsPollingField) {
+        config.enable_gps_polling = enableGpsPollingField.checked ? 'true' : 'false';
+    }
+    if (enableVpnPollingField) {
+        config.enable_vpn_polling = enableVpnPollingField.checked ? 'true' : 'false';
     }
     
     try {
@@ -1095,6 +1143,48 @@ function updateEditPluginSpecificFields(pluginType, config) {
                     </optgroup>
                     <option value="custom" ${tankType === 'custom' ? 'selected' : ''}>Custom Tank</option>
                 </select>
+            </div>
+        `;
+    } else if (pluginType === 'peplink') {
+        const baseUrl = config?.base_url || '';
+        const username = config?.username || '';
+        const password = config?.password || '';
+        const instanceName = config?.instance_name || 'main';
+        const enableGpsPolling = config?.enable_gps_polling || 'false';
+        const enableVpnPolling = config?.enable_vpn_polling || 'false';
+        
+        container.innerHTML = `
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Router URL:</label>
+                <input type="text" id="edit-base-url" value="${baseUrl}" placeholder="http://192.168.50.1" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666; margin-top: 4px;">Example: http://192.168.50.1</div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Admin Username:</label>
+                <input type="text" id="edit-username" value="${username}" placeholder="admin" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Admin Password:</label>
+                <input type="password" id="edit-peplink-password" value="${password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Instance Name:</label>
+                <input type="text" id="edit-instance-name" value="${instanceName}" placeholder="main" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666; margin-top: 4px;">Unique identifier (e.g., "main", "towed")</div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: flex; align-items: center; font-weight: 500;">
+                    <input type="checkbox" id="edit-enable-gps-polling" ${enableGpsPolling === 'true' ? 'checked' : ''} style="margin-right: 8px;">
+                    Enable GPS Tracking
+                </label>
+                <div style="font-size: 12px; color: #666; margin-top: 4px; margin-left: 24px;">Privacy: GPS disabled by default, requires opt-in</div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label style="display: flex; align-items: center; font-weight: 500;">
+                    <input type="checkbox" id="edit-enable-vpn-polling" ${enableVpnPolling === 'true' ? 'checked' : ''} style="margin-right: 8px;">
+                    Enable VPN Monitoring
+                </label>
+                <div style="font-size: 12px; color: #666; margin-top: 4px; margin-left: 24px;">Monitor PepVPN connection status</div>
             </div>
         `;
     } else {
