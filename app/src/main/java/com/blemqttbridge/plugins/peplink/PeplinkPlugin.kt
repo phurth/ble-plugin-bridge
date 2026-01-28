@@ -460,11 +460,65 @@ class PeplinkPlugin : PollingDevicePlugin {
 
     private suspend fun pollGps() {
         try {
-            // GPS polling will be implemented in Phase 2
-            Log.d(TAG, "[$instanceId] GPS poll - not yet implemented")
+            val location = apiClient.getLocation().getOrNull()
+            publishGpsState(location)
+            Log.d(TAG, "[$instanceId] GPS poll successful - fix=${location?.hasValidFix ?: false}")
         } catch (e: Exception) {
             Log.e(TAG, "[$instanceId] GPS poll exception: ${e.message}")
+            // Publish offline availability on error
+            val base = getMqttBaseTopic()
+            mqttPublisher.publishState("$base/gps/availability", "offline")
         }
+    }
+
+    /**
+     * Publish GPS state to MQTT topics.
+     * 
+     * Publishes to 5 topics:
+     * - device_tracker position (home/not_home or lat,lon)
+     * - sensor speed (m/s)
+     * - sensor altitude (m)
+     * - sensor heading (degrees)
+     * - sensor coordinates (human-readable lat,lon)
+     * 
+     * @param location GPS location data, or null if GPS unavailable
+     */
+    private suspend fun publishGpsState(location: LocationInfo?) {
+        val base = getMqttBaseTopic()
+        
+        if (location == null || !location.hasValidFix) {
+            // No GPS fix - publish unavailable state
+            mqttPublisher.publishState("$base/gps/position", "not_home")
+            mqttPublisher.publishState("$base/gps/availability", "offline")
+            return
+        }
+        
+        // Publish availability
+        mqttPublisher.publishState("$base/gps/availability", "online")
+        
+        // Device tracker position - use lat,lon format for zone detection
+        mqttPublisher.publishState("$base/gps/position", "${location.latitude},${location.longitude}")
+        
+        // GPS attributes (for device_tracker JSON attributes)
+        val attributes = JSONObject().apply {
+            put("latitude", location.latitude)
+            put("longitude", location.longitude)
+            location.altitude?.let { put("altitude", it) }
+            location.speed?.let { put("speed", it) }
+            location.heading?.let { put("heading", it) }
+            location.accuracy?.let { put("gps_accuracy", it) }
+            location.timestamp?.let { put("last_updated", it) }
+        }
+        mqttPublisher.publishState("$base/gps/attributes", attributes.toString())
+        
+        // Individual sensors
+        mqttPublisher.publishState("$base/gps/speed", location.speed?.toString() ?: "0")
+        mqttPublisher.publishState("$base/gps/altitude", location.altitude?.toString() ?: "0")
+        mqttPublisher.publishState("$base/gps/heading", location.heading?.toString() ?: "0")
+        
+        // Coordinates sensor (human-readable)
+        val coordsStr = String.format("%.6f, %.6f", location.latitude, location.longitude)
+        mqttPublisher.publishState("$base/gps/coordinates", coordsStr)
     }
 
     // ===== MQTT INTEGRATION =====
@@ -939,6 +993,93 @@ class PeplinkPlugin : PollingDevicePlugin {
             )
 
 
+        }
+
+        // ===== GPS ENTITIES (when enabled) =====
+        // Only advertise GPS entities if GPS polling is enabled
+        if (enableGpsPolling) {
+            val baseTopic = getMqttBaseTopic()
+            val fullBaseTopic = "$topicPrefix/$baseTopic"
+
+            // Device Tracker - Main GPS position entity
+            payloads.add(
+                "homeassistant/device_tracker/${instanceId}_location/config" to JSONObject().apply {
+                    put("name", "Location")
+                    put("unique_id", "${instanceId}_location")
+                    put("state_topic", "$fullBaseTopic/gps/position")
+                    put("availability_topic", "$fullBaseTopic/gps/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("json_attributes_topic", "$fullBaseTopic/gps/attributes")
+                    put("icon", "mdi:crosshairs-gps")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // GPS Speed sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_gps_speed/config" to JSONObject().apply {
+                    put("name", "GPS Speed")
+                    put("unique_id", "${instanceId}_gps_speed")
+                    put("state_topic", "$fullBaseTopic/gps/speed")
+                    put("availability_topic", "$fullBaseTopic/gps/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("unit_of_measurement", "m/s")
+                    put("device_class", "speed")
+                    put("state_class", "measurement")
+                    put("icon", "mdi:speedometer")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // GPS Altitude sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_gps_altitude/config" to JSONObject().apply {
+                    put("name", "GPS Altitude")
+                    put("unique_id", "${instanceId}_gps_altitude")
+                    put("state_topic", "$fullBaseTopic/gps/altitude")
+                    put("availability_topic", "$fullBaseTopic/gps/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("unit_of_measurement", "m")
+                    put("device_class", "distance")
+                    put("state_class", "measurement")
+                    put("icon", "mdi:altimeter")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // GPS Heading sensor
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_gps_heading/config" to JSONObject().apply {
+                    put("name", "GPS Heading")
+                    put("unique_id", "${instanceId}_gps_heading")
+                    put("state_topic", "$fullBaseTopic/gps/heading")
+                    put("availability_topic", "$fullBaseTopic/gps/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("unit_of_measurement", "°")
+                    put("icon", "mdi:compass")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            // GPS Coordinates sensor (readable lat,lon)
+            payloads.add(
+                "homeassistant/sensor/${instanceId}_gps_coordinates/config" to JSONObject().apply {
+                    put("name", "GPS Coordinates")
+                    put("unique_id", "${instanceId}_gps_coordinates")
+                    put("state_topic", "$fullBaseTopic/gps/coordinates")
+                    put("availability_topic", "$fullBaseTopic/gps/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
+                    put("icon", "mdi:map-marker")
+                    put("device", deviceInfo)
+                }.toString()
+            )
+
+            Log.i(TAG, "[$instanceId] GPS polling enabled - added 5 GPS entities")
         }
 
         Log.i(TAG, "[$instanceId] Generated ${payloads.size} discovery payloads")

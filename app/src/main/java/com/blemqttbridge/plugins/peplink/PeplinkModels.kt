@@ -401,6 +401,69 @@ data class DeviceInfo(
     }
 }
 
+// ===== GPS / LOCATION =====
+
+/**
+ * GPS location information from /api/info.location
+ * 
+ * Privacy Note: GPS polling is disabled by default and requires explicit opt-in.
+ * All fields are nullable to handle cases where GPS fix is unavailable.
+ */
+data class LocationInfo(
+    val latitude: Double?,       // Decimal degrees, positive = North
+    val longitude: Double?,      // Decimal degrees, positive = East
+    val altitude: Double?,       // Meters above sea level
+    val speed: Double?,          // Speed over ground in m/s
+    val heading: Double?,        // Course/heading in degrees (0-360, 0=North, 90=East)
+    val accuracy: Double?,       // Horizontal accuracy in meters
+    val timestamp: Long?         // Unix timestamp in seconds
+) {
+    /**
+     * Check if we have a valid GPS fix (at least lat/lon available)
+     */
+    val hasValidFix: Boolean
+        get() = latitude != null && longitude != null
+    
+    companion object {
+        /**
+         * Parse GPS location from API response.
+         * Expected format:
+         * {
+         *   "stat": "ok",
+         *   "response": {
+         *     "location": {
+         *       "latitude": 37.7749,
+         *       "longitude": -122.4194,
+         *       "altitude": 15.2,
+         *       "speed": 12.5,
+         *       "heading": 90.0,
+         *       "accuracy": 5.0,
+         *       "timestamp": 1704331200
+         *     }
+         *   }
+         * }
+         * 
+         * Returns null if no GPS data is available or GPS is not supported.
+         */
+        fun fromJson(json: JSONObject): LocationInfo? {
+            // Handle case where GPS is not available
+            if (!json.has("latitude") && !json.has("longitude")) {
+                return null
+            }
+            
+            return LocationInfo(
+                latitude = if (json.has("latitude")) json.optDouble("latitude").takeIf { !it.isNaN() } else null,
+                longitude = if (json.has("longitude")) json.optDouble("longitude").takeIf { !it.isNaN() } else null,
+                altitude = if (json.has("altitude")) json.optDouble("altitude").takeIf { !it.isNaN() } else null,
+                speed = if (json.has("speed")) json.optDouble("speed").takeIf { !it.isNaN() } else null,
+                heading = if (json.has("heading")) json.optDouble("heading").takeIf { !it.isNaN() } else null,
+                accuracy = if (json.has("accuracy")) json.optDouble("accuracy").takeIf { !it.isNaN() } else null,
+                timestamp = if (json.has("timestamp")) json.optLong("timestamp") else null
+            )
+        }
+    }
+}
+
 // ===== HARDWARE CONFIGURATION =====
 
 /**

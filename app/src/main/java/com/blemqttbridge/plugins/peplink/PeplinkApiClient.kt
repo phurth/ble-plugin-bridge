@@ -49,6 +49,7 @@ class PeplinkApiClient(
         private const val INFO_FIRMWARE_PATH = "/api/info.firmware"
         private const val STATUS_CLIENT_PATH = "/api/status.client"
         private const val STATUS_PEPVPN_PATH = "/api/status.pepvpn"
+        private const val INFO_LOCATION_PATH = "/api/info.location"
     }
 
     // ===== AUTHENTICATION MANAGEMENT =====
@@ -631,6 +632,60 @@ class PeplinkApiClient(
         } catch (e: Exception) {
             Log.e(TAG, "Traffic stats exception: ${e.message}", e)
             Result.success(emptyMap())
+        }
+    }
+
+    /**
+     * Get GPS location information.
+     * 
+     * Privacy Note: This endpoint is only queried when GPS polling is explicitly enabled.
+     * GPS polling is disabled by default to respect user privacy.
+     * 
+     * Queries /api/info.location for GPS data.
+     * Returns null if GPS is not available, not supported, or has no fix.
+     * 
+     * @return Result containing LocationInfo or null if GPS unavailable
+     */
+    suspend fun getLocation(): Result<LocationInfo?> {
+        val url = "$baseUrl$INFO_LOCATION_PATH"
+        
+        return try {
+            val responseBody = makeAuthenticatedRequest(url).getOrNull()
+            if (responseBody == null) {
+                Log.d(TAG, "No response from location endpoint (GPS may not be supported)")
+                return Result.success(null)
+            }
+            
+            val json = JSONObject(responseBody)
+            
+            if (json.optString("stat") != "ok") {
+                Log.d(TAG, "Location API returned error: ${json.optString("message")} (GPS may not be available)")
+                return Result.success(null)
+            }
+
+            val responseObj = json.optJSONObject("response")
+            if (responseObj == null) {
+                Log.d(TAG, "No response object in location data")
+                return Result.success(null)
+            }
+            
+            // Try both nested "location" object and direct response
+            val locationObj = responseObj.optJSONObject("location") ?: responseObj
+            val location = LocationInfo.fromJson(locationObj)
+            
+            if (location != null && location.hasValidFix) {
+                Log.d(TAG, "GPS location: ${location.latitude}, ${location.longitude}, " +
+                          "speed=${location.speed}m/s, heading=${location.heading}°, " +
+                          "altitude=${location.altitude}m, accuracy=${location.accuracy}m")
+            } else {
+                Log.d(TAG, "No GPS fix available")
+            }
+            
+            Result.success(location)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Location exception: ${e.message}", e)
+            Result.success(null)  // Return null instead of error - GPS may simply be unavailable
         }
     }
 
