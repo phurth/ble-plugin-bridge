@@ -351,31 +351,32 @@ class PeplinkPlugin : PollingDevicePlugin {
             apiClient.getSystemDiagnostics().onSuccess { diagnostics ->
                 lastSystemDiagnostics = diagnostics
                 
-                // Publish temperature and threshold
+                // Publish temperature and threshold with availability
                 if (diagnostics.temperature != null) {
                     mqttPublisher.publishState("$base/diagnostic/system/temperature", String.format("%.1f", diagnostics.temperature))
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature/availability", "online")
                 } else {
-                    mqttPublisher.publishState("$base/diagnostic/system/temperature", "unavailable")
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature/availability", "offline")
                 }
                 
                 if (diagnostics.temperatureThreshold != null) {
                     mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", String.format("%.0f", diagnostics.temperatureThreshold))
                 } else {
-                    mqttPublisher.publishState("$base/diagnostic/system/temperature_threshold", "unavailable")
+                    mqttPublisher.publishState("$base/diagnostic/system/temperature/availability", "offline")
                 }
                 
-                // Publish fan information
+                // Publish fan information with availability
                 diagnostics.fans.forEach { fan ->
-                    mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/status", fan.status)
+                    val fanBase = "$base/diagnostic/fan/${fan.id}"
+                    mqttPublisher.publishState("$fanBase/status", fan.status)
                     if (fan.speedRpm != null) {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", fan.speedRpm.toString())
+                        mqttPublisher.publishState("$fanBase/speed_rpm", fan.speedRpm.toString())
+                        mqttPublisher.publishState("$fanBase/availability", "online")
                     } else {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_rpm", "unavailable")
+                        mqttPublisher.publishState("$fanBase/availability", "offline")
                     }
                     if (fan.speedPercent != null) {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", fan.speedPercent.toString())
-                    } else {
-                        mqttPublisher.publishState("$base/diagnostic/fan/${fan.id}/speed_percent", "unavailable")
+                        mqttPublisher.publishState("$fanBase/speed_percent", fan.speedPercent.toString())
                     }
                 }
             }
@@ -795,6 +796,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "System Temperature")
                     put("unique_id", "${instanceId}_system_temperature")
                     put("state_topic", "$fullBaseTopic/diagnostic/system/temperature")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/system/temperature/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("unit_of_measurement", "°C")
                     put("device_class", "temperature")
                     put("icon", "mdi:thermometer")
@@ -810,6 +814,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "Temperature Threshold")
                     put("unique_id", "${instanceId}_temperature_threshold")
                     put("state_topic", "$fullBaseTopic/diagnostic/system/temperature_threshold")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/system/temperature/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("unit_of_measurement", "°C")
                     put("device_class", "temperature")
                     put("icon", "mdi:alert-thermometer")
@@ -825,6 +832,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "Fan 1 Speed")
                     put("unique_id", "${instanceId}_fan_1_speed")
                     put("state_topic", "$fullBaseTopic/diagnostic/fan/1/speed_rpm")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/fan/1/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("unit_of_measurement", "rpm")
                     put("icon", "mdi:fan")
                     put("entity_category", "diagnostic")
@@ -838,6 +848,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "Fan 1 Status")
                     put("unique_id", "${instanceId}_fan_1_status")
                     put("state_topic", "$fullBaseTopic/diagnostic/fan/1/status")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/fan/1/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("icon", "mdi:fan-alert")
                     put("entity_category", "diagnostic")
                     put("enabled_by_default", false)
@@ -852,6 +865,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                         put("name", "Fan $fanId Speed")
                         put("unique_id", "${instanceId}_fan_${fanId}_speed")
                         put("state_topic", "$fullBaseTopic/diagnostic/fan/$fanId/speed_rpm")
+                        put("availability_topic", "$fullBaseTopic/diagnostic/fan/$fanId/availability")
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("unit_of_measurement", "rpm")
                         put("icon", "mdi:fan")
                         put("entity_category", "diagnostic")
@@ -865,6 +881,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                         put("name", "Fan $fanId Status")
                         put("unique_id", "${instanceId}_fan_${fanId}_status")
                         put("state_topic", "$fullBaseTopic/diagnostic/fan/$fanId/status")
+                        put("availability_topic", "$fullBaseTopic/diagnostic/fan/$fanId/availability")
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("icon", "mdi:fan-alert")
                         put("entity_category", "diagnostic")
                         put("enabled_by_default", false)
