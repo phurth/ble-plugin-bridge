@@ -51,19 +51,26 @@ class MqttOutputPlugin(
                 val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
                 val btMac = bluetoothAdapter?.address
 
-                // Use BT MAC if available and not the dummy address
-                if (btMac != null && btMac != "02:00:00:00:00:00") {
-                    btMac.replace(":", "").takeLast(6).lowercase()
+                // Always use BT MAC if available - it's stable and device-specific
+                // The BT MAC is the physical radio address and won't change with Android system updates
+                if (!btMac.isNullOrEmpty() && btMac != "02:00:00:00:00:00") {
+                    val suffix = btMac.replace(":", "").takeLast(6).lowercase()
+                    Log.d(TAG, "Using Bluetooth MAC suffix for device identification: $suffix")
+                    suffix
                 } else {
-                    Log.w(TAG, "Bluetooth MAC unavailable, falling back to Android ID")
+                    // Fallback only if BT MAC truly unavailable
+                    // This should rarely happen, but provides safety net
+                    Log.w(TAG, "Bluetooth MAC unavailable (btMac=$btMac), falling back to Android ID")
                     val androidId = Settings.Secure.getString(
                         context.contentResolver,
                         Settings.Secure.ANDROID_ID
                     )
-                    androidId?.takeLast(6)?.lowercase() ?: "unknown"
+                    val suffix = androidId?.takeLast(6)?.lowercase() ?: "unknown"
+                    Log.w(TAG, "Using Android ID suffix (temporary fallback): $suffix")
+                    suffix
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to get device suffix", e)
+                Log.e(TAG, "Failed to get device suffix, using 'unknown' fallback", e)
                 "unknown"
             }
         }
