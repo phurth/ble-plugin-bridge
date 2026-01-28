@@ -32,6 +32,10 @@ let editingFields = {}; // Track which fields are currently being edited
 let instanceToRemove = null;
 let instanceToRemoveIsPolling = false;
 
+// Track recently toggled switches to avoid re-rendering during state transition
+let recentlyToggledSwitches = new Set();
+const TOGGLE_DEBOUNCE_MS = 3000;
+
 const PLUGIN_TYPE_NAMES = {
     'onecontrol': 'OneControl',
     'easytouch': 'EasyTouch',
@@ -67,8 +71,9 @@ window.addEventListener('load', () => {
         try {
             await loadStatus();
             await loadPollingStatus();
-            // Only refresh instances if not currently editing
-            if (Object.keys(editingFields).length === 0) {
+            // Only refresh instances if not currently editing and no recent toggle
+            // Skip during service transitions to avoid showing error state
+            if (Object.keys(editingFields).length === 0 && recentlyToggledSwitches.size === 0) {
                 await loadInstances();
             }
         } catch (e) {
@@ -84,23 +89,29 @@ async function loadStatus() {
         serviceRunning = data.running;
         bleEnabled = data.bleEnabled ?? data.running;  // Track BLE service state
         
-        // Move BLE toggle to BLE Plugins header
-        const bleToggleHtml = `
-            <label class="toggle-switch">
-                <input type="checkbox" ${data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
-                <span class="toggle-slider"></span>
-            </label>
-        `;
-        document.getElementById('ble-toggle-container').innerHTML = bleToggleHtml;
+        // Skip re-rendering toggle if it was recently toggled by user (debounce)
+        if (!recentlyToggledSwitches.has('ble')) {
+            // Move BLE toggle to BLE Plugins header
+            const bleToggleHtml = `
+                <label class="toggle-switch">
+                    <input type="checkbox" ${data.running ? 'checked' : ''} onchange="toggleService(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            `;
+            document.getElementById('ble-toggle-container').innerHTML = bleToggleHtml;
+        }
         
-        // Move MQTT toggle to MQTT Configuration header
-        const mqttToggleHtml = `
-            <label class="toggle-switch">
-                <input type="checkbox" ${data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
-                <span class="toggle-slider"></span>
-            </label>
-        `;
-        document.getElementById('mqtt-toggle-container').innerHTML = mqttToggleHtml;
+        // Skip re-rendering MQTT toggle if it was recently toggled
+        if (!recentlyToggledSwitches.has('mqtt')) {
+            // Move MQTT toggle to MQTT Configuration header
+            const mqttToggleHtml = `
+                <label class="toggle-switch">
+                    <input type="checkbox" ${data.mqttEnabled ? 'checked' : ''} onchange="toggleMqtt(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            `;
+            document.getElementById('mqtt-toggle-container').innerHTML = mqttToggleHtml;
+        }
         
         // Update add BLE instance button state (enabled when BLE service is DISABLED)
         const addBleBtnBtn = document.getElementById('add-ble-instance-btn');
@@ -120,14 +131,17 @@ async function loadPollingStatus() {
         const isRunning = data.running || false;
         pollingRunning = isRunning;
 
-        // Move HTTP polling toggle to HTTP Plugins header
-        const httpToggleHtml = `
-            <label class="toggle-switch">
-                <input type="checkbox" ${isRunning ? 'checked' : ''} onchange="togglePolling(this.checked)">
-                <span class="toggle-slider"></span>
-            </label>
-        `;
-        document.getElementById('http-toggle-container').innerHTML = httpToggleHtml;
+        // Skip re-rendering toggle if it was recently toggled by user (debounce)
+        if (!recentlyToggledSwitches.has('polling')) {
+            // Move HTTP polling toggle to HTTP Plugins header
+            const httpToggleHtml = `
+                <label class="toggle-switch">
+                    <input type="checkbox" ${isRunning ? 'checked' : ''} onchange="togglePolling(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            `;
+            document.getElementById('http-toggle-container').innerHTML = httpToggleHtml;
+        }
         
         // Update add HTTP instance button state (disabled when polling service is running)
         const addHttpBtn = document.getElementById('add-http-instance-btn');
@@ -140,6 +154,10 @@ async function loadPollingStatus() {
 }
 
 async function togglePolling(enable) {
+    // Mark as recently toggled to prevent auto-refresh from re-rendering
+    recentlyToggledSwitches.add('polling');
+    
+    // Optimistic UI update - toggle will stay in new position unless there's an error
     try {
         const action = enable ? 'start' : 'stop';
         const response = await fetch(`/api/polling/control/${action}`, {
@@ -148,16 +166,30 @@ async function togglePolling(enable) {
         const result = await response.json();
 
         if (result.success) {
-            loadPollingStatus();
-            loadInstances();
+            // Success - just update state tracking, UI already reflects the change
+            pollingRunning = enable;
+            // Update add button state without full reload
+            const addHttpBtn = document.getElementById('add-http-instance-btn');
+            if (addHttpBtn) {
+                addHttpBtn.disabled = enable;
+            }
+            // Clear debounce flag and refresh after waiting for backend state to settle
+            setTimeout(() => {
+                recentlyToggledSwitches.delete('polling');
+                loadPollingStatus();
+            }, TOGGLE_DEBOUNCE_MS);
         } else {
             alert('Failed to ' + action + ' polling: ' + (result.error || 'Unknown error'));
-            loadPollingStatus(); // Revert toggle
+            // Immediately clear debounce on error and reload to revert
+            recentlyToggledSwitches.delete('polling');
+            loadPollingStatus();
             loadInstances();
         }
     } catch (error) {
         alert('Failed to toggle polling: ' + error.message);
-        loadPollingStatus(); // Revert toggle
+        // Immediately clear debounce on error and reload to revert
+        recentlyToggledSwitches.delete('polling');
+        loadPollingStatus();
         loadInstances();
     }
 }
@@ -1187,6 +1219,10 @@ window.onclick = function(event) {
 }
 
 async function toggleService(enable) {
+    // Mark as recently toggled to prevent auto-refresh from re-rendering
+    recentlyToggledSwitches.add('ble');
+    
+    // Optimistic UI update - toggle will stay in new position unless there's an error
     try {
         const response = await fetch('/api/control/service', {
             method: 'POST',
@@ -1196,25 +1232,41 @@ async function toggleService(enable) {
         const result = await response.json();
         if (!result.success) {
             alert('Failed to ' + (enable ? 'start' : 'stop') + ' service: ' + (result.error || 'Unknown error'));
-            loadStatus();
-            loadInstances();
-        } else if (enable) {
-            configChanged = {};
+            // Immediately clear debounce on error and reload to revert
+            recentlyToggledSwitches.delete('ble');
             loadStatus();
             loadInstances();
         } else {
-            // on disable, refresh to enable editing
-            loadStatus();
-            loadInstances();
+            // Success - just update state tracking, UI already reflects the change
+            if (enable) {
+                configChanged = {};
+            }
+            bleEnabled = enable;
+            // Update add button state without full reload
+            const addBleBtnBtn = document.getElementById('add-ble-instance-btn');
+            if (addBleBtnBtn) {
+                addBleBtnBtn.disabled = enable;
+            }
+            // Clear debounce flag and refresh after waiting for backend state to settle
+            setTimeout(() => {
+                recentlyToggledSwitches.delete('ble');
+                loadStatus();
+            }, TOGGLE_DEBOUNCE_MS);
         }
     } catch (error) {
         alert('Error controlling service: ' + error.message);
+        // Immediately clear debounce on error and reload to revert
+        recentlyToggledSwitches.delete('ble');
         loadStatus();
         loadInstances();
     }
 }
 
 async function toggleMqtt(enable) {
+    // Mark as recently toggled to prevent auto-refresh from re-rendering
+    recentlyToggledSwitches.add('mqtt');
+    
+    // Optimistic UI update - toggle will stay in new position unless there's an error
     try {
         const response = await fetch('/api/control/mqtt', {
             method: 'POST',
@@ -1224,18 +1276,25 @@ async function toggleMqtt(enable) {
         const result = await response.json();
         if (!result.success) {
             alert('Failed to ' + (enable ? 'connect' : 'disconnect') + ' MQTT: ' + (result.error || 'Unknown error'));
+            // Immediately clear debounce on error and reload to revert
+            recentlyToggledSwitches.delete('mqtt');
             loadStatus();
             loadConfig();
         } else {
+            // Success - UI already reflects the change
             // When enabling MQTT, service restarts and needs time to reconnect
-            // Wait 2 seconds before refreshing UI to allow connection to establish
+            // Wait 2 seconds before refreshing config to allow connection to establish
             if (enable) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
+            // Clear debounce flag and light refresh of config without re-rendering the toggle
+            recentlyToggledSwitches.delete('mqtt');
             loadConfig();
         }
     } catch (error) {
         alert('Error controlling MQTT: ' + error.message);
+        // Immediately clear debounce on error and reload to revert
+        recentlyToggledSwitches.delete('mqtt');
         loadStatus();
         loadConfig();
     }

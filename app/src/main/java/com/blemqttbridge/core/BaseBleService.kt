@@ -161,6 +161,15 @@ class BaseBleService : Service() {
     )
     private val pendingSubscriptions = mutableListOf<PendingSubscription>()
     
+    // Pending discovery messages (until MQTT is ready)
+    private data class PendingDiscoveryMessage(
+        val topic: String,
+        val payload: String
+    )
+    private val pendingDiscoveryMessages = mutableListOf<PendingDiscoveryMessage>()
+    private var retryDiscoveryRunnable: Runnable? = null
+    private val DISCOVERY_RETRY_DELAY_MS = 500L
+    
     // BLE trace logging (for BLE events only)
     // Thread-safe: uses ConcurrentLinkedDeque to protect against concurrent access
     // from BLE callbacks and web server threads
@@ -224,8 +233,24 @@ class BaseBleService : Service() {
             val mqtt = getMqttPublisherFromService()
             Log.d(TAG, "📤 publishDiscovery called: topic=$topic, mqttAvailable=${mqtt != null}")
             if (mqtt == null) {
-                Log.w(TAG, "⏳ MQTT not ready for discovery: $topic (will retry)")
-                // Will be retried through the connection observer in onCreate
+                Log.w(TAG, "⏳ MQTT not ready for discovery: $topic (queueing for retry)")
+                // Queue this message to retry when MQTT becomes available
+                synchronized(pendingDiscoveryMessages) {
+                    pendingDiscoveryMessages.add(PendingDiscoveryMessage(topic, payload))
+                }
+                // Schedule retry in 500ms
+                handler.removeCallbacks(retryDiscoveryRunnable ?: return)
+                retryDiscoveryRunnable = Runnable {
+                    Log.d(TAG, "🔄 Retrying pending discovery messages (${pendingDiscoveryMessages.size} pending)")
+                    synchronized(pendingDiscoveryMessages) {
+                        val toRetry = pendingDiscoveryMessages.toList()
+                        pendingDiscoveryMessages.clear()
+                        toRetry.forEach { pending ->
+                            publishDiscovery(pending.topic, pending.payload)
+                        }
+                    }
+                }
+                handler.postDelayed(retryDiscoveryRunnable!!, DISCOVERY_RETRY_DELAY_MS)
             } else {
                 // Use runBlocking to ensure publish completes before returning
                 // This prevents plugins from thinking discovery succeeded when MQTT isn't ready

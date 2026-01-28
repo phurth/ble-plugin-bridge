@@ -395,10 +395,12 @@ class HughesGattCallback(
             // Publish to MQTT
             publishMetrics()
             publishDiagnostics()
+            publishDiagnosticsState()  // Publish health indicator with every frame
             
             // Publish HA discovery once
             if (!discoveryPublished) {
                 publishDiscovery()
+                publishDiagnosticsDiscovery()  // Publish diagnostic sensor discovery
                 discoveryPublished = true
             }
             
@@ -480,15 +482,25 @@ class HughesGattCallback(
         Log.i(TAG, "Publishing HA discovery for $baseTopic")
         
         val address = device.address
-        val deviceId = instanceId
-        val deviceName = "Hughes Watchdog"
+        val macId = device.address.replace(":", "").lowercase()
+        val deviceId = "hughes_watchdog_$macId"
+        val deviceName = "Hughes Watchdog ${device.address}"
+        
+        // Get app version
+        val appVersion = try {
+            context?.packageManager?.getPackageInfo(context?.packageName ?: "", 0)?.versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
         
         // Create device info shared by all sensors
         val deviceInfo = JSONObject().apply {
             put("identifiers", JSONArray().put(deviceId))
             put("name", deviceName)
-            put("model", "Power Watchdog 50A")
-            put("manufacturer", "Hughes Autoformers")
+            put("model", "Power Watchdog Surge Protector")
+            put("manufacturer", "Hughes")
+            put("sw_version", appVersion)
+            put("connections", JSONArray().put(JSONArray().put("mac").put(device.address)))
         }
         
         // Publish sensors for Line 1
@@ -507,6 +519,9 @@ class HughesGattCallback(
         
         // Publish single error sensor (not line-specific)
         publishDiscoverySensor("error", "Error Status", null, null, deviceInfo, 0)
+        
+        // Publish availability state immediately after discovery
+        publishAvailability(true)
     }
     
     /**
@@ -535,17 +550,61 @@ class HughesGattCallback(
     }
     
     /**
-     * Publish diagnostics discovery (for error status)
+     * Publish diagnostics discovery (health status binary sensor)
      */
     private fun publishDiagnosticsDiscovery() {
-        Log.d(TAG, "Publishing diagnostics discovery")
+        if (discoveryPublished) return  // Already published
+        
+        val macId = device.address.replace(":", "").lowercase()
+        val deviceId = "hughes_watchdog_$macId"
+        val nodeId = "${instanceId}_data_healthy"
+        val prefix = mqttPublisher.topicPrefix
+        
+        // Get app version
+        val appVersion = try {
+            context?.packageManager?.getPackageInfo(context?.packageName ?: "", 0)?.versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        
+        // Device info for HA discovery - must match publishDiscovery() to group entities together
+        val deviceInfo = JSONObject().apply {
+            put("identifiers", JSONArray().put(deviceId))
+            put("name", "Hughes Watchdog ${device.address}")
+            put("model", "Power Watchdog Surge Protector")
+            put("manufacturer", "Hughes")
+            put("sw_version", appVersion)
+            put("connections", JSONArray().put(JSONArray().put("mac").put(device.address)))
+        }
+        
+        // Binary diagnostic sensor for health status
+        val uniqueId = "hughes_watchdog_${macId}_diag_data_healthy"
+        val discoveryTopic = "$prefix/binary_sensor/$nodeId/config"
+        
+        val payload = JSONObject().apply {
+            put("name", "Data Healthy")
+            put("unique_id", uniqueId)
+            put("state_topic", "$prefix/$baseTopic/diag/data_healthy")
+            put("payload_on", "ON")
+            put("payload_off", "OFF")
+            put("availability_topic", "$prefix/$baseTopic/availability")
+            put("payload_available", "online")
+            put("payload_not_available", "offline")
+            put("entity_category", "diagnostic")
+            put("device", deviceInfo)
+        }.toString()
+        
+        mqttPublisher.publishDiscovery(discoveryTopic, payload)
+        Log.i(TAG, "Published diagnostic discovery: data_healthy")
     }
     
     /**
-     * Publish initial diagnostics state
+     * Publish initial diagnostics state (health indicator)
      */
     private fun publishDiagnosticsState() {
-        Log.d(TAG, "Publishing initial diagnostics state")
+        // Published after every successful frame parse - health is ON when data is healthy
+        mqttPublisher.publishState("$baseTopic/diag/data_healthy", "ON", true)
+        Log.d(TAG, "Published diagnostic state: data_healthy=ON")
     }
     
     /**
@@ -557,5 +616,8 @@ class HughesGattCallback(
         mainHandler.removeCallbacksAndMessages(null)
         // Publish offline status when disconnected
         publishAvailability(false)
+        // Also publish health as OFF when disconnected
+        mqttPublisher.publishState("$baseTopic/diag/data_healthy", "OFF", true)
+        Log.d(TAG, "Published diagnostic state: data_healthy=OFF (disconnected)")
     }
 }

@@ -496,7 +496,9 @@ class OneControlGattCallback(
                 val macForTopic = device.address.replace(":", "").lowercase()
                 val discoveryTopic = "$prefix/${entityType.haComponent}/onecontrol_ble_$macForTopic/${entityType.topicPrefix}_$keyHex/config"
                 Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
+                Log.i(TAG, "🔍 OneControl: Calling mqtt.publishDiscovery() for $entityType")
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+                Log.i(TAG, "🔍 OneControl: publishDiscovery returned for $entityType")
                 Log.d(TAG, "📢 Discovery published successfully")
             } catch (e: Exception) {
                 Log.e(TAG, "📢 Discovery publish failed: ${e.message}", e)
@@ -2927,7 +2929,7 @@ class OneControlGattCallback(
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
                 put("payload_off", "OFF")
-                put("availability_topic", "$prefix/availability")
+                put("availability_topic", "$prefix/$baseTopic/availability")
                 put("payload_available", "online")
                 put("payload_not_available", "offline")
                 put("entity_category", "diagnostic")
@@ -2939,6 +2941,18 @@ class OneControlGattCallback(
         }
         
         diagnosticsDiscoveryPublished = true
+        
+        // Publish availability state immediately after discovery
+        publishAvailability(true)
+        
+        // Subscribe to command topics: onecontrol/{MAC}/command/#
+        // Handles: switch, dimmable, and other command types
+        // Process commands directly without posting to main handler to avoid queue delays
+        mqttPublisher.subscribeToCommands("$baseTopic/command/#") { topic, payload ->
+            val result = handleCommand(topic, payload)
+            Log.d(TAG, "📤 Command processed: $topic = $payload, success=${result.isSuccess}")
+        }
+        Log.i(TAG, "📡 Subscribed to command topics: $baseTopic/command/#")
     }
     
     /**

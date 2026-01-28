@@ -1470,6 +1470,7 @@ class EasyTouchGattCallback(
             
             // Publish the climate discovery config
             val discoveryTopic = "$prefix/climate/easytouch_${mac}_zone_$zone/config"
+            Log.i(TAG, "🔍 EasyTouch: Publishing climate discovery for zone $zone to: $discoveryTopic")
             
             // CRITICAL: Publish fan_mode state BEFORE discovery to prevent HA validation errors
             // When discovery has fan_modes=["auto"], the current fan_mode state must be "auto"
@@ -1484,7 +1485,9 @@ class EasyTouchGattCallback(
                 mqttPublisher.publishState("$zoneTopic/state/fan_mode", "auto", true)
             }
             
+            Log.i(TAG, "🔍 EasyTouch: Calling mqtt.publishDiscovery() for climate zone $zone")
             mqttPublisher.publishDiscovery(discoveryTopic, payload.toString())
+            Log.i(TAG, "🔍 EasyTouch: publishDiscovery returned for climate zone $zone")
             
             // Publish initial preset_mode state if presets are available
             // This prevents HA from adding "None" as a pseudo-option
@@ -1844,7 +1847,7 @@ class EasyTouchGattCallback(
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
                 put("payload_off", "OFF")
-                put("availability_topic", "$prefix/availability")
+                put("availability_topic", "$prefix/$baseTopic/availability")
                 put("payload_available", "online")
                 put("payload_not_available", "offline")
                 put("entity_category", "diagnostic")
@@ -1875,6 +1878,7 @@ class EasyTouchGattCallback(
                 put("state_topic", "$prefix/$baseTopic/${sensor.stateTopic}")
                 put("icon", sensor.icon)
                 put("entity_category", "diagnostic")
+                put("availability_topic", "$prefix/$baseTopic/availability")
                 put("device", deviceInfo)
             }.toString()
             
@@ -1886,6 +1890,16 @@ class EasyTouchGattCallback(
         publishRebootButtonDiscovery(macId, nodeId, prefix, deviceInfo)
         
         diagnosticsDiscoveryPublished = true
+        
+        // Subscribe to command topics for all zones (single + multi-zone support)
+        // Pattern: easytouch/{MAC}/zone_N/command/# or easytouch/{MAC}/device/command/#
+        val commandTopicPattern = "$baseTopic/+/command/#"
+        // Process commands directly without posting to main handler to avoid queue delays
+        mqttPublisher.subscribeToCommands(commandTopicPattern) { topic, payload ->
+            val result = handleCommand(topic, payload)
+            Log.d(TAG, "📤 Command processed: $topic = $payload, success=${result.isSuccess}")
+        }
+        Log.i(TAG, "Subscribed to command topics: $commandTopicPattern")
     }
     
     /**
@@ -1911,6 +1925,9 @@ class EasyTouchGattCallback(
         
         mqttPublisher.publishDiscovery(discoveryTopic, payload)
         Log.i(TAG, "Published reboot button discovery")
+        
+        // Publish availability state immediately after discovery
+        publishAvailability(true)
     }
     
     /**

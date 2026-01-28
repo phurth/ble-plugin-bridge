@@ -706,11 +706,14 @@ class GoPowerGattCallback(
         mqttPublisher.publishDiscovery(rebootDiscoveryTopic, rebootPayload)
         Log.i(TAG, "Published button discovery: reboot")
         
+        // Publish availability state immediately after discovery
+        publishAvailability(true)
+        
         // Subscribe to commands
+        // Process commands directly without posting to main handler to avoid queue delays
         mqttPublisher.subscribeToCommands("$baseTopic/command/#") { topic, payload ->
-            mainHandler.post {
-                handleCommand(topic, payload)
-            }
+            val result = handleCommand(topic, payload)
+            Log.d(TAG, "📤 Command processed: $topic = $payload, success=${result.isSuccess}")
         }
     }
     
@@ -841,7 +844,7 @@ class GoPowerGattCallback(
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
                 put("payload_off", "OFF")
-                put("availability_topic", "$prefix/availability")
+                put("availability_topic", "$prefix/$baseTopic/availability")
                 put("payload_available", "online")
                 put("payload_not_available", "offline")
                 put("entity_category", "diagnostic")
@@ -862,6 +865,7 @@ class GoPowerGattCallback(
                 put("unique_id", uniqueId)
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("entity_category", "diagnostic")
+                put("availability_topic", "$prefix/$baseTopic/availability")
                 put("device", deviceInfo)
             }.toString()
             

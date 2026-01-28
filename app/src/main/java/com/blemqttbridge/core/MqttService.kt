@@ -18,6 +18,7 @@ import com.blemqttbridge.core.interfaces.MqttPublisher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -71,42 +72,53 @@ class MqttService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "onStartCommand: action=${intent?.action}")
-        
-        when (intent?.action) {
-            ACTION_START -> {
-                startForeground(NOTIFICATION_ID, createNotification("Connecting..."))
-                serviceScope.launch {
-                    connectMqtt()
-                }
-            }
-            ACTION_STOP -> {
-                disconnectMqtt()
-                stopSelf()
-            }
-            ACTION_RECONNECT -> {
-                serviceScope.launch {
-                    disconnectMqtt()
-                    connectMqtt()
-                }
-            }
-            else -> {
-                // Service started without specific action - check settings
-                startForeground(NOTIFICATION_ID, createNotification("Starting..."))
-                serviceScope.launch {
-                    val settings = AppSettings(applicationContext)
-                    val mqttEnabled = settings.mqttEnabled.first()
-                    if (mqttEnabled) {
+        try {
+            Log.i(TAG, "🚀 onStartCommand called: action=${intent?.action}, flags=$flags, startId=$startId")
+            
+            when (intent?.action) {
+                ACTION_START -> {
+                    Log.i(TAG, "✅ ACTION_START received, starting MQTT connection")
+                    startForeground(NOTIFICATION_ID, createNotification("Connecting..."))
+                    serviceScope.launch {
+                        Log.i(TAG, "📝 serviceScope.launch executing, calling connectMqtt()")
                         connectMqtt()
-                    } else {
-                        Log.i(TAG, "MQTT disabled in settings, stopping service")
-                        stopSelf()
+                    }
+                }
+                ACTION_STOP -> {
+                    Log.i(TAG, "🛑 ACTION_STOP received")
+                    disconnectMqtt()
+                    stopSelf()
+                }
+                ACTION_RECONNECT -> {
+                    Log.i(TAG, "🔄 ACTION_RECONNECT received")
+                    serviceScope.launch {
+                        disconnectMqtt()
+                        connectMqtt()
+                    }
+                }
+                else -> {
+                    Log.i(TAG, "❓ No action specified, checking settings (action was: ${intent?.action})")
+                    // Service started without specific action - check settings
+                    startForeground(NOTIFICATION_ID, createNotification("Starting..."))
+                    serviceScope.launch {
+                        val settings = AppSettings(applicationContext)
+                        val mqttEnabled = settings.mqttEnabled.first()
+                        if (mqttEnabled) {
+                            Log.i(TAG, "⚙️ MQTT enabled in settings, connecting")
+                            connectMqtt()
+                        } else {
+                            Log.i(TAG, "⚙️ MQTT disabled in settings, stopping service")
+                            stopSelf()
+                        }
                     }
                 }
             }
+            
+            return START_STICKY
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Exception in onStartCommand", e)
+            return START_STICKY
         }
-        
-        return START_STICKY
     }
     
     override fun onBind(intent: Intent?): IBinder? = null
@@ -121,12 +133,15 @@ class MqttService : Service() {
     
     private suspend fun connectMqtt() {
         try {
-            Log.i(TAG, "Connecting to MQTT broker...")
+            Log.i(TAG, "🔗 connectMqtt() called, starting MQTT broker connection...")
             updateNotification("Connecting...")
             
             val settings = AppSettings(applicationContext)
+            val brokerUrl = settings.mqttBrokerUrl.first()
+            Log.d(TAG, "🔍 MQTT settings: broker=$brokerUrl, enabled=${settings.mqttEnabled.first()}")
+            
             val config = mapOf(
-                "broker_url" to settings.mqttBrokerUrl.first(),
+                "broker_url" to brokerUrl,
                 "client_id" to settings.mqttClientId.first(),
                 "username" to settings.mqttUsername.first(),
                 "password" to settings.mqttPassword.first(),
@@ -136,6 +151,7 @@ class MqttService : Service() {
             mqttPlugin = MqttOutputPlugin(applicationContext).apply {
                 setConnectionStatusListener(object : OutputPluginInterface.ConnectionStatusListener {
                     override fun onConnectionStatusChanged(connected: Boolean) {
+                        Log.i(TAG, "📡 MQTT onConnectionStatusChanged: connected=$connected")
                         isConnected = connected
                         setConnectionStatus(connected)  // Notify all observers globally
                         updateNotification(if (connected) "Connected" else "Disconnected")
@@ -143,20 +159,31 @@ class MqttService : Service() {
                 })
             }
             
-            val result = mqttPlugin?.initialize(config)
+            Log.d(TAG, "📝 MqttOutputPlugin created, calling initialize()")
+            val result = try {
+                // Add 40 second timeout to initialize()
+                withTimeoutOrNull(40000) {
+                    mqttPlugin?.initialize(config)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Initialize timeout or exception: ${e.message}", e)
+                null
+            }
+            Log.d(TAG, "📥 initialize() returned: success=${result?.isSuccess}, exception=${result?.exceptionOrNull()}")
+            
             if (result?.isSuccess == true) {
-                Log.i(TAG, "MQTT connected successfully")
+                Log.i(TAG, "✅ MQTT connected successfully!")
                 isConnected = true
                 setConnectionStatus(true)  // Notify all observers globally
                 updateNotification("Connected")
             } else {
-                Log.e(TAG, "Failed to connect to MQTT: ${result?.exceptionOrNull()}")
+                Log.e(TAG, "❌ Failed to connect to MQTT: ${result?.exceptionOrNull()}")
                 isConnected = false
                 setConnectionStatus(false)  // Notify all observers globally
                 updateNotification("Connection Failed")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error connecting to MQTT", e)
+            Log.e(TAG, "💥 Error connecting to MQTT", e)
             isConnected = false
             setConnectionStatus(false)  // Notify all observers globally
             updateNotification("Error: ${e.message}")

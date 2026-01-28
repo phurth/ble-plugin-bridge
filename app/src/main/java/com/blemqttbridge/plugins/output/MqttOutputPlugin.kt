@@ -99,21 +99,45 @@ class MqttOutputPlugin(
             _topicPrefix = config["topic_prefix"] ?: "homeassistant"
             _discoveryFormat = config["discovery_format"] ?: "homeassistant"
 
-            Log.i(TAG, "Initializing MQTT client: $brokerUrl (client: $clientId)")
+            Log.i(TAG, "🔌 Initializing MQTT client: $brokerUrl (client: $clientId)")
 
             var continuationResumed = false
+
+            // Start timeout timer to prevent hanging indefinitely
+            val timeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            val timeoutRunnable = Runnable {
+                if (!continuationResumed) {
+                    continuationResumed = true
+                    Log.e(TAG, "⏱️ MQTT connection timeout after 35 seconds (no callback from Paho)")
+                    connectionStatusListener?.onConnectionStatusChanged(false)
+                    continuation.resumeWithException(
+                        Exception("MQTT connection timeout - Paho callbacks not responding")
+                    )
+                }
+            }
+            timeoutHandler.postDelayed(timeoutRunnable, 35000)
 
             mqttClient = MqttAndroidClient(context, brokerUrl, clientId).apply {
                 setCallback(object : MqttCallbackExtended {
                     override fun connectionLost(cause: Throwable?) {
-                        Log.w(TAG, "MQTT connection lost", cause)
+                        Log.w(TAG, "❌ MQTT connection lost", cause)
                         connectionStatusListener?.onConnectionStatusChanged(false)
-                        Log.i(TAG, "Automatic reconnect will be attempted...")
+                        Log.i(TAG, "⏳ Automatic reconnect will be attempted...")
                     }
 
                     override fun connectComplete(reconnect: Boolean, serverURI: String?) {
-                        if (reconnect) {
-                            Log.i(TAG, "MQTT reconnected to $serverURI")
+                        Log.i(TAG, "✅ connectComplete callback: reconnect=$reconnect, serverURI=$serverURI")
+                        
+                        // If this is the first connection (not a reconnect), resume continuation if not already resumed
+                        if (!reconnect && !continuationResumed) {
+                            continuationResumed = true
+                            timeoutHandler.removeCallbacks(timeoutRunnable)
+                            Log.i(TAG, "✅ MQTT connected successfully on first connect!")
+                            onMqttConnected()
+                            connectionStatusListener?.onConnectionStatusChanged(true)
+                            continuation.resume(Result.success(Unit))
+                        } else if (reconnect) {
+                            Log.i(TAG, "🔄 MQTT reconnected to $serverURI")
                             onMqttConnected()
                             resubscribeAll()
                             connectionStatusListener?.onConnectionStatusChanged(true)
@@ -122,14 +146,13 @@ class MqttOutputPlugin(
 
                     override fun messageArrived(topic: String, message: MqttMessage) {
                         val payload = String(message.payload)
-                        Log.w(TAG, "🚨 MESSAGE ARRIVED: $topic = $payload")
+                        Log.w(TAG, "📨 MESSAGE ARRIVED: $topic = $payload")
 
                         commandCallbacks.forEach { (pattern, callback) ->
                             val regex = Regex(pattern.replace("+", "[^/]+").replace("#", ".*"))
                             val matches = topic.matches(regex)
-                            Log.w(TAG, "🚨 Pattern '$pattern' matches '$topic': $matches")
                             if (matches) {
-                                Log.w(TAG, "🚨 Invoking callback for: $topic")
+                                Log.i(TAG, "📨 Invoking callback for: $topic")
                                 callback(topic, payload)
                             }
                         }
@@ -159,26 +182,38 @@ class MqttOutputPlugin(
 
             connectOptions = options
 
+            Log.d(TAG, "🚀 Calling mqttClient.connect() with 30s timeout...")
             mqttClient?.connect(options, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
                     if (continuationResumed) {
-                        Log.w(TAG, "MQTT onSuccess called but continuation already resumed, ignoring")
+                        Log.w(TAG, "⚠️ MQTT onSuccess called but continuation already resumed, ignoring")
                         return
                     }
                     continuationResumed = true
-                    Log.i(TAG, "MQTT connected successfully")
-                    connectionStatusListener?.onConnectionStatusChanged(true)
-                    onMqttConnected()
+                    timeoutHandler.removeCallbacks(timeoutRunnable)
+                    Log.i(TAG, "✅ MQTT async connect operation succeeded (waiting for connectComplete callback)")
+                    // NOTE: Don't call onMqttConnected() here - it will be called from connectComplete() callback
+                    // when the actual MQTT connection is complete
                     continuation.resume(Result.success(Unit))
                 }
 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    // Ignore persistence exceptions - connection might still succeed
+                    val isPersistenceError = exception?.message?.contains("MqttDefaultFilePersistence") == true ||
+                                            exception?.javaClass?.simpleName?.contains("Persistence") == true
+                    
+                    if (isPersistenceError) {
+                        Log.w(TAG, "⚠️ MQTT persistence error (ignoring, will wait for connectComplete): ${exception?.message}")
+                        return
+                    }
+                    
                     if (continuationResumed) {
-                        Log.w(TAG, "MQTT onFailure called but continuation already resumed, ignoring", exception)
+                        Log.w(TAG, "⚠️ MQTT onFailure called but continuation already resumed, ignoring", exception)
                         return
                     }
                     continuationResumed = true
-                    Log.e(TAG, "MQTT connection failed", exception)
+                    timeoutHandler.removeCallbacks(timeoutRunnable)
+                    Log.e(TAG, "❌ MQTT connection FAILED: ${exception?.message}", exception)
                     connectionStatusListener?.onConnectionStatusChanged(false)
                     continuation.resumeWithException(
                         exception ?: Exception("MQTT connection failed")
@@ -189,12 +224,13 @@ class MqttOutputPlugin(
             continuation.invokeOnCancellation {
                 if (!continuationResumed) {
                     continuationResumed = true
+                    Log.w(TAG, "⚠️ MQTT initialize cancelled")
                     disconnect()
                 }
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "MQTT initialization error", e)
+            Log.e(TAG, "💥 MQTT initialization error", e)
             continuation.resumeWithException(e)
         }
     }
@@ -205,8 +241,11 @@ class MqttOutputPlugin(
     }
 
     override suspend fun publishDiscovery(topic: String, payload: String) {
+        Log.i(TAG, "🔍 publishDiscovery() START: topic=$topic, payloadLen=${payload.length}")
         publishedDiscoveryTopics.add(topic)
+        Log.d(TAG, "🔍 publishDiscovery() calling publish()...")
         publish(topic, payload, retained = true)
+        Log.i(TAG, "🔍 publishDiscovery() COMPLETE: $topic")
     }
 
     override suspend fun subscribeToCommands(
@@ -219,28 +258,44 @@ class MqttOutputPlugin(
             commandCallbacks[fullPattern] = callback
 
             val client = mqttClient
-            if (client == null) {
-                Log.e(TAG, "❌ Cannot subscribe - mqttClient is null!")
-                continuation.resumeWithException(Exception("MQTT client is null"))
+            if (client == null || !client.isConnected) {
+                Log.e(TAG, "❌ Cannot subscribe - mqttClient is null or not connected!")
+                continuation.resumeWithException(Exception("MQTT client is null or not connected"))
                 return@suspendCancellableCoroutine
             }
 
-            client.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
-                override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.i(TAG, "✅ Subscribed to: $fullPattern")
-                    continuation.resume(Unit)
-                }
+            try {
+                client.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
+                    override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        Log.i(TAG, "✅ Subscribed to: $fullPattern")
+                        if (continuation.isActive) {
+                            continuation.resume(Unit)
+                        }
+                    }
 
-                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "❌ Subscribe failed: $fullPattern", exception)
-                    continuation.resumeWithException(
-                        exception ?: Exception("Subscribe failed")
-                    )
+                    override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        Log.e(TAG, "❌ Subscribe failed: $fullPattern", exception)
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(
+                                exception ?: Exception("Subscribe failed")
+                            )
+                        }
+                    }
+                })
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Exception during subscribe call: $fullPattern", e)
+                if (continuation.isActive) {
+                    continuation.resumeWithException(e)
                 }
-            })
+                return@suspendCancellableCoroutine
+            }
 
             continuation.invokeOnCancellation {
-                mqttClient?.unsubscribe(fullPattern)
+                try {
+                    mqttClient?.unsubscribe(fullPattern)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to unsubscribe on cancellation: $fullPattern", e)
+                }
             }
 
         } catch (e: Exception) {
@@ -846,17 +901,25 @@ class MqttOutputPlugin(
 
     private suspend fun publish(topic: String, payload: String, retained: Boolean) = suspendCancellableCoroutine<Unit> { continuation ->
         try {
+            val isDiscovery = topic.contains("/config") || payload.contains("\"availability_topic\"")
+            val marker = if (isDiscovery) "🔍 DISCOVERY" else "📊 STATE"
+            
+            Log.d(TAG, "$marker publish() START: topic=$topic, payloadLen=${payload.length}, retained=$retained")
+            
             val client = mqttClient
+            Log.d(TAG, "$marker publish() client check: client=${client != null}")
 
             val connected = try {
-                client != null && client.isConnected
+                val result = client != null && client.isConnected
+                Log.d(TAG, "$marker publish() connection: connected=$result")
+                result
             } catch (e: Exception) {
-                Log.w(TAG, "Error checking MQTT connection state: ${e.message}")
+                Log.e(TAG, "$marker publish() connection check FAILED: ${e.message}", e)
                 false
             }
 
             if (!connected) {
-                Log.w(TAG, "Cannot publish - MQTT not connected, skipping: $topic")
+                Log.w(TAG, "$marker ABORTED - not connected: $topic")
                 continuation.resume(Unit)
                 return@suspendCancellableCoroutine
             }
@@ -865,21 +928,25 @@ class MqttOutputPlugin(
                 qos = QOS
                 isRetained = retained
             }
+            
+            Log.d(TAG, "$marker publish() calling Paho client.publish(): $topic")
 
             client!!.publish(topic, message, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.d(TAG, "Published: $topic (${payload.length} bytes, retained=$retained)")
+                    Log.i(TAG, "$marker ✅ Paho onSuccess: $topic (${payload.length} bytes, retained=$retained)")
                     continuation.resume(Unit)
                 }
 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.w(TAG, "Publish failed: $topic - ${exception?.message}")
+                    Log.e(TAG, "$marker ❌ Paho onFailure: $topic - ${exception?.message}", exception)
                     continuation.resume(Unit)
                 }
             })
+            
+            Log.d(TAG, "$marker publish() Paho call completed for: $topic")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Publish error: ${e.message}")
+            Log.e(TAG, "💥 publish() EXCEPTION: ${e.message}", e)
             continuation.resume(Unit)
         }
     }
