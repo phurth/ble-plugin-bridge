@@ -386,9 +386,12 @@ class PeplinkPlugin : PollingDevicePlugin {
                 lastDeviceInfo = deviceInfo
                 mqttPublisher.publishState("$base/diagnostic/device/serial_number", deviceInfo.serialNumber)
                 mqttPublisher.publishState("$base/diagnostic/device/model", deviceInfo.model)
+                mqttPublisher.publishState("$base/diagnostic/device/availability", "online")
                 deviceInfo.hardwareVersion?.let {
                     mqttPublisher.publishState("$base/diagnostic/device/hardware_version", it)
                 }
+            }.onFailure {
+                mqttPublisher.publishState("$base/diagnostic/device/availability", "offline")
             }
             
             // Get connected devices count
@@ -437,11 +440,21 @@ class PeplinkPlugin : PollingDevicePlugin {
                 val base = getMqttBaseTopic()
                 pepVpnProfiles.forEach { (id, triple) ->
                     mqttPublisher.publishState("$base/diagnostic/vpn/$id/status", triple.third)
+                    mqttPublisher.publishState("$base/diagnostic/vpn/$id/availability", "online")
+                }
+            }.onFailure {
+                val base = getMqttBaseTopic()
+                pepVpnProfiles.forEach { (id, _) ->
+                    mqttPublisher.publishState("$base/diagnostic/vpn/$id/availability", "offline")
                 }
             }
             Log.d(TAG, "[$instanceId] VPN poll successful")
         } catch (e: Exception) {
             Log.e(TAG, "[$instanceId] VPN poll exception: ${e.message}")
+            val base = getMqttBaseTopic()
+            pepVpnProfiles.forEach { (id, _) ->
+                mqttPublisher.publishState("$base/diagnostic/vpn/$id/availability", "offline")
+            }
         }
     }
 
@@ -509,6 +522,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                         put("name", "VPN: ${triple.first}")
                         put("unique_id", "${instanceId}_vpn_${id}_status")
                         put("state_topic", "$fullBaseTopic/diagnostic/vpn/$id/status")
+                        put("availability_topic", "$fullBaseTopic/diagnostic/vpn/$id/availability")
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
                         put("icon", "mdi:vpn")
                         put("entity_category", "diagnostic")
                         put("device", deviceInfo)
@@ -604,6 +620,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("state_topic", "$fullBaseTopic/wan/$connId/priority")
                     put("options", JSONArray(listOf("1", "2", "3", "4", "Disabled")))
                     put("icon", "mdi:priority-high")
+                    put("availability_topic", availabilityTopic)
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("device", deviceInfo)
                 }.toString()
             )
@@ -898,6 +917,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "Serial Number")
                     put("unique_id", "${instanceId}_serial_number")
                     put("state_topic", "$fullBaseTopic/diagnostic/device/serial_number")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/device/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("icon", "mdi:numeric")
                     put("entity_category", "diagnostic")
                     put("device", deviceInfo)
@@ -910,6 +932,9 @@ class PeplinkPlugin : PollingDevicePlugin {
                     put("name", "Model")
                     put("unique_id", "${instanceId}_model")
                     put("state_topic", "$fullBaseTopic/diagnostic/device/model")
+                    put("availability_topic", "$fullBaseTopic/diagnostic/device/availability")
+                    put("payload_available", "online")
+                    put("payload_not_available", "offline")
                     put("icon", "mdi:router-wireless")
                     put("entity_category", "diagnostic")
                     put("device", deviceInfo)
