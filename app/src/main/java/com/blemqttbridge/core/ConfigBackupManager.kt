@@ -81,6 +81,9 @@ object ConfigBackupManager {
         
         try {
             runBlocking {
+                // Device settings
+                json.put("deviceSuffix", appSettings.deviceSuffix.first())
+                
                 // MQTT settings
                 json.put("mqttEnabled", appSettings.mqttEnabled.first())
                 json.put("mqttBrokerHost", appSettings.mqttBrokerHost.first())
@@ -339,6 +342,11 @@ object ConfigBackupManager {
         if (settingsJson == null) return
         
         Log.i(TAG, "Restoring app settings...")
+        
+        // Device settings
+        if (settingsJson.has("deviceSuffix")) {
+            appSettings.setDeviceSuffix(settingsJson.getString("deviceSuffix"))
+        }
         
         // MQTT settings
         if (settingsJson.has("mqttEnabled")) {

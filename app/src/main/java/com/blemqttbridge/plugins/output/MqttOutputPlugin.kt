@@ -16,6 +16,8 @@ import com.blemqttbridge.core.discovery.DiscoveryBuilder
 import com.blemqttbridge.core.discovery.DiscoveryBuilderFactory
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import info.mqtt.android.service.MqttAndroidClient
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
@@ -48,50 +50,42 @@ class MqttOutputPlugin(
          */
         private fun getDeviceSuffix(context: Context): String {
             return try {
-                val prefs = context.getSharedPreferences("mqtt_device_id", Context.MODE_PRIVATE)
-                val cachedSuffix = prefs.getString("device_suffix", null)
+                // Use SharedPreferences for atomic check-and-set
+                val prefs = context.getSharedPreferences("device_config", Context.MODE_PRIVATE)
+                val existingSuffix = prefs.getString("device_suffix", null)
                 
-                // If we have a cached suffix from a previous successful read, use it
-                if (!cachedSuffix.isNullOrEmpty()) {
-                    Log.d(TAG, "Using cached device suffix: $cachedSuffix")
-                    return cachedSuffix
+                if (!existingSuffix.isNullOrEmpty()) {
+                    Log.d(TAG, "Using stored device suffix: $existingSuffix")
+                    return existingSuffix
                 }
                 
-                val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-                
-                // Try to get BT MAC address (may not work on Android 12+ due to privacy restrictions)
-                val btMac = try {
-                    bluetoothAdapter?.address
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "SecurityException getting BT address", e)
-                    null
-                }
-
-                // If we got a real BT MAC (not the placeholder), use and cache it
-                if (!btMac.isNullOrEmpty() && btMac != "02:00:00:00:00:00") {
-                    val suffix = btMac.replace(":", "").takeLast(6).lowercase()
-                    Log.i(TAG, "✅ Using Bluetooth MAC suffix for device identification: $suffix (MAC: $btMac)")
-                    // Cache it for future use
-                    prefs.edit().putString("device_suffix", suffix).apply()
-                    suffix
-                } else {
-                    // BT MAC unavailable (Android 12+ privacy restriction)
-                    // Generate a stable UUID-based suffix and cache it
-                    Log.w(TAG, "Bluetooth MAC unavailable (btMac=$btMac), generating stable UUID suffix")
+                synchronized(this) {
+                    // Double-check inside synchronized block
+                    val doubleCheck = prefs.getString("device_suffix", null)
+                    if (!doubleCheck.isNullOrEmpty()) {
+                        Log.d(TAG, "Using stored device suffix (from race): $doubleCheck")
+                        return doubleCheck
+                    }
                     
-                    // Use Android ID as seed for UUID to ensure it's stable across app launches
-                    val androidId = Settings.Secure.getString(
-                        context.contentResolver,
-                        Settings.Secure.ANDROID_ID
-                    ) ?: "default"
+                    // Generate new random UUID-based suffix
+                    val uuid = java.util.UUID.randomUUID().toString().replace("-", "")
+                    val suffix = uuid.takeLast(6).lowercase()
                     
-                    // Generate UUID from Android ID and take last 6 chars
-                    // This gives us a stable identifier that won't change unless device is factory reset
-                    val uuid = java.util.UUID.nameUUIDFromBytes(androidId.toByteArray())
-                    val suffix = uuid.toString().replace("-", "").takeLast(6).lowercase()
+                    Log.i(TAG, "✅ Generated new device suffix: $suffix")
                     
-                    Log.i(TAG, "✅ Generated and cached UUID-based suffix: $suffix")
-                    prefs.edit().putString("device_suffix", suffix).apply()
+                    // Store it atomically
+                    prefs.edit().putString("device_suffix", suffix).commit()
+                    
+                    // Also store in DataStore for export/import
+                    try {
+                        val appSettings = com.blemqttbridge.data.AppSettings(context)
+                        runBlocking {
+                            appSettings.setDeviceSuffix(suffix)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to sync device suffix to DataStore", e)
+                    }
+                    
                     suffix
                 }
             } catch (e: Exception) {

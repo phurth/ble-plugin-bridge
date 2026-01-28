@@ -14,7 +14,14 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
  */
 class AppSettings(private val context: Context) {
     
+    // Device suffix Flow
+    val deviceSuffix: Flow<String> = context.dataStore.data
+        .map { preferences -> preferences[DEVICE_SUFFIX] ?: "" }
+    
     companion object {
+        // Device Settings
+        val DEVICE_SUFFIX = stringPreferencesKey("device_suffix")
+        
         // MQTT Settings
         val MQTT_ENABLED = booleanPreferencesKey("mqtt_enabled")
         val MQTT_BROKER_HOST = stringPreferencesKey("mqtt_broker_host")
@@ -145,6 +152,10 @@ class AppSettings(private val context: Context) {
     
     suspend fun setMqttTopicPrefix(prefix: String) {
         context.dataStore.edit { it[MQTT_TOPIC_PREFIX] = prefix }
+    }
+    
+    suspend fun setDeviceSuffix(suffix: String) {
+        context.dataStore.edit { it[DEVICE_SUFFIX] = suffix }
     }
     
     suspend fun setBleEnabled(enabled: Boolean) {
