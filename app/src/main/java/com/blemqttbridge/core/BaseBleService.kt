@@ -154,6 +154,13 @@ class BaseBleService : Service() {
     private val serviceLogBuffer = ArrayDeque<String>()
     private val MAX_SERVICE_LOG_LINES = 1000
     
+    // Pending MQTT command subscriptions (until MQTT connects)
+    private data class PendingSubscription(
+        val topicPattern: String,
+        val callback: (String, String) -> Unit
+    )
+    private val pendingSubscriptions = mutableListOf<PendingSubscription>()
+    
     // BLE trace logging (for BLE events only)
     // Thread-safe: uses ConcurrentLinkedDeque to protect against concurrent access
     // from BLE callbacks and web server threads
@@ -295,7 +302,16 @@ class BaseBleService : Service() {
         override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
             serviceScope.launch {
                 try {
-                    getMqttPublisherFromService()?.subscribeToCommands(topicPattern, callback)
+                    val mqtt = getMqttPublisherFromService()
+                    if (mqtt != null) {
+                        mqtt.subscribeToCommands(topicPattern, callback)
+                    } else {
+                        // Queue subscription until MQTT connects
+                        Log.w(TAG, "⏳ MQTT not ready, queuing subscription: $topicPattern")
+                        synchronized(pendingSubscriptions) {
+                            pendingSubscriptions.add(PendingSubscription(topicPattern, callback))
+                        }
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to subscribe to commands: $topicPattern", e)
                 }
@@ -335,6 +351,17 @@ class BaseBleService : Service() {
         instance = this
         Log.i(TAG, "Service created")
         appendServiceLog("Service created")
+        
+        // Start MQTT service
+        val mqttIntent = Intent(this, MqttService::class.java).apply {
+            action = MqttService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(mqttIntent)
+        } else {
+            startService(mqttIntent)
+        }
+        Log.i(TAG, "🔌 Started MqttService")
         
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
@@ -390,6 +417,48 @@ class BaseBleService : Service() {
             MqttService.connectionStatus.collect { connected ->
                 Log.i(TAG, "📊 Observed MQTT connection status change: $connected")
                 _mqttConnected.value = connected
+                
+                // Retry pending command subscriptions when MQTT connects
+                if (connected) {
+                    Log.i(TAG, "🔌 MQTT connected - retrying pending command subscriptions")
+                    retryPendingSubscriptions()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Retry all pending MQTT command subscriptions.
+     * Called when MQTT connection is established.
+     */
+    private fun retryPendingSubscriptions() {
+        val pending = synchronized(pendingSubscriptions) {
+            val copy = pendingSubscriptions.toList()
+            pendingSubscriptions.clear()
+            copy
+        }
+        
+        if (pending.isEmpty()) {
+            Log.d(TAG, "No pending subscriptions to retry")
+            return
+        }
+        
+        Log.i(TAG, "🔄 Retrying ${pending.size} pending MQTT subscriptions")
+        val mqtt = getMqttPublisherFromService()
+        if (mqtt == null) {
+            Log.w(TAG, "❌ MQTT still not available during retry, re-queuing subscriptions")
+            synchronized(pendingSubscriptions) {
+                pendingSubscriptions.addAll(pending)
+            }
+            return
+        }
+        
+        pending.forEach { sub ->
+            try {
+                mqtt.subscribeToCommands(sub.topicPattern, sub.callback)
+                Log.d(TAG, "✅ Retried subscription: ${sub.topicPattern}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to retry subscription: ${sub.topicPattern}", e)
             }
         }
     }
