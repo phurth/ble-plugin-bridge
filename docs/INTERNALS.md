@@ -318,6 +318,144 @@ fun updatePluginStatus(instanceId: String, connected: Boolean, dataHealthy: Bool
 - Each instance has its own status indicators, controls, edit button
 - Instance-level add/remove without affecting other instances
 
+### Device Identification Strategy (v2.6+)
+
+**Problem:** Android devices running the bridge need a stable, unique identifier for MQTT discovery purposes (e.g., to create unique gateway devices in Home Assistant). Using Android ANDROID_ID has limitations:
+- Can change between system updates
+- Not stable across factory resets
+- Privacy concerns with personally identifiable information
+- Varies between different ROM versions
+
+**Solution:** Generate a random UUID once during first initialization, extract the last 6 hex characters, and persist it in both SharedPreferences (atomic) and DataStore (export/import).
+
+**Implementation (v2.6+):**
+
+**File:** `MqttOutputPlugin.kt`, `BleScannerPlugin.kt` (identical implementation)
+
+```kotlin
+private fun getDeviceSuffix(context: Context): String {
+    return try {
+        // Use SharedPreferences for atomic check-and-set
+        val prefs = context.getSharedPreferences("device_config", Context.MODE_PRIVATE)
+        val existingSuffix = prefs.getString("device_suffix", null)
+        
+        if (!existingSuffix.isNullOrEmpty()) {
+            Log.d(TAG, "Using stored device suffix: $existingSuffix")
+            return existingSuffix
+        }
+        
+        synchronized(this) {
+            // Double-check inside synchronized block to handle race conditions
+            val doubleCheck = prefs.getString("device_suffix", null)
+            if (!doubleCheck.isNullOrEmpty()) {
+                Log.d(TAG, "Using stored device suffix (from race): $doubleCheck")
+                return doubleCheck
+            }
+            
+            // Generate new random UUID-based suffix
+            val uuid = java.util.UUID.randomUUID().toString().replace("-", "")
+            val suffix = uuid.takeLast(6).lowercase()  // Last 6 chars: e.g., "702ae1"
+            
+            Log.i(TAG, "✅ Generated new device suffix: $suffix")
+            
+            // Store it atomically in SharedPreferences
+            prefs.edit().putString("device_suffix", suffix).commit()
+            
+            // Also store in DataStore for export/import backup
+            try {
+                val appSettings = AppSettings(context)
+                runBlocking {
+                    appSettings.setDeviceSuffix(suffix)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync device suffix to DataStore", e)
+            }
+            
+            suffix
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to get device suffix, using 'unknown' fallback", e)
+        "unknown"
+    }
+}
+```
+
+**UUID Generation Details:**
+
+1. **Random UUID:** `java.util.UUID.randomUUID()` creates a cryptographically random 128-bit UUID (UUID v4)
+2. **Remove Hyphens:** `toString().replace("-", "")` converts to 32-character hex string (e.g., `d1e5f8a2c4b6f9e3a5c7d9f1b3e5a7c9`)
+3. **Take Last 6 Characters:** `takeLast(6).lowercase()` extracts final 6 hex chars for compactness (e.g., `a7c9`)
+4. **Uniqueness Probability:** 6 hex characters = 16.7 million possible values (2^24), sufficient for RV/marine deployments
+5. **Stability:** Same UUID extracted on every restart until SharedPreferences cleared
+
+**Storage Locations:**
+
+**SharedPreferences (Atomic):**
+- File: `device_config`
+- Key: `device_suffix`
+- Access: Fast atomic read/write operations
+- Use: Runtime MQTT device identification
+- Example: `702ae1`
+
+**DataStore (Backup):**
+- File: `dataStore` preferences proto
+- Key: `DEVICE_SUFFIX`
+- Access: Slower, but integrated with app settings
+- Use: Settings export/import, backup/restore
+- Synchronized on first generation
+
+**Race Condition Handling:**
+
+Multiple threads might call `getDeviceSuffix()` simultaneously during service startup. The code handles this with:
+
+```kotlin
+synchronized(this) {
+    // Double-check pattern inside synchronized block
+    val existingSuffix = prefs.getString("device_suffix", null)
+    if (!existingSuffix.isNullOrEmpty()) {
+        return existingSuffix  // Another thread already generated it
+    }
+    // Generate and store
+}
+```
+
+This ensures exactly one suffix is generated and stored, even under concurrent access.
+
+**Usage in MQTT Discovery:**
+
+The device suffix is used to create unique gateway and scanner device IDs:
+
+```kotlin
+// Gateway device (MqttOutputPlugin)
+val deviceSuffix = getDeviceSuffix(context)
+val nodeId = "ble_mqtt_bridge_${deviceSuffix}"  // e.g., "ble_mqtt_bridge_702ae1"
+
+// Scanner device (BleScannerPlugin)
+val deviceId = "ble_scanner_${deviceSuffix}"    // e.g., "ble_scanner_702ae1"
+```
+
+In Home Assistant, this creates:
+- Device: `BLE MQTT Bridge 702AE1`
+- Device: `BLE Scanner 702AE1`
+
+Each Android device gets unique device objects even if running the bridge on multiple phones.
+
+**Persistence Across Uninstall:**
+
+> ⚠️ **Note:** SharedPreferences are cleared when the app is uninstalled. If the user uninstalls and reinstalls the bridge, a new suffix is generated. The device ID in Home Assistant will change, requiring manual cleanup of old device entries.
+
+To migrate old device entries in Home Assistant:
+1. Check `developer tools > MQTT Explorer` for old topic IDs
+2. Manually remove old device registrations
+3. New device will auto-create on reinstall with new suffix
+
+**Logging Example:**
+
+```
+I MqttOutputPlugin: ✅ Generated new device suffix: 702ae1
+D MqttOutputPlugin: Using stored device suffix: 702ae1
+```
+
 ---
 
 ## 2. High-Level Architecture
@@ -3481,6 +3619,168 @@ Both Android devices can control the same OneControl devices without conflicts. 
 3. **OneControl/EasyTouch/GoPower Entities:** No changes - they continue using MAC addresses
 
 4. **Cleanup:** Remove old `ble_mqtt_bridge` and `ble_scanner` devices from Home Assistant after confirming new devices are working
+
+### Availability Message Queueing (v2.6+)
+
+**Problem:** Devices publish availability messages on BLE connection before the MQTT service is ready, causing publishes to fail silently. If the MQTT broker had retained an "offline" message from a previous disconnect, that stale message persists indefinitely, keeping the device unavailable in Home Assistant despite being connected.
+
+**Timeline:**
+```
+Device BLE Connect (fast)
+  ↓
+  └─> Device plugin calls publishAvailability("online")
+      ↓
+      └─> BaseBleService.publishState()
+          ↓
+          └─> getMqttPublisherFromService() returns NULL
+              (MQTT service still initializing)
+          ↓
+          └─> Publish fails silently
+              
+MQTT Broker retains old "offline" message
+  ↓
+  └─> Home Assistant sees device as "unavailable"
+```
+
+**Solution (v2.6):** Queue availability messages when MQTT is unavailable, then republish when MQTT connection is established.
+
+**Implementation:**
+
+**File:** `BaseBleService.kt`, lines 173-177, 223-240, 472, 515-553
+
+**Data Structure:**
+```kotlin
+data class PendingAvailabilityMessage(
+    val topic: String,
+    val payload: String,
+    val retained: Boolean
+)
+
+// Map to track pending messages by topic (deduplicates)
+private val pendingAvailabilityMessages = mutableMapOf<String, PendingAvailabilityMessage>()
+```
+
+**Queue Mechanism in publishState():**
+```kotlin
+suspend fun publishState(
+    topic: String,
+    payload: String,
+    retained: Boolean = false
+) {
+    // Check for availability topics (e.g., "onecontrol/MAC/availability")
+    if (topic.endsWith("/availability")) {
+        val mqttPublisher = getMqttPublisherFromService()
+        if (mqttPublisher == null) {
+            // MQTT not ready - queue the message
+            Log.i(TAG, "⏸️ MQTT unavailable, queuing availability message: $topic")
+            pendingAvailabilityMessages[topic] = PendingAvailabilityMessage(
+                topic = topic,
+                payload = payload,
+                retained = retained
+            )
+            return  // Don't try to publish yet
+        }
+    }
+    
+    // MQTT ready - publish immediately (or queued message)
+    val mqttPublisher = getMqttPublisherFromService()
+    if (mqttPublisher != null) {
+        try {
+            mqttPublisher.publishState(topic, payload, retained)
+        } catch (e: Exception) {
+            Log.e(TAG, "Publish failed", e)
+        }
+    }
+}
+```
+
+**Republish on MQTT Connection:**
+
+When MQTT connection is established (detected in MqttService connection observer):
+```kotlin
+// In MqttOutputPlugin, connection state observer
+mqttClient.setCallback(object : MqttCallback {
+    override fun connectionLost(cause: Throwable?) {
+        // MQTT disconnected
+        updatePluginStatus(connected = false)
+    }
+    
+    override fun messageArrived(topic: String?, message: MqttMessage?) {}
+    
+    override fun deliveryComplete(token: IMqttDeliveryToken?) {}
+    
+    override fun connectComplete(reconnect: Boolean, serverURI: String?) {
+        // MQTT connected - trigger availability republish
+        updatePluginStatus(connected = true)
+        bleSyncService?.republishAvailabilityForConnectedDevices()  // NEW
+    }
+})
+```
+
+**Republish Method:**
+```kotlin
+private suspend fun republishAvailabilityForConnectedDevices() {
+    if (pendingAvailabilityMessages.isEmpty()) {
+        Log.d(TAG, "No pending availability messages")
+        return
+    }
+    
+    Log.i(TAG, "📤 Republishing ${pendingAvailabilityMessages.size} pending availability messages")
+    
+    val mqttPublisher = getMqttPublisherFromService()
+    if (mqttPublisher == null) {
+        Log.w(TAG, "MQTT still unavailable, will retry on next connection")
+        return
+    }
+    
+    // Iterate and publish all pending messages
+    for ((topic, message) in pendingAvailabilityMessages) {
+        try {
+            Log.d(TAG, "✅ Publishing pending availability: $topic = ${message.payload}")
+            mqttPublisher.publishState(
+                topic = message.topic,
+                payload = message.payload,
+                retained = message.retained
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to republish availability", e)
+        }
+    }
+    
+    // Clear pending queue after attempting to republish
+    pendingAvailabilityMessages.clear()
+    Log.i(TAG, "✅ Pending availability queue cleared")
+}
+```
+
+**Deduplication:**
+
+The `pendingAvailabilityMessages` map uses topic as the key, ensuring only one pending message per device:
+
+```
+Device 1 connects:     map["onecontrol/24:DC:C3:ED:1E:0A/availability"] = ("online", true)
+Device 2 connects:     map["easytouch/EC:C9:FF:B1:24:1E/availability"] = ("online", true)
+MQTT becomes ready:    republish all 2 messages, then clear map
+```
+
+If a device publishes multiple times before MQTT is ready, only the latest message is kept.
+
+**Logging Example:**
+
+```
+I BaseBleService: ⏸️ MQTT unavailable, queuing availability message: onecontrol/24:DC:C3:ED:1E:0A/availability
+I BaseBleService: 📤 Republishing 2 pending availability messages
+I BaseBleService: ✅ Publishing pending availability: onecontrol/24:DC:C3:ED:1E:0A/availability = online
+I BaseBleService: ✅ Publishing pending availability: easytouch/EC:C9:FF:B1:24:1E/availability = online
+I BaseBleService: ✅ Pending availability queue cleared
+```
+
+**Impact:**
+
+- **Before v2.6:** Device unavailable in HA despite being connected
+- **After v2.6:** MQTT broker receives "online" availability message, device shows available in HA
+
+This fix ensures Home Assistant's device availability status accurately reflects the actual BLE connection state, even if MQTT initialization is slower than device connection.
 
 ---
 
