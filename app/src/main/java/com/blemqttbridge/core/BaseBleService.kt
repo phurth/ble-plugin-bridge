@@ -1607,12 +1607,56 @@ class BaseBleService : Service() {
         // Publish availability offline
         mqttPublisher.publishAvailability("${pluginId}/${device.address}/availability", false)
         
-        // Always resume scanning to reconnect any missing configured devices
-        // This ensures devices like EasyTouch (not bonded) can reconnect automatically
+        // Strategy for reconnection:
+        // 1. First try direct connection to the known MAC (works even if device isn't advertising)
+        // 2. If direct connection fails, resume scanning to find the device
         serviceScope.launch {
             delay(BLE_RECONNECT_DELAY_MS)  // Brief delay to avoid immediate churn
-            Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
-            startScanning()
+            
+            // Attempt direct reconnection using the known MAC address
+            // This works for devices that aren't currently advertising (deep sleep, etc.)
+            Log.i(TAG, "🔄 Attempting direct reconnection to ${device.address}")
+            try {
+                // Get fresh BluetoothDevice reference from adapter
+                val reconnectDevice = bluetoothAdapter.getRemoteDevice(device.address)
+                
+                // Check if this device is still in our enabled instances
+                val allInstances = ServiceStateManager.getAllInstances(applicationContext)
+                val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
+                
+                var shouldReconnect = false
+                var instanceId: String? = null
+                
+                for ((instId, instance) in allInstances) {
+                    val pluginType = instance.pluginType
+                    val isEnabled = enabledPlugins.contains(instId) || enabledPlugins.contains(pluginType)
+                    
+                    if (isEnabled && instance.deviceMac.equals(device.address, ignoreCase = true)) {
+                        shouldReconnect = true
+                        instanceId = instId
+                        break
+                    }
+                }
+                
+                if (shouldReconnect && instanceId != null) {
+                    Log.i(TAG, "🔄 Device ${device.address} is still configured and enabled (instance: $instanceId) - attempting direct connect")
+                    
+                    // Attempt direct connection without requiring device discovery
+                    connectToDevice(reconnectDevice, instanceId)
+                    Log.i(TAG, "🔄 Direct reconnection initiated for ${device.address}")
+                } else {
+                    Log.i(TAG, "🔍 Device ${device.address} not in enabled instances - resuming scan")
+                    startScanning()
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "❌ Permission denied for direct reconnection - falling back to scan", e)
+                Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
+                startScanning()
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Direct reconnection failed - falling back to scan", e)
+                Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
+                startScanning()
+            }
         }
     }
     
