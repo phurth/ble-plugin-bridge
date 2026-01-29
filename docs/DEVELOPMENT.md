@@ -1,4 +1,4 @@
-# Claude.md - BLE MQTT Plugin Bridge Project Context
+# BLE MQTT Plugin Bridge - Development Guide
 
 ## ⚠️ CRITICAL: Agent Instructions
 
@@ -8,7 +8,7 @@ Uninstalling wipes all saved state:
 - Granted permissions
 - App data and user settings
 
-**Always reinstall with `-r` flag:** `adb install -r <apk>`  
+**Always reinstall with `-r` flag:** `adb install -r <apk>`  and relaunch the app after install
 This preserves all data and permissions while updating the binary.
 
 **Exception:** Only uninstall if explicitly instructed: "uninstall the app" or "wipe config"
@@ -16,36 +16,17 @@ This preserves all data and permissions while updating the binary.
 ---
 
 ## Project Overview
-**BLE MQTT Plugin Bridge** - An Android application that bridges BLE (Bluetooth Low Energy) devices to MQTT, supporting multiple device plugins (GoWatt/GoPower, EasyTouch, OneControl). The app runs as a foreground service, manages MQTT connections, and handles BLE device discovery/communication.
+**BLE MQTT Plugin Bridge** - An Android application that bridges BLE (Bluetooth Low Energy) devices and HTTP polling devices to MQTT with Home Assistant integration. Supports multiple device plugins including solar controllers, thermostats, RV systems, tank sensors, routers, and more. The app runs as a foreground service, manages MQTT connections, and handles BLE device discovery/communication and HTTP device polling.
 
 **Repository:** https://github.com/phurth/ble-plugin-bridge  
-**Current Version:** 2.6.0-pre1 (prerelease)  
+**Current Version:** 2.6.0-pre1 (prerelease branch: prerelease-2.6)  
 **Min SDK:** Android 8.0 (API 26)  
 **Target SDK:** Android 14 (API 34)
 
-## Recent Changes (as of Jan 26, 2026)
-
-- **Service independence + Peplink polling fixes (branch: service-independence)**
-  - Web/MQTT/BLE services fully decoupled; web server can run solo
-  - Polling (HTTP) plugins now report health to the UI via BaseBleService
-  - Web status API reads dedicated polling status flow
-  - Polling auto-start retries up to 3x if MQTT isn’t ready yet
-  - Debug log export now includes polling plugin statuses
-  - Peplink plugin: status surfaces correctly in UI; auto-start works after retries
-  - Peplink branch merged into service-independence; remote branch peplink-plugin closed
-
-- **v2.5.13:** Service startup fix + enhanced state visibility
-  - Fixed: app would skip BLE auto-start when launched via MainActivity
-  - Added StateFlows: `bleScanningActive`, `bluetoothAvailable`; UI 3-state indicator
-  - See: [RELEASE_NOTES_v2.5.13.md](RELEASE_NOTES_v2.5.13.md)
-
-- **v2.5.6.1:** Patch release fixing compilation bug in v2.5.6
-  - Extra closing brace in MqttOutputPlugin.kt prevented debug builds
-
-- **v2.5.6:** Multi-instance plugin support + comprehensive testing
-  - Multi-instance data model and HTTP endpoints; EasyTouch supports multi-instance
-
-- **v2.5.3:** Enabled debug logging in release builds (`FORCE_DEBUG_LOG` flag added)
+## Recent Changes (Jan 2026)
+- **Peplink plugin fixes (Jan 29):** Fixed authentication state tracking, added diagnostic binary sensors (API Connected, Authenticated, Data Healthy), added availability topic publishing
+- **Service independence:** Web/MQTT/BLE services fully decoupled; polling (HTTP) plugins report health to UI
+- **Multi-instance support:** EasyTouch, Mopeka, and Peplink support multiple instances
 
 ## Project Structure
 
@@ -57,11 +38,20 @@ This preserves all data and permissions while updating the binary.
   - `RemoteControlManager.kt` - Remote control command handling
 
 ### Plugins (Device Handlers)
-- **GoWatt/GoPower** - `[app/src/main/java/com/blemqttbridge/plugins/gopower/](app/src/main/java/com/blemqttbridge/plugins/gopower/)`
-- **EasyTouch** - `[app/src/main/java/com/blemqttbridge/plugins/easytouch/](app/src/main/java/com/blemqttbridge/plugins/easytouch/)`
-- **OneControl** - `[app/src/main/java/com/blemqttbridge/plugins/onecontrol/](app/src/main/java/com/blemqttbridge/plugins/onecontrol/)`
-- **BLE Scanner** - `[app/src/main/java/com/blemqttbridge/plugins/blescanner/](app/src/main/java/com/blemqttbridge/plugins/blescanner/)` - Device discovery plugin
-- **MQTT Output** - `[app/src/main/java/com/blemqttbridge/plugins/output/](app/src/main/java/com/blemqttbridge/plugins/output/)`
+
+**BLE Plugins (Bluetooth Low Energy):**
+- **OneControl** (`onecontrol/`) - RV control system (Lippert OneControl)
+- **EasyTouch** (`easytouch/`) - RV thermostat (Micro-Air EasyTouch) - Multi-instance support
+- **GoPower** (`gopower/`) - Solar charge controller (Go Power! GP-PWM-30)
+- **Mopeka** (`mopeka/`) - Tank level sensors (propane, fresh water, gray/black water) - Multi-instance support
+- **Hughes Watchdog** (`hughes/`) - Hughes Autoformer surge protector with voltage/current monitoring
+- **BLE Scanner** (`blescanner/`) - Generic BLE device discovery and advertising data capture
+
+**HTTP Polling Plugins:**
+- **Peplink** (`peplink/`) - Peplink router monitoring (WAN status, cellular, bandwidth, VPN, GPS) - Multi-instance support
+
+**Infrastructure Plugins:**
+- **MQTT Output** (`output/`) - MQTT publishing and Home Assistant discovery management
 
 ### Web Interface (v2.5.5+)
 - **[app/src/main/java/com/blemqttbridge/web/](app/src/main/java/com/blemqttbridge/web/)**
@@ -161,11 +151,7 @@ adb -s 10.115.19.214:5555 shell am start -n com.blemqttbridge/.MainActivity
 - **IP:** 10.115.19.214
 - **Wireless ADB:** Port 5555
 - **Status:** Connected via wireless ADB pairing
-- **droidVNC:** Backup connectivity to test device
-- **SSH Access:** `ssh -p 8022 u0_a134@10.115.19.214` (Termux with openssh + termux-services)
-  - Auth: Ed25519 key-based authentication
-  - Service: Managed by runit (sv-enabled sshd, auto-starts on reboot)
-  - Purpose: Remote deployment and debugging when away from RV
+- **droidVNC:** Backup remote desktop connectivity
 
 ### ADB Commands
 ```bash
@@ -188,29 +174,6 @@ adb shell monkey -p com.blemqttbridge 1
 # Force stop droidVNC (if needed)
 adb shell am force-stop net.christianbeier.droidvnc_ng
 ```
-
-## Known Issues & Regressions
-- **Currently tracking:** Regressions to be fixed (user mentioned Jan 12)
-- **BuildConfig.DEBUG:** Release builds had logging disabled; fixed in v2.5.3
-
-## Future Enhancements
-### Web Interface Improvements
-- **Configurable Port:** Make web server port configurable (currently hardcoded to 8088)
-  - Add to AppSettings and ServiceStateManager
-  - Add UI control in System Settings screen
-  - Restart WebServerService when port changes
-  - Validate port range (1024-65535)
-- **Authentication:** Add optional HTTP authentication to web interface
-  - Username/password configuration
-  - Session management
-  - Consider basic auth vs. digest auth vs. token-based
-  - Store credentials securely (Android Keystore or encrypted DataStore)
-  - Add "Enable Web Auth" toggle in settings
-- **Additional Context:**
-  - Current web UI is completely open (no auth) - accessible to anyone on network
-  - Port 8088 may conflict with other services on some networks
-  - These features would enable safer deployment in multi-user environments
-  - Consider adding HTTPS support in future (self-signed certs or Let's Encrypt)
 
 ## Key Dependencies
 - **Kotlin Coroutines** - 1.9.0
@@ -246,22 +209,22 @@ adb shell am force-stop net.christianbeier.droidvnc_ng
 - **Language:** Kotlin
 - **Target:** Android (minSdk 26, targetSdk 34)
 - **Build System:** Gradle with Kotlin DSL
+- **IDE:** Android Studio (or VS Code with Kotlin extensions)
+- **JDK:** Java 17+
+
 ## MQTT Broker (Test Environment)
 - **Address:** 10.115.19.131:1883
 - **Credentials:** mqtt/mqtt
 - **Test Subscribe:** `mosquitto_sub -h 10.115.19.131 -p 1883 -u mqtt -P mqtt -t "homeassistant/#"`
 - **Test Publish:** `mosquitto_pub -h 10.115.19.131 -p 1883 -u mqtt -P mqtt -t "test/topic" -m "message"`
 
----
-**Last Updated:** January 29
-
 ## Next Steps for New Sessions
 1. Check `git log` for recent commits
 2. Review [docs/INTERNALS.md](docs/INTERNALS.md) for architecture details
 3. Check [app/build.gradle.kts](app/build.gradle.kts) for build config and version
 4. Review [app/src/main/java/com/blemqttbridge/core/BaseBleService.kt](app/src/main/java/com/blemqttbridge/core/BaseBleService.kt) for service logic
-5. For plugin-specific work, check respective plugin directories
+5. For plugin-specific work, check respective plugin directories and docs/
 6. For UI work, check [app/src/main/java/com/blemqttbridge/ui/](app/src/main/java/com/blemqttbridge/ui/)
 
 ---
-**Last Updated:** January 18, 2026
+**Last Updated:** January 29, 2026
