@@ -83,7 +83,24 @@ This preserves all data and permissions while updating the binary.
 
 ## Build & Deployment
 
-### Build Commands
+### Quick Deploy to Test Device
+**Recommended Method:** Use the automated deployment script:
+```bash
+./scripts/install-dev.sh
+```
+
+This script:
+- Builds debug APK (`./gradlew assembleDebug`)
+- Installs with `-r` flag (preserves all data and permissions)
+- Force-stops the app to ensure clean restart
+- Launches the app (`com.blemqttbridge/.MainActivity`)
+- Verifies app started successfully
+
+**Prerequisites:**
+- Device connected: `adb connect 10.115.19.214:5555`
+- Script is executable: `chmod +x scripts/install-dev.sh`
+
+### Manual Build Commands
 ```bash
 # Debug build
 ./gradlew assembleDebug
@@ -93,6 +110,16 @@ This preserves all data and permissions while updating the binary.
 
 # Run tests
 ./gradlew test
+```
+
+### Manual Deployment to Test Device
+```bash
+# Build and install (preserves data)
+./gradlew assembleDebug
+adb -s 10.115.19.214:5555 install -r app/build/outputs/apk/debug/app-debug.apk
+
+# Launch app
+adb -s 10.115.19.214:5555 shell am start -n com.blemqttbridge/.MainActivity
 ```
 
 ### APK Output
@@ -197,7 +224,18 @@ adb shell am force-stop net.christianbeier.droidvnc_ng
   - `INTERNALS.md` - Internal architecture details
   - `CONDITIONAL_ONBOARDING_IMPLEMENTATION.md` - Onboarding flow
   - `PLANNING_CONNECTION_POOLING.md` - Connection pooling plans
-- **[scripts/](scripts/)** - Testing utilities (ADB control, MQTT testing)
+  - **Plugin-specific documentation:** Each plugin has its own subdirectory:
+    - `docs/easytouch_plugin_docs/` - EasyTouch thermostat plugin docs
+    - `docs/gopower_plugin_docs/` - GoPower solar controller plugin docs
+    - `docs/onecontrol_plugin_docs/` - OneControl RV system plugin docs
+    - `docs/mopeka_plugin_docs/` - Mopeka tank sensor plugin docs
+    - `docs/hughes_plugin_docs/` - Hughes Autoformer watchdog plugin docs
+    - `docs/peplink_plugin_docs/` - Peplink router plugin docs
+    - `docs/gmg_plugin_docs/` - GMG pellet grill plugin docs
+- **[scripts/](scripts/)** - Deployment and testing utilities
+  - `install-dev.sh` - Automated build and deploy to test device
+  - `configure-mqtt.sh` - MQTT configuration helper
+  - `test-adb-control.sh` - ADB connectivity testing
 
 ## Git Workflow
 - **Main branch:** Production releases
@@ -208,8 +246,14 @@ adb shell am force-stop net.christianbeier.droidvnc_ng
 - **Language:** Kotlin
 - **Target:** Android (minSdk 26, targetSdk 34)
 - **Build System:** Gradle with Kotlin DSL
-- **IDE:** Android Studio (or VS Code with appropriate extensions)
-- **JDK:** Java 17+
+## MQTT Broker (Test Environment)
+- **Address:** 10.115.19.131:1883
+- **Credentials:** mqtt/mqtt
+- **Test Subscribe:** `mosquitto_sub -h 10.115.19.131 -p 1883 -u mqtt -P mqtt -t "homeassistant/#"`
+- **Test Publish:** `mosquitto_pub -h 10.115.19.131 -p 1883 -u mqtt -P mqtt -t "test/topic" -m "message"`
+
+---
+**Last Updated:** January 29
 
 ## Next Steps for New Sessions
 1. Check `git log` for recent commits
