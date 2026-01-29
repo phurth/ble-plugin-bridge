@@ -57,9 +57,9 @@ This preserves all data and permissions while updating the binary.
 - **[app/src/main/java/com/blemqttbridge/web/](app/src/main/java/com/blemqttbridge/web/)**
   - `WebServerManager.kt` - Embedded web server (NanoHTTPD), REST API, HTML/JS UI
   - `WebServerService.kt` - Foreground service hosting web server
-  - **Port:** 8088 (hardcoded)
+  - **Port:** 8088 (configurable)
   - **Features:** Plugin management, MQTT config editing, plugin configuration
-  - **Access:** http://<device_ip>:8088 (no authentication currently)
+  - **Access:** http://<device_ip>:8088 (authentication optional)
 
 ### UI & ViewModels
 - **[app/src/main/java/com/blemqttbridge/ui/](app/src/main/java/com/blemqttbridge/ui/)**

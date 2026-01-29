@@ -15,13 +15,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import com.blemqttbridge.ui.SettingsScreen
-import com.blemqttbridge.ui.SystemSettingsScreen
+import com.blemqttbridge.ui.SettingsScreenNew
 
 /**
  * Main activity for BLE-MQTT Bridge
@@ -62,18 +57,7 @@ class MainActivity : ComponentActivity() {
         
         setContent {
             BleTheme {
-                var showSystemSettings by remember { mutableStateOf(false) }
-                
-                if (showSystemSettings) {
-                    SystemSettingsScreen(
-                        onRequestPermissions = { requestAllPermissions() },
-                        onNavigateBack = { showSystemSettings = false }
-                    )
-                } else {
-                    SettingsScreen(
-                        onNavigateToSystemSettings = { showSystemSettings = true }
-                    )
-                }
+                SettingsScreenNew()
             }
         }
     }

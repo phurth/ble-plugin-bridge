@@ -88,6 +88,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _pluginStatuses = MutableStateFlow<Map<String, BaseBleService.Companion.PluginStatus>>(emptyMap())
     val pluginStatuses: StateFlow<Map<String, BaseBleService.Companion.PluginStatus>> = _pluginStatuses
     
+    // Polling plugin status tracking (for HTTP polling plugins like Peplink)
+    private val _pollingPluginStatuses = MutableStateFlow<Map<String, BaseBleService.Companion.PluginStatus>>(emptyMap())
+    val pollingPluginStatuses: StateFlow<Map<String, BaseBleService.Companion.PluginStatus>> = _pollingPluginStatuses
+    
+    // Derived state: polling is running if we have any polling plugin statuses
+    val pollingRunningStatus: StateFlow<Boolean> = _pollingPluginStatuses.map { 
+        it.isNotEmpty() 
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    
     private val _mqttConnectedStatus = MutableStateFlow(MqttService.connectionStatus.value)
     val mqttConnectedStatus: StateFlow<Boolean> = _mqttConnectedStatus
     
@@ -161,6 +170,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             BaseBleService.bluetoothAvailable.collect {
                 _bluetoothAvailable.value = it
+            }
+        }
+        
+        // Collect polling plugin status updates
+        viewModelScope.launch {
+            BaseBleService.pollingPluginStatuses.collect { statuses ->
+                _pollingPluginStatuses.value = statuses
             }
         }
         
