@@ -1,12 +1,22 @@
 # BLE-MQTT Bridge (Android)
 
-Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture. Available plugins:
+![Version](https://img.shields.io/badge/version-2.6.0--pre1-blue)
+![Android](https://img.shields.io/badge/Android-8.0%2B-green)
+
+Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
+
+## 🔌 Available Plugins
+
+**BLE Plugins:**
 - OneControl RV Control System
-- Micro-Air EasyTouch RV Thermostat
+- Micro-Air EasyTouch RV Thermostat (multi-instance support)
 - GoPower Solar Controller
-- Mopeka Pro Check Fluid Sensors
+- Mopeka Pro Check Fluid Sensors (multi-instance support)
 - Hughes Power Watchdog EPO
 - Basic BLE scanner plugin
+
+**HTTP Polling Plugins:**
+- Peplink Cellular Router (multi-instance support)
 
 Note: I'm able to build and test these plugins since they are components I have in my RV. There's a good chance your RV is different and adjustments will need to be made. Pleaase help other users by submitting an issue or feature request if you encounter problems.
 
@@ -24,30 +34,25 @@ Note: I'm able to build and test these plugins since they are components I have 
 1. Download the latest APK from [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases)
 2. Enable "Install unknown apps" for your browser/file manager
 3. Install the APK
-4. **On first launch:** The app will automatically request required permissions (Location, Bluetooth, Notifications)
-5. **Important:** If desired, configure battery optimization exemption via the System Settings screen (⚙️ icon in top-right)
+4. **On first launch:** Grant required permissions when prompted
 
 ### Initial Configuration
 
-1. Open the app - main service and MQTT toggles will be OFF by default
-2. **Grant permissions:** On first launch, the app will request:
+1. Open the app - the main screen shows service status and configuration options
+2. **Grant permissions:** Tap "Request Permissions" in the Permissions & Optimizations section to grant:
    - **Location** (required for BLE scanning)
    - **Bluetooth Scan/Connect** (Android 12+)
-   - **Notifications** (for foreground service - this helps keep the app from getting killed by the OS)
-3. Tap the **⚙️ Settings icon** (top-right) to:
-   - Enable **Battery Optimization Exemption** (critical for reliable operation on battery-powered devices, especially phones)
-   - Verify all permissions are granted
-4. Return to the main screen and if desired, enable authentication for the web configuration interface and/or change the port used for the web service.
-**All further config will happen in the web UI**
-5. Either click the URL to open the web UI on the Android device, or note the URL and open on any device on the same network.
-6. In the web UI, configure **MQTT broker settings** (expand "Broker Settings"):
-   - Host, Port, Username, Password
+   - **Notifications** (for foreground service)
+3. **Battery Optimization** (battery-powered devices only): If shown, disable battery optimization for reliable background operation
+4. **Web Interface Configuration:** Configure port and authentication if desired
+5. **Access Web UI:** Tap the web interface URL or the open icon to access configuration
+   - Configure **MQTT broker settings** (Host, Port, Username, Password)
    - Topic Prefix: `homeassistant` (recommended for auto-discovery)
-7. Configure your **device plugin settings** (see plugin sections below)
-8. Enable toggles in order: **MQTT → Main Service**
-9. Restarting the device is not necessary, but if things don't start showing up in Home Assistant, you may need to try toggling the main service, or stopping and relaunching the app to get things flowing.
+   - Configure **device plugins** (see plugin sections below)
+   - Enable plugins as needed
+6. Services auto-start with the app - MQTT and BLE services will activate automatically when plugins are configured
 
-> **Note:** Settings are locked while the service toggle is ON. Turn OFF to edit.
+> **Note:** Plugin instances can only be managed through the web interface.
 
 ### Home Assistant Integration
 
@@ -246,6 +251,57 @@ The Hugjes plugin connects to Hughes Power Watchdog EPO surge protectors (e.g., 
 
 - **No data received:** Ensure device is in BLE range (within ~30 feet)
 - **Connection drops:** Verify no other device is connected to the controller and that the device is in range
+
+---
+
+### 🔌 Peplink Cellular Router
+
+The Peplink plugin monitors Peplink cellular routers (e.g., MAX Transit) via HTTP API, tracking WAN status, cellular signal strength, and bandwidth usage. This is an unofficial, community-developed integration not affiliated with or supported by Peplink, and is provided "as-is" without warranty—use at your own risk.
+
+**Note:** This is an HTTP polling plugin, not BLE-based. Multiple instances can be configured to monitor multiple routers.
+
+#### Configuration
+
+- Access the web interface
+- Add a Peplink plugin instance
+- Configure:
+  - **Instance Name:** Unique identifier for this router
+  - **Router IP Address:** Local IP of your Peplink router
+  - **Admin Username/Password:** Router credentials
+  - **Poll Interval:** Update frequency (default: 60 seconds)
+- Enable the instance
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-Instance** | Monitor multiple Peplink routers |
+| **Authentication Tracking** | Monitors API authentication status |
+| **Diagnostic Sensors** | API connection, authentication, and data health |
+
+#### Sensors
+
+| Sensor | Description | Unit |
+|--------|-------------|------|
+| WAN Status | Connection state | text |
+| Signal Strength | Cellular signal (RSSI/RSRP/RSRQ) | dBm |
+| Bandwidth Usage | Current upload/download rates | Mbps |
+| Data Usage | Total data transferred | GB |
+| Connection Uptime | Time connected | hours |
+
+#### Binary Sensors
+
+| Sensor | Description |
+|--------|-------------|
+| API Connected | HTTP API reachability |
+| Authenticated | Login session status |
+| Data Healthy | Valid data being received |
+
+#### Troubleshooting
+
+- **Authentication fails:** Verify router credentials and API access is enabled
+- **Connection drops:** Check network connectivity between Android device and router
+- **No data:** Verify poll interval is reasonable and router is responding
 
 ---
 
