@@ -203,9 +203,13 @@ class PeplinkApiClient(
             val response = httpClient.newCall(request).execute()
             val responseBody = response.body?.string()
 
-            // Check for 401 - session expired, try to re-authenticate once
+            // Check for HTTP 401 - session expired, try to re-authenticate once
             if (response.code == 401) {
-                Log.w(TAG, "Session expired (401), re-authenticating...")
+                Log.w(TAG, "Session expired (HTTP 401), re-authenticating...")
+                // Clear stale cookie
+                authCookie = null
+                isConnected = false
+                
                 ensureConnected(forceReconnect = true).getOrElse { return Result.failure(it) }
 
                 // Retry request with new cookie
@@ -235,6 +239,54 @@ class PeplinkApiClient(
 
             if (!response.isSuccessful || responseBody == null) {
                 return Result.failure(Exception("Request failed: HTTP ${response.code}"))
+            }
+            
+            // CRITICAL: Check for API-level authentication failure
+            // Peplink can return HTTP 200 with {"stat": "fail", "code": 401} when cookie is stale
+            try {
+                val json = JSONObject(responseBody)
+                if (json.optString("stat") == "fail" && json.optInt("code") == 401) {
+                    Log.w(TAG, "API-level 401 detected (stale cookie), re-authenticating...")
+                    // Clear stale cookie
+                    authCookie = null
+                    isConnected = false
+                    
+                    ensureConnected(forceReconnect = true).getOrElse { return Result.failure(it) }
+
+                    // Retry request with new cookie
+                    val retryRequest = Request.Builder()
+                        .url(url)
+                        .addHeader("Cookie", "pauth=$authCookie")
+
+                    if (method == "POST" && body != null) {
+                        retryRequest.post(body.toRequestBody(jsonMediaType))
+                    } else {
+                        retryRequest.get()
+                    }
+
+                    val retryResponse = httpClient.newCall(retryRequest.build()).execute()
+                    val retryBody = retryResponse.body?.string()
+
+                    if (retryResponse.code == 401) {
+                        return Result.failure(Exception("Authentication failed after retry"))
+                    }
+
+                    if (!retryResponse.isSuccessful || retryBody == null) {
+                        return Result.failure(Exception("Request failed after retry: HTTP ${retryResponse.code}"))
+                    }
+                    
+                    // Check retry response for API-level 401 again
+                    val retryJson = JSONObject(retryBody)
+                    if (retryJson.optString("stat") == "fail" && retryJson.optInt("code") == 401) {
+                        Log.e(TAG, "Still getting API-level 401 after reconnect")
+                        return Result.failure(Exception("Unauthorized API response after reconnect (code: 401)"))
+                    }
+
+                    return Result.success(retryBody)
+                }
+            } catch (e: Exception) {
+                // If JSON parsing fails, just return the body as-is (might not be JSON)
+                Log.d(TAG, "Response is not JSON or failed to parse, returning as-is")
             }
 
             Result.success(responseBody)
