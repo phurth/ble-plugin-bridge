@@ -816,9 +816,28 @@ async function confirmAddInstance() {
 
 async function showEditInstanceDialog(instanceId) {
     try {
-        const response = await fetch('/api/instances');
-        const instances = await response.json();
-        const instance = instances.find(i => i.instanceId === instanceId);
+        // Fetch both BLE and polling instances
+        const [instancesResponse, pollingInstancesResponse] = await Promise.all([
+            fetch('/api/instances'),
+            fetch('/api/polling/instances')
+        ]);
+        const instances = await instancesResponse.json();
+        const pollingInstances = await pollingInstancesResponse.json();
+
+        // Merge regular and polling instances
+        const allInstances = [
+            ...instances,
+            ...pollingInstances.map(p => ({
+                instanceId: p.instanceId,
+                pluginType: p.pluginId,
+                deviceMac: '',
+                displayName: p.displayName,
+                config: p.config || {},
+                isPolling: true
+            }))
+        ];
+
+        const instance = allInstances.find(i => i.instanceId === instanceId);
         
         if (!instance) {
             alert('Instance not found');
@@ -833,10 +852,10 @@ async function showEditInstanceDialog(instanceId) {
         // Set up MAC field handlers
         setupMacFieldHandlers('edit-mac');
         
-        // Hide MAC field for BLE Scanner
+        // Hide MAC field for BLE Scanner and polling plugins
         const macContainer = document.getElementById('edit-mac-container');
         if (macContainer) {
-            macContainer.style.display = (instance.pluginType === 'blescanner') ? 'none' : 'block';
+            macContainer.style.display = (instance.pluginType === 'blescanner' || instance.isPolling) ? 'none' : 'block';
         }
         
         // Populate plugin-specific fields
@@ -881,7 +900,9 @@ async function confirmEditInstance() {
     const baseUrlField = document.getElementById('edit-base-url');
     const usernameField = document.getElementById('edit-username');
     const peplinkPasswordField = document.getElementById('edit-peplink-password');
-    const instanceNameField = document.getElementById('edit-instance-name');
+    const statusPollIntervalField = document.getElementById('edit-status-poll-interval');
+    const usagePollIntervalField = document.getElementById('edit-usage-poll-interval');
+    const diagnosticsPollIntervalField = document.getElementById('edit-diagnostics-poll-interval');
     const vpnPollIntervalField = document.getElementById('edit-vpn-poll-interval');
     const gpsPollIntervalField = document.getElementById('edit-gps-poll-interval');
     
@@ -933,13 +954,14 @@ async function confirmEditInstance() {
         }
         config.password = password;
     }
-    if (instanceNameField) {
-        const instanceName = instanceNameField.value.trim();
-        if (!instanceName) {
-            alert('Please enter an instance name');
-            return;
-        }
-        config.instance_name = instanceName;
+    if (statusPollIntervalField) {
+        config.status_poll_interval = statusPollIntervalField.value.trim();
+    }
+    if (usagePollIntervalField) {
+        config.usage_poll_interval = usagePollIntervalField.value.trim();
+    }
+    if (diagnosticsPollIntervalField) {
+        config.diagnostics_poll_interval = diagnosticsPollIntervalField.value.trim();
     }
     if (vpnPollIntervalField) {
         config.vpn_poll_interval = vpnPollIntervalField.value.trim();
@@ -1234,7 +1256,9 @@ function updateEditPluginSpecificFields(pluginType, config) {
         const baseUrl = config?.base_url || '';
         const username = config?.username || '';
         const password = config?.password || '';
-        const instanceName = config?.instance_name || 'main';
+        const statusPollInterval = config?.status_poll_interval || '10';
+        const usagePollInterval = config?.usage_poll_interval || '60';
+        const diagnosticsPollInterval = config?.diagnostics_poll_interval || '30';
         const vpnPollInterval = config?.vpn_poll_interval || '0';
         const gpsPollInterval = config?.gps_poll_interval || '0';
         
@@ -1242,30 +1266,45 @@ function updateEditPluginSpecificFields(pluginType, config) {
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: 500;">Router URL:</label>
                 <input type="text" id="edit-base-url" value="${baseUrl}" placeholder="http://192.168.50.1" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="font-size: 12px; color: #666; margin-top: 4px;">Example: http://192.168.50.1</div>
+                <div style="font-size: 12px; color: #666; margin-top: 4px;">Router's local IP address or hostname</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Admin Username:</label>
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username:</label>
                 <input type="text" id="edit-username" value="${username}" placeholder="admin" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Admin Password:</label>
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
                 <input type="password" id="edit-peplink-password" value="${password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Instance Name:</label>
-                <input type="text" id="edit-instance-name" value="${instanceName}" placeholder="main" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="font-size: 12px; color: #666; margin-top: 4px;">Unique identifier (e.g., "main", "towed")</div>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">VPN Polling Interval (seconds, 0=disabled):</label>
-                <input type="number" id="edit-vpn-poll-interval" value="${vpnPollInterval}" min="0" max="3600" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="font-size: 12px; color: #666; margin-top: 4px;">Monitor PepVPN connection status. Set to 0 to disable.</div>
-            </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">GPS Polling Interval (seconds, 0=disabled):</label>
-                <input type="number" id="edit-gps-poll-interval" value="${gpsPollInterval}" min="0" max="3600" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="font-size: 12px; color: #666; margin-top: 4px;">Privacy: GPS tracking disabled by default. Set to 120+ for tracking, 0 to disable.</div>
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Configuration</label>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">Status Poll (sec)</div>
+                        <input type="number" id="edit-status-poll-interval" value="${statusPollInterval}" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 10</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">Usage Poll (sec)</div>
+                        <input type="number" id="edit-usage-poll-interval" value="${usagePollInterval}" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 60</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">Diagnostics Poll (sec)</div>
+                        <input type="number" id="edit-diagnostics-poll-interval" value="${diagnosticsPollInterval}" min="5" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 30</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">VPN Poll (sec, 0=disabled)</div>
+                        <input type="number" id="edit-vpn-poll-interval" value="${vpnPollInterval}" min="0" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 0 (off)</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 12px; color: #666; margin-bottom: 3px;">GPS Poll (sec, 0=disabled)</div>
+                        <input type="number" id="edit-gps-poll-interval" value="${gpsPollInterval}" min="0" max="3600" style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;">
+                        <div style="font-size: 10px; color: #999; margin-top: 2px;">Default: 0 (off)</div>
+                    </div>
+                </div>
             </div>
         `;
     } else {
