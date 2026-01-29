@@ -248,6 +248,10 @@ class PeplinkPlugin : PollingDevicePlugin {
                 pollingManager!!.onVpnPoll = { pollVpn() }
                 pollingManager!!.onGpsPoll = { pollGps() }
 
+                // Publish online availability when polling starts
+                val baseTopic = getMqttBaseTopic()
+                mqttPublisher.publishAvailability("$baseTopic/availability", true)
+                
                 // Force an immediate poll so data is available at startup
                 try {
                     poll()
@@ -275,6 +279,11 @@ class PeplinkPlugin : PollingDevicePlugin {
     override suspend fun stopPolling() {
         pollingJob?.cancel()
         pollingJob = null
+        
+        // Publish offline availability when polling stops
+        val baseTopic = getMqttBaseTopic()
+        mqttPublisher.publishAvailability("$baseTopic/availability", false)
+        
         Log.i(TAG, "[$instanceId] Polling stopped")
     }
 
@@ -285,11 +294,18 @@ class PeplinkPlugin : PollingDevicePlugin {
             
             // Report API connectivity status
             val connected = statusResult.isSuccess
-            val authenticated = true  // OAuth is handled by apiClient; if we got here, auth succeeded
+            val authenticated = apiClient.isAuthenticated()  // Check actual auth state from API client
             val dataHealthy = statusResult.isSuccess && statusResult.getOrNull()?.isNotEmpty() == true
             
             // Report status to the service for health tracking
             mqttPublisher.updatePluginStatus(instanceId, connected, authenticated, dataHealthy)
+            
+            // Publish availability (online when polling successfully)
+            val baseTopic = getMqttBaseTopic()
+            mqttPublisher.publishAvailability("$baseTopic/availability", true)
+            
+            // Publish diagnostic state to MQTT (for HA binary sensors)
+            publishDiagnosticsState(connected, authenticated, dataHealthy)
             
             if (statusResult.isFailure) {
                 Log.w(TAG, "[$instanceId] API call failed: ${statusResult.exceptionOrNull()?.message}")
@@ -318,6 +334,7 @@ class PeplinkPlugin : PollingDevicePlugin {
             Log.e(TAG, "[$instanceId] Status poll failed", e)
             // Report unhealthy status on exception
             mqttPublisher.updatePluginStatus(instanceId, false, false, false)
+            publishDiagnosticsState(false, false, false)
             Result.failure(e)
         }
     }
@@ -546,11 +563,40 @@ class PeplinkPlugin : PollingDevicePlugin {
         // Get full topic prefix (e.g., "homeassistant")
         val topicPrefix = mqttPublisher.topicPrefix
 
-        // Global diagnostic sensor: Firmware version
+        // Global diagnostic sensors
         run {
             val topicPrefix = mqttPublisher.topicPrefix
             val baseTopic = getMqttBaseTopic()
             val fullBaseTopic = "$topicPrefix/$baseTopic"
+            
+            // Binary diagnostic sensors for connection status
+            val binaryDiagnostics = listOf(
+                Triple("api_connected", "API Connected", "diag/api_connected"),
+                Triple("authenticated", "Authenticated", "diag/authenticated"),
+                Triple("data_healthy", "Data Healthy", "diag/data_healthy")
+            )
+            
+            binaryDiagnostics.forEach { (objectId, name, stateTopic) ->
+                val uniqueId = "${instanceId}_diag_$objectId"
+                val discoveryTopic = "homeassistant/binary_sensor/${instanceId}/$objectId/config"
+                
+                payloads.add(
+                    discoveryTopic to JSONObject().apply {
+                        put("name", name)
+                        put("unique_id", uniqueId)
+                        put("state_topic", "$fullBaseTopic/$stateTopic")
+                        put("payload_on", "ON")
+                        put("payload_off", "OFF")
+                        put("availability_topic", "$fullBaseTopic/availability")
+                        put("payload_available", "online")
+                        put("payload_not_available", "offline")
+                        put("entity_category", "diagnostic")
+                        put("device", deviceInfo)
+                    }.toString()
+                )
+            }
+            
+            // Firmware version sensor
             payloads.add(
                 "homeassistant/sensor/${instanceId}_firmware/config" to JSONObject().apply {
                     put("name", "Router Firmware Version")
@@ -1382,5 +1428,20 @@ class PeplinkPlugin : PollingDevicePlugin {
             5 -> "Peplink eSIM"
             else -> "SIM $slotId"
         }
+    }
+    
+    /**
+     * Publish diagnostic state for plugin health indicators.
+     * These binary sensors show up in HA as diagnostic entities.
+     */
+    private fun publishDiagnosticsState(connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
+        val baseTopic = getMqttBaseTopic()
+        
+        // Publish binary diagnostic states
+        mqttPublisher.publishState("$baseTopic/diag/api_connected", if (connected) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/authenticated", if (authenticated) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
+        
+        Log.d(TAG, "[$instanceId] Published diagnostic state: connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
     }
 }

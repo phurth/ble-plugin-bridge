@@ -38,6 +38,11 @@ class PeplinkApiClient(
     private var authCookie: String? = null  // pauth cookie value
     private var isConnected: Boolean = false
     private val authMutex = Mutex()
+    
+    /**
+     * Check if currently authenticated (has valid session cookie).
+     */
+    fun isAuthenticated(): Boolean = isConnected && authCookie != null
 
     companion object {
         private const val TAG = "PeplinkApiClient"
@@ -59,13 +64,18 @@ class PeplinkApiClient(
      * Thread-safe with mutex to prevent concurrent login attempts.
      */
     private suspend fun ensureConnected(forceReconnect: Boolean = false): Result<Unit> = authMutex.withLock {
+        Log.d(TAG, "ensureConnected called: isConnected=$isConnected, hasCookie=${authCookie != null}, forceReconnect=$forceReconnect")
+        
         if (isConnected && authCookie != null && !forceReconnect) {
+            Log.d(TAG, "Already connected with valid cookie, skipping login")
             return Result.success(Unit)
         }
 
         // Not connected or forced reconnect, authenticate
-        Log.i(TAG, "Authenticating with router...")
-        return login()
+        Log.i(TAG, "Authenticating with router at $baseUrl...")
+        val result = login()
+        Log.i(TAG, "Login result: success=${result.isSuccess}, error=${result.exceptionOrNull()?.message}")
+        return result
     }
 
     /**
@@ -78,14 +88,19 @@ class PeplinkApiClient(
             put("challenge", "challenge")  // Required by Peplink API
         }.toString()
 
+        val loginUrl = "$baseUrl$LOGIN_PATH"
+        Log.d(TAG, "Attempting login to: $loginUrl")
+        
         val request = Request.Builder()
-            .url("$baseUrl$LOGIN_PATH")
+            .url(loginUrl)
             .post(payload.toRequestBody(jsonMediaType))
             .build()
 
         return try {
+            Log.d(TAG, "Executing login request...")
             val response = httpClient.newCall(request).execute()
             val responseBody = response.body?.string()
+            Log.d(TAG, "Login response: code=${response.code}, bodyLength=${responseBody?.length}")
 
             if (response.code == 401) {
                 Log.e(TAG, "Login failed: Invalid credentials (401)")
@@ -148,8 +163,9 @@ class PeplinkApiClient(
             Result.success(Unit)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Login exception: ${e.message}", e)
+            Log.e(TAG, "Login exception: ${e.javaClass.simpleName} - ${e.message}", e)
             isConnected = false
+            authCookie = null
             Result.failure(e)
         }
     }
@@ -160,14 +176,19 @@ class PeplinkApiClient(
      */
     private suspend fun makeAuthenticatedRequest(url: String, method: String = "GET", body: String? = null): Result<String> {
         // Ensure we're connected
-        ensureConnected().getOrElse { return Result.failure(it) }
+        Log.d(TAG, "makeAuthenticatedRequest: $method $url")
+        ensureConnected().getOrElse { 
+            Log.e(TAG, "ensureConnected failed: ${it.message}")
+            return Result.failure(it) 
+        }
 
         val requestBuilder = Request.Builder().url(url)
         
         // Add auth cookie header
         authCookie?.let {
             requestBuilder.addHeader("Cookie", "pauth=$it")
-        }
+            Log.d(TAG, "Added auth cookie to request")
+        } ?: Log.w(TAG, "No auth cookie available!")
 
         // Add body if provided
         if (method == "POST" && body != null) {
