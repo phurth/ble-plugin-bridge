@@ -11,10 +11,11 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * Peplink Router API Client with automatic cookie-based authentication.
+ * Peplink Router API Client with automatic authentication.
  *
  * Handles:
  * - Cookie-based session authentication using admin username/password
+ * - Token-based authentication using client ID/secret
  * - Automatic re-authentication on session expiration (401 errors)
  * - All API endpoint calls (status, control, info)
  * - Error handling and retry logic
@@ -24,7 +25,10 @@ import java.util.concurrent.TimeUnit
 class PeplinkApiClient(
     private val baseUrl: String,  // e.g., "http://192.168.1.1"
     private val username: String,
-    private val password: String
+    private val password: String,
+    private val authMode: AuthMode = AuthMode.USERPASS,
+    private val clientId: String = "",
+    private val clientSecret: String = ""
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -38,15 +42,31 @@ class PeplinkApiClient(
     private var authCookie: String? = null  // pauth cookie value
     private var isConnected: Boolean = false
     private val authMutex = Mutex()
+
+    // Token-based authentication management
+    private var accessToken: String? = null
+    private var tokenExpiresAtMs: Long = 0L
     
     /**
      * Check if currently authenticated (has valid session cookie).
      */
-    fun isAuthenticated(): Boolean = isConnected && authCookie != null
+    fun isAuthenticated(): Boolean = when (authMode) {
+        AuthMode.USERPASS -> isConnected && authCookie != null
+        AuthMode.TOKEN -> accessToken != null && System.currentTimeMillis() < tokenExpiresAtMs
+    }
+
+    /**
+     * Return the token expiration timestamp (ms since epoch) if token auth is in use.
+     */
+    fun getTokenExpiresAtMs(): Long? {
+        if (authMode != AuthMode.TOKEN) return null
+        return if (tokenExpiresAtMs > 0L) tokenExpiresAtMs else null
+    }
 
     companion object {
         private const val TAG = "PeplinkApiClient"
         private const val LOGIN_PATH = "/api/login"
+        private const val TOKEN_GRANT_PATH = "/api/auth.token.grant"
         private const val WAN_STATUS_PATH = "/api/status.wan.connection"
         private const val WAN_USAGE_PATH = "/api/status.wan.connection.allowance"
         private const val WAN_PRIORITY_PATH = "/api/config.wan.connection.priority"
@@ -55,6 +75,12 @@ class PeplinkApiClient(
         private const val STATUS_CLIENT_PATH = "/api/status.client"
         private const val STATUS_PEPVPN_PATH = "/api/status.pepvpn"
         private const val INFO_LOCATION_PATH = "/api/info.location"
+        private const val TOKEN_REFRESH_INTERVAL_MS = 46L * 60L * 60L * 1000L // 46 hours
+    }
+
+    enum class AuthMode {
+        USERPASS,
+        TOKEN
     }
 
     // ===== AUTHENTICATION MANAGEMENT =====
@@ -64,18 +90,44 @@ class PeplinkApiClient(
      * Thread-safe with mutex to prevent concurrent login attempts.
      */
     private suspend fun ensureConnected(forceReconnect: Boolean = false): Result<Unit> = authMutex.withLock {
-        Log.d(TAG, "ensureConnected called: isConnected=$isConnected, hasCookie=${authCookie != null}, forceReconnect=$forceReconnect")
-        
-        if (isConnected && authCookie != null && !forceReconnect) {
-            Log.d(TAG, "Already connected with valid cookie, skipping login")
-            return Result.success(Unit)
-        }
+        return when (authMode) {
+            AuthMode.USERPASS -> {
+                Log.d(TAG, "ensureConnected(USERPASS) called: isConnected=$isConnected, hasCookie=${authCookie != null}, forceReconnect=$forceReconnect")
 
-        // Not connected or forced reconnect, authenticate
-        Log.i(TAG, "Authenticating with router at $baseUrl...")
-        val result = login()
-        Log.i(TAG, "Login result: success=${result.isSuccess}, error=${result.exceptionOrNull()?.message}")
-        return result
+                if (isConnected && authCookie != null && !forceReconnect) {
+                    Log.d(TAG, "Already connected with valid cookie, skipping login")
+                    return@withLock Result.success(Unit)
+                }
+
+                // Not connected or forced reconnect, authenticate
+                Log.i(TAG, "Authenticating with router at $baseUrl...")
+                val result = login()
+                Log.i(TAG, "Login result: success=${result.isSuccess}, error=${result.exceptionOrNull()?.message}")
+                result
+            }
+            AuthMode.TOKEN -> {
+                Log.d(TAG, "ensureConnected(TOKEN) called: hasToken=${accessToken != null}, expiresAt=$tokenExpiresAtMs, forceReconnect=$forceReconnect")
+
+                val now = System.currentTimeMillis()
+                val tokenValid = accessToken != null && now < tokenExpiresAtMs
+                if (tokenValid && !forceReconnect) {
+                    Log.d(TAG, "Already connected with valid token, skipping grant")
+                    return@withLock Result.success(Unit)
+                }
+
+                Log.i(TAG, "Granting access token with router at $baseUrl...")
+                val result = grantToken()
+                Log.i(TAG, "Token grant result: success=${result.isSuccess}, error=${result.exceptionOrNull()?.message}")
+                result
+            }
+        }
+    }
+
+    private fun clearAuthState() {
+        authCookie = null
+        isConnected = false
+        accessToken = null
+        tokenExpiresAtMs = 0L
     }
 
     /**
@@ -169,6 +221,69 @@ class PeplinkApiClient(
             Result.failure(e)
         }
     }
+
+    /**
+     * Grant an API access token using client ID/secret.
+     */
+    private suspend fun grantToken(): Result<Unit> {
+        if (clientId.isBlank() || clientSecret.isBlank()) {
+            return Result.failure(Exception("Token auth requires client ID and client secret"))
+        }
+
+        val payload = JSONObject().apply {
+            put("clientId", clientId)
+            put("clientSecret", clientSecret)
+            put("scope", "api")
+        }.toString()
+
+        val tokenUrl = "$baseUrl$TOKEN_GRANT_PATH"
+        Log.d(TAG, "Attempting token grant: $tokenUrl")
+
+        val request = Request.Builder()
+            .url(tokenUrl)
+            .post(payload.toRequestBody(jsonMediaType))
+            .build()
+
+        return try {
+            val response = httpClient.newCall(request).execute()
+            val responseBody = response.body?.string()
+            Log.d(TAG, "Token grant response: code=${response.code}, bodyLength=${responseBody?.length}")
+
+            if (response.code == 401) {
+                clearAuthState()
+                return Result.failure(Exception("Authentication failed: Invalid client ID/secret"))
+            }
+
+            if (!response.isSuccessful || responseBody == null) {
+                clearAuthState()
+                return Result.failure(Exception("Token grant failed: HTTP ${response.code}"))
+            }
+
+            val json = JSONObject(responseBody)
+            if (json.optString("stat") != "ok") {
+                val errorMsg = json.optString("message", "Unknown error")
+                clearAuthState()
+                return Result.failure(Exception("Token grant failed: $errorMsg"))
+            }
+
+            val token = json.optJSONObject("response")?.optString("accessToken")
+                ?: json.optString("accessToken")
+
+            if (token.isNullOrBlank()) {
+                clearAuthState()
+                return Result.failure(Exception("Token grant failed: No access token received"))
+            }
+
+            accessToken = token
+            tokenExpiresAtMs = System.currentTimeMillis() + TOKEN_REFRESH_INTERVAL_MS
+            Log.i(TAG, "Successfully obtained access token (valid until $tokenExpiresAtMs)")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Token grant exception: ${e.javaClass.simpleName} - ${e.message}", e)
+            clearAuthState()
+            Result.failure(e)
+        }
+    }
     // ===== API CALLS =====
 
     /**
@@ -182,13 +297,15 @@ class PeplinkApiClient(
             return Result.failure(it) 
         }
 
-        val requestBuilder = Request.Builder().url(url)
-        
-        // Add auth cookie header
-        authCookie?.let {
-            requestBuilder.addHeader("Cookie", "pauth=$it")
-            Log.d(TAG, "Added auth cookie to request")
-        } ?: Log.w(TAG, "No auth cookie available!")
+        val requestBuilder = Request.Builder().url(buildAuthenticatedUrl(url))
+
+        // Add auth cookie header for USERPASS mode
+        if (authMode == AuthMode.USERPASS) {
+            authCookie?.let {
+                requestBuilder.addHeader("Cookie", "pauth=$it")
+                Log.d(TAG, "Added auth cookie to request")
+            } ?: Log.w(TAG, "No auth cookie available!")
+        }
 
         // Add body if provided
         if (method == "POST" && body != null) {
@@ -206,16 +323,15 @@ class PeplinkApiClient(
             // Check for HTTP 401 - session expired, try to re-authenticate once
             if (response.code == 401) {
                 Log.w(TAG, "Session expired (HTTP 401), re-authenticating...")
-                // Clear stale cookie
-                authCookie = null
-                isConnected = false
-                
+                clearAuthState()
+
                 ensureConnected(forceReconnect = true).getOrElse { return Result.failure(it) }
 
-                // Retry request with new cookie
-                val retryRequest = Request.Builder()
-                    .url(url)
-                    .addHeader("Cookie", "pauth=$authCookie")
+                val retryRequest = Request.Builder().url(buildAuthenticatedUrl(url))
+
+                if (authMode == AuthMode.USERPASS) {
+                    authCookie?.let { retryRequest.addHeader("Cookie", "pauth=$it") }
+                }
 
                 if (method == "POST" && body != null) {
                     retryRequest.post(body.toRequestBody(jsonMediaType))
@@ -246,17 +362,16 @@ class PeplinkApiClient(
             try {
                 val json = JSONObject(responseBody)
                 if (json.optString("stat") == "fail" && json.optInt("code") == 401) {
-                    Log.w(TAG, "API-level 401 detected (stale cookie), re-authenticating...")
-                    // Clear stale cookie
-                    authCookie = null
-                    isConnected = false
-                    
+                    Log.w(TAG, "API-level 401 detected, re-authenticating...")
+                    clearAuthState()
+
                     ensureConnected(forceReconnect = true).getOrElse { return Result.failure(it) }
 
-                    // Retry request with new cookie
-                    val retryRequest = Request.Builder()
-                        .url(url)
-                        .addHeader("Cookie", "pauth=$authCookie")
+                    val retryRequest = Request.Builder().url(buildAuthenticatedUrl(url))
+
+                    if (authMode == AuthMode.USERPASS) {
+                        authCookie?.let { retryRequest.addHeader("Cookie", "pauth=$it") }
+                    }
 
                     if (method == "POST" && body != null) {
                         retryRequest.post(body.toRequestBody(jsonMediaType))
@@ -274,7 +389,7 @@ class PeplinkApiClient(
                     if (!retryResponse.isSuccessful || retryBody == null) {
                         return Result.failure(Exception("Request failed after retry: HTTP ${retryResponse.code}"))
                     }
-                    
+
                     // Check retry response for API-level 401 again
                     val retryJson = JSONObject(retryBody)
                     if (retryJson.optString("stat") == "fail" && retryJson.optInt("code") == 401) {
@@ -294,6 +409,17 @@ class PeplinkApiClient(
         } catch (e: Exception) {
             Log.e(TAG, "Request exception: ${e.message}", e)
             Result.failure(e)
+        }
+    }
+
+    private fun buildAuthenticatedUrl(url: String): String {
+        if (authMode != AuthMode.TOKEN) return url
+        val token = accessToken ?: return url
+        if (url.contains("accessToken=")) return url
+        return if (url.contains("?")) {
+            "$url&accessToken=$token"
+        } else {
+            "$url?accessToken=$token"
         }
     }
 

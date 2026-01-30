@@ -319,6 +319,7 @@ async function loadInstances() {
                 deviceMac: '',  // Polling plugins don't have MAC
                 displayName: p.displayName,
                 config: p.config || {},  // Include config for display
+                tokenExpiresAtMs: p.tokenExpiresAtMs,
                 isPolling: true
             }))
         ];
@@ -469,6 +470,12 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
                 configDetails += `<div class="instance-detail-line">Polling: Status=${statusPoll}s, Usage=${usagePoll}s, Diag=${diagPoll}s, VPN=${vpnPoll}s, GPS=${gpsPoll}s</div>`;
             }
 
+            const tokenAuthEnabled = pluginType === 'peplink' && instance.config?.auth_mode === 'token';
+            const tokenExpiresAtMs = instance.tokenExpiresAtMs;
+            const tokenRenewLine = tokenAuthEnabled && tokenExpiresAtMs
+                ? `<div class="instance-detail-line">Token renews on: ${new Date(tokenExpiresAtMs).toLocaleString()}</div>`
+                : '';
+
             const buttonsDisabled = isBleSection ? bleEnabled : pollingRunning;
             html += `
                 <div class="instance-card ${healthClass}">
@@ -502,6 +509,7 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
                             | Authenticated: <span class="${authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${authenticated ? 'Yes' : 'No'}</span>
                             | Data: <span class="${dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${dataHealthy ? 'Healthy' : 'Unhealthy'}</span>
                         </div>` : ''}
+                        ${tokenRenewLine}
                     </div>
                 </div>
             `;
@@ -735,16 +743,29 @@ async function confirmAddInstance() {
     } else if (pluginType === 'peplink') {
         // Peplink is a polling plugin - collect REST API config
         let baseUrl = document.getElementById('new-base-url')?.value.trim();
+        const authMode = document.getElementById('new-auth-mode')?.value || 'userpass';
         const username = document.getElementById('new-username')?.value.trim();
         const password = document.getElementById('new-password')?.value.trim();
+        const clientId = document.getElementById('new-client-id')?.value.trim();
+        const clientSecret = document.getElementById('new-client-secret')?.value.trim();
         const statusPollInterval = document.getElementById('new-status-poll-interval')?.value.trim();
         const usagePollInterval = document.getElementById('new-usage-poll-interval')?.value.trim();
         const diagnosticsPollInterval = document.getElementById('new-diagnostics-poll-interval')?.value.trim();
         const vpnPollInterval = document.getElementById('new-vpn-poll-interval')?.value.trim();
         const gpsPollInterval = document.getElementById('new-gps-poll-interval')?.value.trim();
 
-        if (!baseUrl || !username || !password) {
-            alert('Please fill in all required Peplink fields (URL, Username, Password)');
+        if (!baseUrl) {
+            alert('Please enter a router URL');
+            return;
+        }
+
+        if (authMode === 'token') {
+            if (!clientId || !clientSecret) {
+                alert('Please fill in all required Peplink fields (Client ID, Client Secret)');
+                return;
+            }
+        } else if (!username || !password) {
+            alert('Please fill in all required Peplink fields (Username, Password)');
             return;
         }
 
@@ -754,8 +775,14 @@ async function confirmAddInstance() {
         }
 
         config.base_url = baseUrl;
-        config.username = username;
-        config.password = password;
+        config.auth_mode = authMode;
+        if (authMode === 'token') {
+            config.client_id = clientId;
+            config.client_secret = clientSecret;
+        } else {
+            config.username = username;
+            config.password = password;
+        }
         
         // Add polling configuration
         if (statusPollInterval) config.status_poll_interval = statusPollInterval;
@@ -846,6 +873,7 @@ async function showEditInstanceDialog(instanceId) {
         
         document.getElementById('edit-instance-id').value = instanceId;
         document.getElementById('edit-plugin-type').value = instance.pluginType;
+        document.getElementById('edit-is-polling').value = instance.isPolling ? 'true' : 'false';
         document.getElementById('edit-display-name').value = instance.displayName || '';
         setMacAddress('edit-mac', instance.deviceMac || ''); // Set MAC fields
         
@@ -881,8 +909,10 @@ async function confirmEditInstance() {
         alert('Please enter a display name');
         return;
     }
-    // Skip MAC validation for non-BLE plugins (blescanner, peplink)
-    if (!deviceMac && pluginType !== 'blescanner' && pluginType !== 'peplink') {
+    const isPolling = document.getElementById('edit-is-polling')?.value === 'true';
+
+    // Skip MAC validation for non-BLE plugins (blescanner, polling)
+    if (!deviceMac && pluginType !== 'blescanner' && !isPolling) {
         alert('Please enter a device MAC address');
         return;
     }
@@ -905,6 +935,9 @@ async function confirmEditInstance() {
     const diagnosticsPollIntervalField = document.getElementById('edit-diagnostics-poll-interval');
     const vpnPollIntervalField = document.getElementById('edit-vpn-poll-interval');
     const gpsPollIntervalField = document.getElementById('edit-gps-poll-interval');
+    const authModeField = document.getElementById('edit-auth-mode');
+    const clientIdField = document.getElementById('edit-client-id');
+    const clientSecretField = document.getElementById('edit-client-secret');
     
     if (pinField) {
         const pin = pinField.value.trim();
@@ -938,21 +971,33 @@ async function confirmEditInstance() {
         }
         config.base_url = baseUrl;
     }
-    if (usernameField) {
-        const username = usernameField.value.trim();
-        if (!username) {
-            alert('Please enter an admin username');
-            return;
+    if (authModeField) {
+        const authMode = authModeField.value || 'userpass';
+        config.auth_mode = authMode;
+
+        if (authMode === 'token') {
+            const clientId = clientIdField?.value.trim() || '';
+            const clientSecret = clientSecretField?.value.trim() || '';
+            if (!clientId || !clientSecret) {
+                alert('Please enter client ID and client secret');
+                return;
+            }
+            config.client_id = clientId;
+            config.client_secret = clientSecret;
+        } else {
+            const username = usernameField?.value.trim() || '';
+            const password = peplinkPasswordField?.value.trim() || '';
+            if (!username) {
+                alert('Please enter an admin username');
+                return;
+            }
+            if (!password) {
+                alert('Please enter an admin password');
+                return;
+            }
+            config.username = username;
+            config.password = password;
         }
-        config.username = username;
-    }
-    if (peplinkPasswordField) {
-        const password = peplinkPasswordField.value.trim();
-        if (!password) {
-            alert('Please enter an admin password');
-            return;
-        }
-        config.password = password;
     }
     if (statusPollIntervalField) {
         config.status_poll_interval = statusPollIntervalField.value.trim();
@@ -971,7 +1016,8 @@ async function confirmEditInstance() {
     }
     
     try {
-        const response = await fetch('/api/instances/update', {
+        const endpoint = isPolling ? '/api/polling/instances/update' : '/api/instances/update';
+        const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1128,12 +1174,31 @@ function updatePluginSpecificFields() {
                 <div style="margin-top: 4px; font-size: 12px; color: #666;">Router's local IP address or hostname</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username: <span style="color: #f44336;">*</span></label>
-                <input type="text" id="new-username" placeholder="admin" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Auth Mode:</label>
+                <select id="new-auth-mode" onchange="togglePeplinkAuthModeFields('new')" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="userpass">Username / Password (cookie)</option>
+                    <option value="token">Client ID / Secret (token)</option>
+                </select>
             </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password: <span style="color: #f44336;">*</span></label>
-                <input type="password" id="new-password" placeholder="Admin password" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            <div id="new-peplink-userpass-fields">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username: <span style="color: #f44336;">*</span></label>
+                    <input type="text" id="new-username" placeholder="admin" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password: <span style="color: #f44336;">*</span></label>
+                    <input type="password" id="new-password" placeholder="Admin password" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+            </div>
+            <div id="new-peplink-token-fields" style="display:none;">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client ID: <span style="color: #f44336;">*</span></label>
+                    <input type="text" id="new-client-id" placeholder="Client ID" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client Secret: <span style="color: #f44336;">*</span></label>
+                    <input type="password" id="new-client-secret" placeholder="Client Secret" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
             </div>
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Configuration</label>
@@ -1166,6 +1231,7 @@ function updatePluginSpecificFields() {
                 </div>
             </div>
         `;
+        togglePeplinkAuthModeFields('new');
     } else {
         container.innerHTML = '';
     }
@@ -1254,8 +1320,11 @@ function updateEditPluginSpecificFields(pluginType, config) {
         `;
     } else if (pluginType === 'peplink') {
         const baseUrl = config?.base_url || '';
+        const authMode = config?.auth_mode || 'userpass';
         const username = config?.username || '';
         const password = config?.password || '';
+        const clientId = config?.client_id || '';
+        const clientSecret = config?.client_secret || '';
         const statusPollInterval = config?.status_poll_interval || '10';
         const usagePollInterval = config?.usage_poll_interval || '60';
         const diagnosticsPollInterval = config?.diagnostics_poll_interval || '30';
@@ -1269,12 +1338,31 @@ function updateEditPluginSpecificFields(pluginType, config) {
                 <div style="font-size: 12px; color: #666; margin-top: 4px;">Router's local IP address or hostname</div>
             </div>
             <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username:</label>
-                <input type="text" id="edit-username" value="${username}" placeholder="admin" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Auth Mode:</label>
+                <select id="edit-auth-mode" onchange="togglePeplinkAuthModeFields('edit')" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="userpass" ${authMode === 'userpass' ? 'selected' : ''}>Username / Password (cookie)</option>
+                    <option value="token" ${authMode === 'token' ? 'selected' : ''}>Client ID / Secret (token)</option>
+                </select>
             </div>
-            <div style="margin-bottom: 15px;">
-                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
-                <input type="password" id="edit-peplink-password" value="${password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            <div id="edit-peplink-userpass-fields">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Username:</label>
+                    <input type="text" id="edit-username" value="${username}" placeholder="admin" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Password:</label>
+                    <input type="password" id="edit-peplink-password" value="${password}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+            </div>
+            <div id="edit-peplink-token-fields" style="display:none;">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client ID:</label>
+                    <input type="text" id="edit-client-id" value="${clientId}" placeholder="Client ID" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 500;">Client Secret:</label>
+                    <input type="password" id="edit-client-secret" value="${clientSecret}" placeholder="Client Secret" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
             </div>
             <div style="margin-bottom: 15px;">
                 <label style="display: block; margin-bottom: 5px; font-weight: 500;">Polling Configuration</label>
@@ -1307,8 +1395,22 @@ function updateEditPluginSpecificFields(pluginType, config) {
                 </div>
             </div>
         `;
+        togglePeplinkAuthModeFields('edit');
     } else {
         container.innerHTML = '';
+    }
+}
+
+function togglePeplinkAuthModeFields(prefix) {
+    const mode = document.getElementById(`${prefix}-auth-mode`)?.value || 'userpass';
+    const userPassFields = document.getElementById(`${prefix}-peplink-userpass-fields`);
+    const tokenFields = document.getElementById(`${prefix}-peplink-token-fields`);
+
+    if (userPassFields) {
+        userPassFields.style.display = mode === 'userpass' ? 'block' : 'none';
+    }
+    if (tokenFields) {
+        tokenFields.style.display = mode === 'token' ? 'block' : 'none';
     }
 }
 

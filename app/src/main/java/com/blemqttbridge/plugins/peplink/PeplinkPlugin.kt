@@ -28,8 +28,11 @@ import kotlin.math.roundToInt
  *
  * Configuration:
  * - base_url: Router IP/hostname (e.g., "http://192.168.1.1")
- * - username: Admin username for router login
- * - password: Admin password for router login
+ * - auth_mode: "userpass" (default) or "token"
+ * - username: Admin username for router login (userpass mode)
+ * - password: Admin password for router login (userpass mode)
+ * - client_id: Peplink API client ID (token mode)
+ * - client_secret: Peplink API client secret (token mode)
  * - polling_interval: Poll interval in seconds (default: 30)
  * - instance_name: Unique identifier for this router (e.g., "main", "towed")
  */
@@ -43,7 +46,7 @@ class PeplinkPlugin : PollingDevicePlugin {
     // ===== IDENTIFICATION =====
 
     override val pluginId: String = "peplink"
-    override var instanceId: String = "peplink_main"
+    override var instanceId: String = ""  // Set by initializeWithConfig from registry
     override val supportsMultipleInstances: Boolean = true
     override val displayName: String = "Peplink Router"
 
@@ -56,6 +59,9 @@ class PeplinkPlugin : PollingDevicePlugin {
     private var baseUrl: String = ""
     private var username: String = ""
     private var password: String = ""
+    private var authMode: PeplinkApiClient.AuthMode = PeplinkApiClient.AuthMode.USERPASS
+    private var clientId: String = ""
+    private var clientSecret: String = ""
     private var pollingIntervalMs: Long = DEFAULT_POLLING_INTERVAL_MS
     private var instanceName: String = "main"
 
@@ -108,9 +114,13 @@ class PeplinkPlugin : PollingDevicePlugin {
         this.baseUrl = config.getString("base_url", "")
         this.username = config.getString("username", "")
         this.password = config.getString("password", "")
+        val authModeRaw = config.getString("auth_mode", "userpass").lowercase()
+        this.authMode = if (authModeRaw == "token") PeplinkApiClient.AuthMode.TOKEN else PeplinkApiClient.AuthMode.USERPASS
+        this.clientId = config.getString("client_id", "")
+        this.clientSecret = config.getString("client_secret", "")
         this.instanceName = config.getString("instance_name", "main")
         this.pollingIntervalMs = (config.getString("polling_interval", "30").toLongOrNull() ?: 30) * 1000
-        this.instanceId = "peplink_$instanceName"
+        // NOTE: Do NOT override instanceId here - it's set by initializeWithConfig() from the registry
 
         // Load polling configuration
         statusPollInterval = (config.getString("status_poll_interval", "10").toIntOrNull() ?: 10).coerceIn(5, 3600)
@@ -130,7 +140,7 @@ class PeplinkPlugin : PollingDevicePlugin {
         enableUsagePolling = config.getString("enable_usage_polling", "true").toBoolean()
         enableDiagnosticsPolling = config.getString("enable_diagnostics_polling", "true").toBoolean()
 
-        Log.i(TAG, "[$instanceId] Initialized - URL: $baseUrl, Polling: ${pollingIntervalMs}ms")
+        Log.i(TAG, "[$instanceId] Initialized - URL: $baseUrl, Auth: $authMode, Polling: ${pollingIntervalMs}ms")
         Log.i(TAG, "[$instanceId] Polling config: status=${statusPollInterval}s(${if(enableStatusPolling) "ON" else "OFF"}), " +
                 "usage=${usagePollInterval}s(${if(enableUsagePolling) "ON" else "OFF"}), " +
                 "diag=${diagnosticsPollInterval}s(${if(enableDiagnosticsPolling) "ON" else "OFF"}), " +
@@ -149,10 +159,27 @@ class PeplinkPlugin : PollingDevicePlugin {
 
     override fun getPollingInterval(): Long = pollingIntervalMs
 
+    /**
+     * Token expiration timestamp (ms since epoch) for UI display.
+     * Returns null when token auth is not enabled or token has not been granted yet.
+     */
+    fun getTokenExpiresAtMs(): Long? {
+        if (authMode != PeplinkApiClient.AuthMode.TOKEN) return null
+        if (!::apiClient.isInitialized) return null
+        return apiClient.getTokenExpiresAtMs()
+    }
+
     override suspend fun startPolling(mqttPublisher: MqttPublisher): Result<Unit> {
         return try {
             this.mqttPublisher = mqttPublisher
-            this.apiClient = PeplinkApiClient(baseUrl, username, password)
+            this.apiClient = PeplinkApiClient(
+                baseUrl = baseUrl,
+                username = username,
+                password = password,
+                authMode = authMode,
+                clientId = clientId,
+                clientSecret = clientSecret
+            )
 
             Log.i(TAG, "[$instanceId] Starting polling...")
 

@@ -13,6 +13,7 @@ import com.blemqttbridge.core.PollingPluginConfig
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.data.AppSettings
+import com.blemqttbridge.plugins.peplink.PeplinkPlugin
 import com.blemqttbridge.util.ConfigValidator
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.flow.first
@@ -141,6 +142,7 @@ class WebServerManager(
                 uri == "/api/polling/instances" && method == Method.GET -> servePollingInstances()
                 uri == "/api/polling/instances/add" && method == Method.POST -> handlePollingInstanceAdd(session)
                 uri == "/api/polling/instances/remove" && method == Method.POST -> handlePollingInstanceRemove(session)
+                uri == "/api/polling/instances/update" && method == Method.POST -> handlePollingInstanceUpdate(session)
                 uri == "/api/polling/instances/start" && method == Method.POST -> handlePollingInstanceStart(session)
                 uri == "/api/polling/instances/stop" && method == Method.POST -> handlePollingInstanceStop(session)
                 uri == "/api/polling/status" && method == Method.GET -> servePollingStatus()
@@ -1267,7 +1269,7 @@ class WebServerManager(
             val persistedInstances = ServiceStateManager.getAllPollingInstances(context)
             val registry = PluginRegistry.getInstance()
             val jsonArray = JSONArray()
-            val allStatuses = BaseBleService.pluginStatuses.value
+            val allStatuses = BaseBleService.pollingPluginStatuses.value
 
             for ((instanceId, config) in persistedInstances) {
                 // Check if instance is running in memory
@@ -1296,12 +1298,24 @@ class WebServerManager(
                     }
                     put("config", configJson)
                     
-                    // Include health status if available
-                    val status = allStatuses[instanceId]
+                    // Include health status
+                    // Try persisted instanceId first, then running plugin's instanceId (they may differ)
+                    var status = allStatuses[instanceId]
+                    if (status == null && runningPlugin != null) {
+                        status = allStatuses[runningPlugin.instanceId]
+                    }
                     if (status != null) {
                         put("connected", status.connected)
                         put("authenticated", status.authenticated)
                         put("dataHealthy", status.dataHealthy)
+                    }
+
+                    // Include token expiration for Peplink when token auth is in use
+                    if (runningPlugin is PeplinkPlugin) {
+                        val tokenExpiresAtMs = runningPlugin.getTokenExpiresAtMs()
+                        if (tokenExpiresAtMs != null) {
+                            put("tokenExpiresAtMs", tokenExpiresAtMs)
+                        }
                     }
                 }
                 jsonArray.put(instanceJson)
@@ -1402,6 +1416,69 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error adding polling plugin instance", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    /**
+     * Update a polling plugin instance (e.g., Peplink router).
+     */
+    private fun handlePollingInstanceUpdate(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val instanceId = jsonObject.getString("instanceId")
+            val displayName = jsonObject.optString("displayName", null)
+            val config = jsonObject.optJSONObject("config")?.let {
+                val map = mutableMapOf<String, String>()
+                it.keys().forEach { key -> map[key] = it.getString(key) }
+                map
+            }
+
+            val existingInstances = ServiceStateManager.getAllPollingInstances(context)
+            val existingInstance = existingInstances[instanceId] ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND,
+                "application/json",
+                """{"success":false,"error":"Instance not found: $instanceId"}"""
+            )
+
+            // Verify polling is not running before allowing instance configuration
+            val (canEdit, errorMsg) = canEditPlugin(existingInstance.pluginType)
+            if (!canEdit) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"$errorMsg"}"""
+                )
+            }
+
+            val updatedInstance = existingInstance.copy(
+                displayName = displayName ?: existingInstance.displayName,
+                config = config ?: existingInstance.config
+            )
+
+            ServiceStateManager.savePollingInstance(context, updatedInstance)
+            Log.i(TAG, "Polling plugin instance updated via web UI: $instanceId")
+
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true,"instanceId":"$instanceId"}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating polling instance", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",

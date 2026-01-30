@@ -467,6 +467,7 @@ class PluginRegistry {
         return try {
             Log.i(TAG, "Creating polling plugin instance: $instanceId (type: $pluginType)")
             val plugin = factory()
+            plugin.instanceId = instanceId  // Set the instanceId BEFORE initialize
             plugin.initialize(context, config)
 
             // Cache the instance
