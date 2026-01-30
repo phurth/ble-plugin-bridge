@@ -24,6 +24,8 @@ This preserves all data and permissions while updating the binary.
 **Target SDK:** Android 14 (API 34)
 
 ## Recent Changes (Jan 2026)
+- **Peplink UI token renewal (Jan 29):** Token auth now exposes `tokenExpiresAtMs` via `/api/polling/instances`, and the web UI shows “Token renews on …” in plugin health when `auth_mode=token`.
+- **Polling instance IDs:** `PluginRegistry.createPollingPluginInstance()` now sets `instanceId` before `initialize()` so status keys align between persisted config and live plugin status.
 - **Peplink plugin fixes (Jan 29):** Fixed authentication state tracking, added diagnostic binary sensors (API Connected, Authenticated, Data Healthy), added availability topic publishing
 - **Service independence:** Web/MQTT/BLE services fully decoupled; polling (HTTP) plugins report health to UI
 - **Multi-instance support:** EasyTouch, Mopeka, and Peplink support multiple instances

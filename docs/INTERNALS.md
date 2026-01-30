@@ -3,7 +3,7 @@
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
 > **Current Version:** v2.6  
-> **Last Updated:** January 28, 2026  
+> **Last Updated:** January 29, 2026  
 > **Notable Addition:** Service Separation Architecture and Peplink Router Plugin documentation  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
@@ -4386,6 +4386,7 @@ interface MqttPublisher {
 **Features Implemented (v2.6):**
 - ✅ Multi-instance support (main router + towed vehicle)
 - ✅ Cookie-based authentication (username/password)
+- ✅ Token-based authentication (client ID/secret)
 - ✅ 5 independent polling types (configurable intervals)
 - ✅ WAN connection status (Ethernet, Cellular, WiFi, vWAN)
 - ✅ Real-time bandwidth monitoring
@@ -4396,6 +4397,10 @@ interface MqttPublisher {
 - ✅ Priority switching (WAN failover control)
 - ✅ Cellular modem reset capability
 - ✅ ~95 Home Assistant discovery entities per instance
+
+**Recent Updates (Jan 29, 2026):**
+- **Polling instance IDs:** Polling plugins now have `instanceId` set in `PluginRegistry.createPollingPluginInstance()` before `initialize()`. This keeps status keys aligned between persisted config, live plugins, and `/api/status`.
+- **Token renewal visibility:** Peplink token auth exposes `tokenExpiresAtMs` via `/api/polling/instances` and the web UI shows “Token renews on …” when `auth_mode=token`.
 
 ### Architecture: Peplink
 
@@ -4498,14 +4503,13 @@ class PeplinkPollingManager(
 
 **Authentication Flow:**
 ```
-1. PeplinkApiClient initialized with base_url, username, password
+1. PeplinkApiClient initialized with base_url + auth_mode
 2. On first API call:
-   - POST /api/login with credentials
-   - API returns session cookie (set-cookie header)
-   - Cookie cached in memory (PeplinkApiClient)
-3. Subsequent calls include cookie via OkHttp interceptor
-4. If 401 received: Clear cookie, re-authenticate automatically
-5. No manual token refresh needed
+    - USERPASS: POST /api/login, cache session cookie
+    - TOKEN: POST /api/auth.token.grant, cache access token + expiresAt
+3. Subsequent calls include cookie (userpass) or bearer token (token)
+4. If 401 received: clear auth state and re-authenticate automatically
+5. Token mode tracks expiration (tokenExpiresAtMs) for UI display
 ```
 
 **API Endpoint Categories:**
