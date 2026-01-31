@@ -397,7 +397,7 @@ For HAOS users who want remote APK deployment without physical device access, th
 4. Enable USB debugging on device
 5. Start add-on and deploy APKs remotely via `adb connect`
 
-See [haos-addon/README.md](haos-addon/README.md) for detailed setup and usage.
+See [haos-addon/README.md](https://github.com/phurth/hacs-adb-connector) for detailed setup and usage.
 
 ---
 
