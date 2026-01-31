@@ -1362,7 +1362,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                 val attributesJson = JSONObject().apply {
                     put("usage", if (usage.usage != null) "${formatUsageGb(usage.usage)} GB" else "0 GB")
                     put("allowance", if (usage.limit != null) "${formatUsageGb(usage.limit)} GB" else "unlimited")
-                    put("percent_used", if (percent != null) "$percent%" else "0%")
+                    put("percent_used", percent ?: 0)
                     put("start_day", startOrdinal ?: "unknown")
                 }
                 mqttPublisher.publishState("$baseTopic/wan/$connId/usage_attributes", attributesJson.toString())
@@ -1385,7 +1385,7 @@ class PeplinkPlugin : PollingDevicePlugin {
                         val simAttributes = JSONObject().apply {
                             put("usage", if (slot.usage != null) "${formatUsageGb(slot.usage)} GB" else "0 GB")
                             put("allowance", if (slot.limit != null) "${formatUsageGb(slot.limit)} GB" else "unlimited")
-                            put("percent_used", if (simPercent != null) "$simPercent%" else "0%")
+                            put("percent_used", simPercent ?: 0)
                             put("start_day", simStartOrdinal ?: "unknown")
                         }
                         mqttPublisher.publishState("$baseTopic/wan/$connId/sim/$slotId/usage_attributes", simAttributes.toString())
