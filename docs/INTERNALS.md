@@ -941,7 +941,7 @@ The OneControl gateway requires **two sequential authentication steps** during c
 **Key Calculation (4 bytes, BIG_ENDIAN):**
 ```kotlin
 private fun calculateAuthKey(seed: Long): ByteArray {
-    val cypher = 612643285L  // 0x2483FFD5 - hardcoded constant
+    val cypher = REDACTED  // Obtain from official app via reverse engineering
     
     var cypherVar = cypher
     var seedVar = seed
