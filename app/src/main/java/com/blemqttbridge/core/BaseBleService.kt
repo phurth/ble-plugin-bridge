@@ -1397,9 +1397,10 @@ class BaseBleService : Service() {
                         (devicePlugin as? MopekaDevicePlugin)?.apply {
                             setMqttPublisher(mqttPublisher)
                             handleScanResult(device, record)
+                            // Plugin will update its own health status after successful publish
                         }
-                        // Update plugin status to show data is being received
-                        mqttPublisher.updatePluginStatus(instanceId, connected = false, authenticated = false, dataHealthy = true)
+                        // NOTE: Don't set dataHealthy=true here - let passive plugins manage their own health status
+                        // based on whether data was actually successfully parsed and published
                     } ?: Log.w(TAG, "⚠️ No scan record in result!")
                     
                     return  // Continue scanning for more advertisements

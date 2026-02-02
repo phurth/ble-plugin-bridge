@@ -57,6 +57,10 @@ class MopekaDevicePlugin : BleDevicePlugin {
     private val lastSeenTimestamp = mutableMapOf<String, Long>()
     private val offlineDevices = mutableSetOf<String>()
     
+    // Track last successful health update to detect stale data
+    private var lastSuccessfulUpdateMs: Long = 0L
+    private val HEALTH_STALE_TIMEOUT_MS = 2 * 60 * 1000L  // 2 minutes - if no update, health goes bad
+    
     override fun initializeWithConfig(instanceId: String, config: Map<String, String>) {
         this.instanceId = instanceId
         
@@ -290,8 +294,14 @@ class MopekaDevicePlugin : BleDevicePlugin {
     fun handleScanResult(device: BluetoothDevice, scanRecord: ScanRecord?) {
         Log.d(TAG, "📥 handleScanResult called for ${device.address}, scanRecord=${scanRecord != null}")
         
-        // Update last-seen timestamp for this device
+        // Check if plugin health has gone stale (no successful updates in timeout period)
         val currentTime = System.currentTimeMillis()
+        if (lastSuccessfulUpdateMs > 0 && (currentTime - lastSuccessfulUpdateMs) > HEALTH_STALE_TIMEOUT_MS) {
+            Log.w(TAG, "⚠️ Health stale! No successful update for ${currentTime - lastSuccessfulUpdateMs}ms, marking unhealthy")
+            mqttPublisher?.updatePluginStatus(instanceId, connected = false, authenticated = false, dataHealthy = false)
+        }
+        
+        // Update last-seen timestamp for this device
         lastSeenTimestamp[device.address] = currentTime
         
         // If device was previously offline, mark it as back online
@@ -356,23 +366,31 @@ class MopekaDevicePlugin : BleDevicePlugin {
         )
         
         // Publish Home Assistant discovery on first detection
+        Log.d(TAG, "🔍 Discovery check: device=${device.address}, alreadyDiscovered=${discoveredDevices.contains(device.address)}, mqttPublisher=$mqttPublisher")
         if (!discoveredDevices.contains(device.address)) {
+            Log.d(TAG, "🔍 Device NOT in discoveredDevices set, checking mqttPublisher...")
             mqttPublisher?.let { publisher ->
                 Log.i(TAG, "📢 Publishing Home Assistant discovery for ${device.address}")
                 publishDiscovery(device.address, publisher)
                 discoveredDevices.add(device.address)
-            }
+            } ?: Log.w(TAG, "⚠️ mqttPublisher is null! Cannot publish discovery for ${device.address}")
+        } else {
+            Log.d(TAG, "✅ Device ${device.address} already in discoveredDevices, skipping discovery publish")
         }
         
         Log.d(TAG, "📡 Publishing to MQTT...")
         publishToMqtt(sensorData)
         
-        // Update plugin status to show green health indicator
+        // Record successful update for health monitoring
+        lastSuccessfulUpdateMs = System.currentTimeMillis()
+        
+        // Update plugin status to show green health indicator ONLY after successful publish
+        // This ensures health is only green when we're actually receiving and publishing valid data
         mqttPublisher?.updatePluginStatus(
             pluginId = instanceId,
             connected = false,  // Passive plugin, no connection
             authenticated = false,  // Passive plugin, no authentication
-            dataHealthy = true  // We're receiving data
+            dataHealthy = true  // Successfully processed and published data
         )
     }
     
