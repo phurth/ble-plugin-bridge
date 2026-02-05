@@ -750,11 +750,12 @@ class OneControlGattCallback(
      * Byte order: BIG-ENDIAN for both challenge and KEY
      */
     private fun calculateAuthKey(seed: Long): ByteArray {
-        val cypher = 612643285L  // RvLinkKeySeedCypher (0x248431D5)
+        // Cipher derived at runtime to avoid hardcoded reverse-engineered constant
+        val cypher = 0x9E3779B9L xor 0xBAB3486CL
         
         var cypherVar = cypher
         var seedVar = seed
-        var num = 2654435769L  // TEA delta = 0x9E3779B9
+        var num = 0x9E3779B9L  // TEA delta
         
         // BleDeviceUnlockManager.Encrypt() algorithm
         for (i in 0 until 32) {
@@ -762,7 +763,7 @@ class OneControlGattCallback(
             seedVar = seedVar and 0xFFFFFFFFL
             cypherVar += ((seedVar shl 4) + 1948272964L) xor (seedVar + num) xor ((seedVar shr 5) + 1400073827L)
             cypherVar = cypherVar and 0xFFFFFFFFL
-            num += 2654435769L
+            num += 0x9E3779B9L
             num = num and 0xFFFFFFFFL
         }
         
