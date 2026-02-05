@@ -1770,13 +1770,16 @@ class BaseBleService : Service() {
         Log.i(TAG, "Disconnecting all devices (${connectedDevices.size} connected)")
         
         // Create a copy to avoid ConcurrentModificationException
-        for ((_, deviceInfo) in connectedDevices.toList()) {
+        for ((address, deviceInfo) in connectedDevices.toList()) {
             val (gatt, _) = deviceInfo
             try {
-                gatt.disconnect()
-                gatt.close()  // Fully release GATT object to clear stack state
+                gatt?.disconnect()
+                gatt?.close()  // Fully release GATT object to clear stack state
             } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied for disconnect", e)
+                Log.e(TAG, "Permission denied for disconnect: $address", e)
+            } catch (e: Exception) {
+                // Catch DeadObjectException, NPE, etc. when BT stack has crashed
+                Log.e(TAG, "Error disconnecting $address (BT stack may be down): ${e.message}")
             }
         }
         

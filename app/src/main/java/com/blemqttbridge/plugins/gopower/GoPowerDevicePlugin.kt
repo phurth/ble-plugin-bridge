@@ -266,6 +266,7 @@ class GoPowerGattCallback(
                     mainHandler.postDelayed({
                         try {
                             Log.i(TAG, "🔄 Attempting reconnection (retry $gatt133RetryCount)...")
+                            // cleanup() already closed the old GATT and set this.gatt = null
                             val newGatt = device.connectGatt(
                                 context,
                                 false,
@@ -420,6 +421,13 @@ class GoPowerGattCallback(
         isConnected = false
         publishAvailability(false)
         publishDiagnosticsState()
+        // CRITICAL: Close GATT to release client_if and prevent BT stack resource leak
+        try {
+            gatt?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing GATT during cleanup", e)
+        }
+        gatt = null
     }
     
     /**

@@ -282,6 +282,16 @@ class OneControlGattCallback(
         // GATT 133 retry configuration
         private const val MAX_GATT_133_RETRIES = 3
         private const val GATT_133_RETRY_DELAY_MS = 2000L
+        
+        // Auth failure / peer-disconnect backoff configuration
+        // If the gateway peer-terminates (status 19) repeatedly, it means auth is failing.
+        // Use exponential backoff to stop hammering the device and BT stack.
+        private const val MAX_CONSECUTIVE_PEER_DISCONNECTS = 3
+        private const val PEER_DISCONNECT_BACKOFF_BASE_MS = 5000L  // 5s, 10s, 20s, 40s...
+        private const val PEER_DISCONNECT_BACKOFF_MAX_MS = 120000L // Cap at 2 minutes
+        
+        // Auth challenge: all-zeros means gateway is not ready / auth unavailable
+        private val EMPTY_CHALLENGE = byteArrayOf(0, 0, 0, 0)
     }
     
     // Handler for main thread operations
@@ -308,6 +318,11 @@ class OneControlGattCallback(
     
     // GATT 133 retry tracking
     private var gatt133RetryCount = 0
+    
+    // Peer-disconnect (status 19) backoff tracking
+    // Prevents infinite reconnect loop when auth keeps failing
+    private var consecutivePeerDisconnects = 0
+    private var lastPeerDisconnectTime = 0L
     
     // Diagnostic status tracking (for HA sensors)
     private var lastDataTimestampMs: Long = 0L
@@ -549,8 +564,9 @@ class OneControlGattCallback(
                         Log.i(TAG, "Bond state: ${device.bondState}")
                         isConnected = true
                         currentGatt = gatt
-                        // Reset retry counter on successful connection
+                        // Reset retry counters on successful connection
                         gatt133RetryCount = 0
+                        consecutivePeerDisconnects = 0
                         mqttPublisher.updatePluginStatus(instanceId, true, isAuthenticated, false)
                         // Publish online availability status
                         publishAvailability(true)
@@ -578,6 +594,10 @@ class OneControlGattCallback(
                     handler.postDelayed({
                         try {
                             Log.i(TAG, "🔄 Attempting reconnection (retry $gatt133RetryCount)...")
+                            // Close old GATT first to prevent client_if leak
+                            // (cleanup already calls close, but be safe in case currentGatt diverged)
+                            try { currentGatt?.close() } catch (_: Exception) {}
+                            currentGatt = null
                             // Reconnect using same callback
                             val newGatt = device.connectGatt(
                                 context,
@@ -609,9 +629,25 @@ class OneControlGattCallback(
                 onDisconnect(device, status)
             }
             19 -> {
-                Log.e(TAG, "🚫 Peer terminated connection (status 19)")
+                consecutivePeerDisconnects++
+                lastPeerDisconnectTime = System.currentTimeMillis()
+                Log.e(TAG, "🚫 Peer terminated connection (status 19) - consecutive: $consecutivePeerDisconnects")
                 cleanup(gatt)
-                onDisconnect(device, status)
+                
+                if (consecutivePeerDisconnects >= MAX_CONSECUTIVE_PEER_DISCONNECTS) {
+                    // Calculate exponential backoff delay
+                    val backoffMs = (PEER_DISCONNECT_BACKOFF_BASE_MS * 
+                        (1L shl (consecutivePeerDisconnects - MAX_CONSECUTIVE_PEER_DISCONNECTS).coerceAtMost(5)))
+                        .coerceAtMost(PEER_DISCONNECT_BACKOFF_MAX_MS)
+                    Log.w(TAG, "⏸️ Auth appears to be failing ($consecutivePeerDisconnects consecutive peer disconnects)." +
+                        " Backing off ${backoffMs/1000}s before next reconnect attempt.")
+                    // Delay before calling onDisconnect so BaseBleService's reconnect also delays
+                    handler.postDelayed({
+                        onDisconnect(device, status)
+                    }, backoffMs)
+                } else {
+                    onDisconnect(device, status)
+                }
             }
             else -> {
                 Log.e(TAG, "❌ Connection failed with status: $status")
@@ -711,11 +747,10 @@ class OneControlGattCallback(
     
     /**
      * Calculate authentication KEY from challenge using BLE unlock algorithm
-     * Key seed cypher constant: 612643285 (0x2483FFD5)
      * Byte order: BIG-ENDIAN for both challenge and KEY
      */
     private fun calculateAuthKey(seed: Long): ByteArray {
-        val cypher = 612643285L  // MyRvLink RvLinkKeySeedCypher = 0x2483FFD5
+        val cypher = 612643285L  // RvLinkKeySeedCypher (0x248431D5)
         
         var cypherVar = cypher
         var seedVar = seed
@@ -975,6 +1010,13 @@ class OneControlGattCallback(
             // This is the challenge! Calculate and write KEY response
             val challenge = data.joinToString(" ") { "%02X".format(it) }
             Log.i(TAG, "🔑 Step 2: Received challenge: $challenge")
+            
+            // Detect all-zeros challenge = gateway not ready / auth unavailable
+            if (data.contentEquals(EMPTY_CHALLENGE)) {
+                Log.w(TAG, "⚠️ Challenge is all zeros (00 00 00 00) - gateway auth not ready." +
+                    " Skipping auth to avoid infinite loop. Will retry on next connection.")
+                return
+            }
             
             // Calculate KEY using BleDeviceUnlockManager.Encrypt() algorithm
             // Byte order: BIG-ENDIAN for challenge parsing
