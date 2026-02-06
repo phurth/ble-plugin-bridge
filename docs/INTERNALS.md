@@ -4370,9 +4370,283 @@ interface MqttPublisher {
 
 ---
 
-## 10. Peplink Router Plugin
+## 10. Web Service API
 
-### Overview: Peplink
+### Overview
+
+**Location:** `app/src/main/java/com/blemqttbridge/web/WebServerManager.kt`
+
+The application includes an embedded HTTP server (NanoHTTPD) on port **8088** providing a comprehensive REST API for configuration, monitoring, and control. All endpoints require basic authentication (HTTP auth header).
+
+### Endpoint Categories
+
+#### Static Assets (GET)
+- `/ ` or `/index.html` — Main web UI redirect
+- `/web_ui.html` — HTML UI
+- `/web_ui.css` — Stylesheet
+- `/web_ui.js` — JavaScript application code
+
+#### Status & Monitoring (GET)
+
+**`/api/status`** — System status snapshot
+```json
+{
+  "running": boolean,          // BLE service running
+  "bleEnabled": boolean,       // BLE enabled state (reflects service state)
+  "mqttEnabled": boolean,      // MQTT enabled setting
+  "mqttConnected": boolean,    // MQTT currently connected
+  "bleTraceActive": boolean,   // BLE trace logging active
+  "bluetoothAvailable": boolean,
+  "bleScanningActive": boolean,
+  "pluginStatuses": {          // BLE plugin status map
+    "pluginId": {
+      "connected": boolean,
+      "authenticated": boolean,
+      "dataHealthy": boolean
+    }
+  },
+  "pollingPluginStatuses": {   // HTTP polling plugin status map
+    "pluginId": {
+      "connected": boolean,
+      "authenticated": boolean,
+      "dataHealthy": boolean
+    }
+  }
+}
+```
+
+**`/api/config`** — Current application configuration
+```json
+{
+  "mqttBroker": string,
+  "mqttPort": number,
+  "mqttUsername": string,
+  "mqttPassword": string,
+  "mqttTopicPrefix": string,
+  "enabledPlugins": ["onecontrol", "easytouch", "gopower"],
+  "oneControlMacs": [string, ...],
+  "easyTouchMacs": [string, ...],
+  "goPowerMacs": [string, ...]
+}
+```
+
+**`/api/plugins`** — Detailed plugin configuration and status
+```json
+{
+  "onecontrol": {
+    "enabled": boolean,
+    "macAddresses": [string, ...],
+    "gatewayPin": string,
+    "bluetoothPin": string,
+    "connected": boolean,
+    "authenticated": boolean,
+    "dataHealthy": boolean
+  },
+  "easytouch": { ... },
+  "gopower": { ... },
+  "mopeka_<id>": { ... },
+  "blescanner": { ... }
+}
+```
+
+**`/api/logs/debug`** — Text export of debug log (plain/text)
+
+**`/api/logs/ble`** — Text export of BLE trace log (plain/text)
+
+**`/api/instances`** (GET) — List all plugin instances
+```json
+[
+  {
+    "instanceId": string,
+    "pluginType": string,
+    "displayName": string,
+    "deviceMac": string,
+    "config": { /* plugin-specific config */ }
+  }
+]
+```
+
+**`/api/polling/instances`** (GET) — List HTTP polling instances
+```json
+[
+  {
+    "instanceId": string,
+    "pluginType": string,  // e.g., "peplink"
+    "displayName": string,
+    "config": { /* plugin-specific config */ }
+  }
+]
+```
+
+**`/api/polling/status`** (GET) — HTTP polling service status
+```json
+{
+  "running": boolean,
+  "instanceCount": number,
+  "instances": { /* status by instance ID */ }
+}
+```
+
+#### Control Endpoints (POST)
+
+**`/api/control/service`** — Start/stop BLE service
+```json
+REQUEST: { "enable": boolean }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/control/mqtt`** — Start/stop MQTT client
+```json
+REQUEST: { "enable": boolean }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+#### Configuration Endpoints (POST)
+
+**`/api/config/mqtt`** — Update MQTT broker settings
+```json
+REQUEST: {
+  "mqttBroker": string,
+  "mqttPort": number,
+  "mqttUsername": string,
+  "mqttPassword": string,
+  "mqttTopicPrefix": string
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/config/plugin`** — Update BLE plugin configuration
+```json
+REQUEST: {
+  "plugin": "onecontrol" | "easytouch" | "gopower",
+  "enabled": boolean,
+  "macAddress": string,
+  "pin": string,        // OneControl gatewayPin or EasyTouch password
+  "bluetoothPin": string // OneControl bluetooth PIN
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/config/export`** (GET) — Export full application configuration as JSON
+
+**`/api/config/import`** (POST) — Import configuration backup
+```json
+REQUEST: { /* full config JSON from export */ }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+#### BLE Plugin Instance Management (POST)
+
+**`/api/instances/add`** — Create new plugin instance
+```json
+REQUEST: {
+  "instanceId": string,
+  "pluginType": "onecontrol" | "easytouch" | "gopower" | "mopeka",
+  "displayName": string,
+  "deviceMac": string,
+  "config": { /* plugin-specific config */ }
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/instances/remove`** — Delete plugin instance
+```json
+REQUEST: { "instanceId": string }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/instances/update`** — Modify existing instance
+```json
+REQUEST: {
+  "instanceId": string,
+  "displayName": string,
+  "deviceMac": string,
+  "config": { /* plugin-specific config */ }
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+#### HTTP Polling Plugin Management (POST)
+
+**`/api/plugins/add`** — Add HTTP polling plugin instance (deprecated, use `/api/polling/instances/add`)
+```json
+REQUEST: {
+  "pluginType": "peplink",
+  "instanceId": string,
+  "displayName": string,
+  "config": { /* plugin-specific config */ }
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/plugins/remove`** — Remove HTTP polling instance (deprecated, use `/api/polling/instances/remove`)
+
+**`/api/polling/instances/add`** (POST) — Create HTTP polling instance
+```json
+REQUEST: {
+  "instanceId": string,
+  "pluginType": string,
+  "displayName": string,
+  "config": { /* plugin-specific config */ }
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/instances/remove`** (POST) — Delete HTTP polling instance
+```json
+REQUEST: { "instanceId": string }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/instances/update`** (POST) — Modify HTTP polling instance
+```json
+REQUEST: {
+  "instanceId": string,
+  "displayName": string,
+  "config": { /* plugin-specific config */ }
+}
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/instances/start`** (POST) — Start polling for specific instance
+```json
+REQUEST: { "instanceId": string }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/instances/stop`** (POST) — Stop polling for specific instance
+```json
+REQUEST: { "instanceId": string }
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/control/start`** (POST) — Start all HTTP polling
+```json
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+**`/api/polling/control/stop`** (POST) — Stop all HTTP polling
+```json
+RESPONSE: { "success": boolean, "error": string | null }
+```
+
+### Authentication
+
+All endpoints require HTTP Basic Authentication with username/password from settings. The web UI automatically includes credentials in all requests.
+
+### Error Handling
+
+- **400 Bad Request** — Malformed JSON or missing required fields
+- **401 Unauthorized** — Missing or invalid credentials
+- **500 Internal Error** — Server-side exception with error message in JSON response
+
+All error responses include `{"error": "message"}` in the JSON body.
+
+---
+
+## 11. Peplink Router Plugin
+
+### Overview
 
 **Files:**
 - `app/src/main/java/com/blemqttbridge/plugins/peplink/PeplinkPlugin.kt` (main)
