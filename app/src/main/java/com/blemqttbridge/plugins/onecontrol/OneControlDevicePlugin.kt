@@ -466,7 +466,12 @@ class OneControlGattCallback(
         LIGHT("light", "light"),
         COVER_SENSOR("sensor", "cover_state"),  // Cover as state sensor for safety
         TANK_SENSOR("sensor", "tank"),
-        SYSTEM_SENSOR("sensor", "system")
+        SYSTEM_SENSOR("sensor", "system"),
+        GENERATOR_STATE("sensor", "gen_state"),
+        GENERATOR_BATTERY("sensor", "gen_batt"),
+        GENERATOR_TEMP("sensor", "gen_temp"),
+        GENERATOR_QUIET("binary_sensor", "gen_quiet"),
+        RUNTIME_HOURS("sensor", "runtime")
     }
 
     /**
@@ -500,6 +505,9 @@ class OneControlGattCallback(
             EntityType.COVER_SENSOR -> "Cover"
             EntityType.TANK_SENSOR -> "Tank"
             EntityType.SYSTEM_SENSOR -> "Sensor"
+            EntityType.GENERATOR_STATE, EntityType.GENERATOR_BATTERY,
+            EntityType.GENERATOR_TEMP, EntityType.GENERATOR_QUIET,
+            EntityType.RUNTIME_HOURS -> "Generator"
         }
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackType)
         
@@ -1356,6 +1364,11 @@ class OneControlGattCallback(
                 Log.i(TAG, "📦 DimmableLightStatus event")
                 handleDimmableLightStatus(decodedFrame)
             }
+            0x0A -> {
+                // GeneratorGenieStatus
+                Log.i(TAG, "📦 GeneratorGenieStatus event")
+                handleGeneratorGenieStatus(decodedFrame)
+            }
             0x0B -> {
                 // HvacStatus
                 Log.i(TAG, "📦 HvacStatus event")
@@ -1374,7 +1387,7 @@ class OneControlGattCallback(
             0x0F -> {
                 // HourMeterStatus
                 Log.i(TAG, "📦 HourMeterStatus event")
-                handleGenericEvent(decodedFrame, "hour_meter")
+                handleHourMeterStatus(decodedFrame)
             }
             0x10 -> {
                 // Leveler4DeviceStatus
@@ -2008,6 +2021,249 @@ class OneControlGattCallback(
         mqttPublisher.publishState("$baseTopic/system/rtc", json.toString(), true)
     }
     
+    /*
+     * Handle GeneratorGenieStatus event (0x0A)
+     * 
+     * Frame format: 0x0A, tableId, deviceId, status0..status4
+     * BytesPerDevice = 6 (1 deviceId + 5 status bytes)
+     * 
+     * Status byte layout (from LogicalDeviceGeneratorGenieStatus.cs):
+     *   byte 0: bits 0-2 = state enum (OFF=0, PRIMING=1, STARTING=2, RUNNING=3, STOPPING=4)
+     *           bit 7    = QuietHoursActive
+     *   bytes 1-2: BatteryVoltage (unsigned big-endian 8.8 fixed-point, volts)
+     *   bytes 3-4: Temperature (signed big-endian 8.8 fixed-point, °C)
+     *              0x8000 = NOT_SUPPORTED, 0x7FFF = SENSOR_INVALID
+     */
+    private fun handleGeneratorGenieStatus(data: ByteArray) {
+        // Minimum: eventType(1) + tableId(1) + deviceId(1) + 5 status = 8 bytes
+        if (data.size < 8) {
+            Log.w(TAG, "⚠️ GeneratorGenieStatus too short: ${data.size} bytes")
+            return
+        }
+
+        val tableId = data[1].toInt() and 0xFF
+
+        // Iterate over devices (BytesPerDevice = 6 starting at offset 2)
+        var offset = 2
+        while (offset + 6 <= data.size) {
+            val deviceId = data[offset].toInt() and 0xFF
+            val statusByte0 = data[offset + 1].toInt() and 0xFF
+            val battMsb = data[offset + 2].toInt() and 0xFF
+            val battLsb = data[offset + 3].toInt() and 0xFF
+            val tempMsb = data[offset + 4].toInt() and 0xFF
+            val tempLsb = data[offset + 5].toInt() and 0xFF
+            offset += 6
+
+            // Parse state enum (bits 0-2)
+            val stateEnum = statusByte0 and 0x07
+            val stateName = when (stateEnum) {
+                0 -> "off"
+                1 -> "priming"
+                2 -> "starting"
+                3 -> "running"
+                4 -> "stopping"
+                else -> "unknown"
+            }
+            val quietHoursActive = (statusByte0 and 0x80) != 0
+
+            // Battery voltage: unsigned 8.8 fixed-point
+            val batteryVoltage = battMsb + battLsb / 256.0
+
+            // Temperature: signed 8.8 fixed-point
+            val tempRaw = (tempMsb shl 8) or tempLsb
+            val tempSupported = tempRaw != 0x8000.toInt() && tempRaw != 0x7FFF
+            val temperatureC = if (tempSupported) {
+                // Sign-extend 16-bit to Int
+                val signed = if (tempRaw >= 0x8000) tempRaw - 0x10000 else tempRaw
+                signed / 256.0
+            } else {
+                null
+            }
+
+            val isRunning = stateEnum == 3  // RUNNING
+
+            Log.i(TAG, "📦 Generator $tableId:$deviceId state=$stateName batt=${"%.2f".format(batteryVoltage)}V" +
+                    " temp=${temperatureC?.let { "%.1f°C".format(it) } ?: "N/A"}" +
+                    " quietHours=$quietHoursActive")
+
+            // --- Entity 1: Generator State sensor ---
+            publishEntityState(
+                entityType = EntityType.GENERATOR_STATE,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = "gen_state_${"%02x%02x".format(tableId, deviceId)}",
+                state = mapOf(
+                    "generator_state" to stateName,
+                    "generator_running" to if (isRunning) "ON" else "OFF"
+                )
+            ) { friendlyName, deviceAddr, prefix, baseTopic ->
+                val stateTopic = "$baseTopic/device/$tableId/$deviceId/generator_state"
+                val attrTopic = "$baseTopic/device/$tableId/$deviceId/generator_attributes"
+                discoveryBuilder.buildGeneratorStateSensor(
+                    deviceAddr = deviceAddr,
+                    deviceName = friendlyName,
+                    stateTopic = "$prefix/$stateTopic",
+                    attributesTopic = "$prefix/$attrTopic"
+                )
+            }
+
+            // Publish generator attributes (quiet hours, raw status byte)
+            val baseTopic = "onecontrol/${device.address}"
+            val prefix = mqttPublisher.topicPrefix
+            val attrJson = JSONObject().apply {
+                put("quiet_hours", quietHoursActive)
+                put("status_byte", "0x${statusByte0.toString(16).uppercase().padStart(2, '0')}")
+            }
+            mqttPublisher.publishState(
+                "$prefix/$baseTopic/device/$tableId/$deviceId/generator_attributes",
+                attrJson.toString(), true
+            )
+
+            // --- Entity 2: Battery Voltage sensor ---
+            publishEntityState(
+                entityType = EntityType.GENERATOR_BATTERY,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = "gen_batt_${"%02x%02x".format(tableId, deviceId)}",
+                state = mapOf("battery_voltage" to "%.2f".format(batteryVoltage))
+            ) { friendlyName, deviceAddr, prefix2, baseTopic2 ->
+                val bStateTopic = "$baseTopic2/device/$tableId/$deviceId/battery_voltage"
+                discoveryBuilder.buildSensor(
+                    sensorName = "$friendlyName Battery",
+                    stateTopic = "$prefix2/$bStateTopic",
+                    unit = "V",
+                    deviceClass = "voltage",
+                    icon = "mdi:car-battery"
+                )
+            }
+
+            // --- Entity 3: Temperature sensor (only if supported) ---
+            if (tempSupported && temperatureC != null) {
+                publishEntityState(
+                    entityType = EntityType.GENERATOR_TEMP,
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    discoveryKey = "gen_temp_${"%02x%02x".format(tableId, deviceId)}",
+                    state = mapOf("generator_temperature" to "%.1f".format(temperatureC))
+                ) { friendlyName, deviceAddr, prefix2, baseTopic2 ->
+                    val tStateTopic = "$baseTopic2/device/$tableId/$deviceId/generator_temperature"
+                    discoveryBuilder.buildSensor(
+                        sensorName = "$friendlyName Temperature",
+                        stateTopic = "$prefix2/$tStateTopic",
+                        unit = "°C",
+                        deviceClass = "temperature",
+                        icon = "mdi:thermometer"
+                    )
+                }
+            }
+
+            // --- Entity 4: Quiet Hours binary sensor ---
+            publishEntityState(
+                entityType = EntityType.GENERATOR_QUIET,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = "gen_quiet_${"%02x%02x".format(tableId, deviceId)}",
+                state = mapOf("quiet_hours" to if (quietHoursActive) "ON" else "OFF")
+            ) { friendlyName, deviceAddr, prefix2, baseTopic2 ->
+                val qStateTopic = "$baseTopic2/device/$tableId/$deviceId/quiet_hours"
+                discoveryBuilder.buildBinarySensor(
+                    deviceAddr = deviceAddr,
+                    deviceName = "$friendlyName Quiet Hours",
+                    stateTopic = "$prefix2/$qStateTopic",
+                    icon = "mdi:volume-off"
+                )
+            }
+        }
+    }
+
+    /*
+     * Handle HourMeterStatus event (0x0F)
+     * 
+     * Frame format: 0x0F, tableId, deviceId, opSec3..opSec0, statusBits
+     * BytesPerDevice = 6 (1 deviceId + 5 status bytes)
+     * 
+     * Status byte layout (from LogicalDeviceHourMeterStatus.cs):
+     *   bytes 0-3: OperatingSeconds (unsigned big-endian uint32)
+     *   byte 4: status bits
+     *     bit 0 = Running
+     *     bit 1 = MaintenanceDue
+     *     bit 2 = MaintenancePastDue
+     *     bit 3 = Stopping
+     *     bit 4 = Starting
+     *     bit 5 = Error
+     */
+    private fun handleHourMeterStatus(data: ByteArray) {
+        // Minimum: eventType(1) + tableId(1) + deviceId(1) + 5 status = 8 bytes
+        if (data.size < 8) {
+            Log.w(TAG, "⚠️ HourMeterStatus too short: ${data.size} bytes")
+            handleGenericEvent(data, "hour_meter")
+            return
+        }
+
+        val tableId = data[1].toInt() and 0xFF
+
+        // Iterate over devices (BytesPerDevice = 6 starting at offset 2)
+        var offset = 2
+        while (offset + 6 <= data.size) {
+            val deviceId = data[offset].toInt() and 0xFF
+            val opSec = ((data[offset + 1].toInt() and 0xFF).toLong() shl 24) or
+                        ((data[offset + 2].toInt() and 0xFF).toLong() shl 16) or
+                        ((data[offset + 3].toInt() and 0xFF).toLong() shl 8) or
+                        ((data[offset + 4].toInt() and 0xFF).toLong())
+            val statusBits = data[offset + 5].toInt() and 0xFF
+            offset += 6
+
+            val running = (statusBits and 0x01) != 0
+            val maintenanceDue = (statusBits and 0x02) != 0
+            val maintenancePastDue = (statusBits and 0x04) != 0
+            val stopping = (statusBits and 0x08) != 0
+            val starting = (statusBits and 0x10) != 0
+            val error = (statusBits and 0x20) != 0
+
+            val runtimeHours = opSec / 3600.0
+
+            Log.i(TAG, "📦 HourMeter $tableId:$deviceId runtime=${"%.1f".format(runtimeHours)}h" +
+                    " ($opSec sec) running=$running maint=$maintenanceDue error=$error")
+
+            // --- Runtime Hours sensor ---
+            publishEntityState(
+                entityType = EntityType.RUNTIME_HOURS,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = "runtime_${"%02x%02x".format(tableId, deviceId)}",
+                state = mapOf("runtime_hours" to "%.1f".format(runtimeHours))
+            ) { friendlyName, deviceAddr, prefix, baseTopic ->
+                val stateTopic = "$baseTopic/device/$tableId/$deviceId/runtime_hours"
+                val attrTopic = "$baseTopic/device/$tableId/$deviceId/runtime_attributes"
+                discoveryBuilder.buildSensor(
+                    sensorName = "$friendlyName Runtime",
+                    stateTopic = "$prefix/$stateTopic",
+                    unit = "h",
+                    deviceClass = "duration",
+                    icon = "mdi:timer-cog-outline"
+                )
+            }
+
+            // Publish runtime attributes
+            val baseTopic = "onecontrol/${device.address}"
+            val prefix = mqttPublisher.topicPrefix
+            val attrJson = JSONObject().apply {
+                put("operating_seconds", opSec)
+                put("running", running)
+                put("starting", starting)
+                put("stopping", stopping)
+                put("maintenance_due", maintenanceDue)
+                put("maintenance_past_due", maintenancePastDue)
+                put("error", error)
+                put("status_bits", "0x${statusBits.toString(16).uppercase().padStart(2, '0')}")
+            }
+            mqttPublisher.publishState(
+                "$prefix/$baseTopic/device/$tableId/$deviceId/runtime_attributes",
+                attrJson.toString(), true
+            )
+        }
+    }
+
     /**
      * Handle any generic/unknown event - DESIGN: publish everything so nothing is lost
      */

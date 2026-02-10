@@ -86,6 +86,38 @@ object HomeAssistantMqttDiscovery {
         }
         
         /**
+         * Build generator state sensor discovery payload
+         * Includes json_attributes_topic for quiet hours, raw status byte, etc.
+         */
+        fun buildGeneratorStateSensor(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            attributesTopic: String? = null
+        ): JSONObject {
+            return getGeneratorStateSensorDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, attributesTopic, appVersion
+            )
+        }
+        
+        /**
+         * Build binary sensor discovery payload
+         */
+        fun buildBinarySensor(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            deviceClass: String? = null,
+            icon: String? = null
+        ): JSONObject {
+            return getBinarySensorDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, deviceClass, icon, appVersion
+            )
+        }
+        
+        /**
          * Get discovery topic for an entity
          */
         fun getDiscoveryTopic(component: String, topicPrefix: String, deviceAddr: Int): String {
@@ -362,6 +394,64 @@ object HomeAssistantMqttDiscovery {
             
             // Optional attributes
             unit?.let { put("unit_of_measurement", it) }
+            deviceClass?.let { put("device_class", it) }
+            icon?.let { put("icon", it) }
+        }
+    }
+    
+    /**
+     * Generate discovery config for a generator state sensor
+     * State values: off, priming, starting, running, stopping
+     */
+    fun getGeneratorStateSensorDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        stateTopic: String,
+        attributesTopic: String? = null,
+        appVersion: String? = null
+    ): JSONObject {
+        val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_gen_state_${deviceAddr.toString(16)}"
+        val objectId = "gen_state_${deviceAddr.toString(16).padStart(4, '0')}"
+        
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("default_entity_id", "sensor.$objectId")
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+            
+            put("state_topic", stateTopic)
+            put("icon", "mdi:engine")
+            
+            attributesTopic?.let { put("json_attributes_topic", it) }
+        }
+    }
+    
+    /**
+     * Generate discovery config for a binary sensor
+     */
+    fun getBinarySensorDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        stateTopic: String,
+        deviceClass: String? = null,
+        icon: String? = null,
+        appVersion: String? = null
+    ): JSONObject {
+        val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_bin_${sanitizeName(deviceName)}"
+        val objectId = "bin_${sanitizeName(deviceName)}"
+        
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("default_entity_id", "binary_sensor.$objectId")
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+            
+            put("state_topic", stateTopic)
+            put("payload_on", "ON")
+            put("payload_off", "OFF")
+            
             deviceClass?.let { put("device_class", it) }
             icon?.let { put("icon", it) }
         }
