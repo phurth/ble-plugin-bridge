@@ -2097,12 +2097,15 @@ class OneControlGattCallback(
         
         if (commandType == null) {
             Log.w(TAG, "📦 Unknown cmdId $commandId, trying to infer")
-            // Try to infer from data structure
+            // Try to infer from data structure - check first entry's protocol byte
+            // Official app uses protocol: 0=None, 1=Host, 2=IdsCan
+            // Host (1) with payloadSize 0 or 17, and IdsCan (2) with payloadSize 17
+            // are both valid metadata responses
             if (data.size >= 8) {
                 val protocol = data[7].toInt() and 0xFF
                 val payloadSize = if (data.size > 8) data[8].toInt() and 0xFF else 0
-                if (protocol == 2 && payloadSize == 17) {
-                    Log.i(TAG, "📦 Inferred GetDevicesMetadata")
+                if (protocol in 1..2 && (payloadSize == 0 || payloadSize == 17)) {
+                    Log.i(TAG, "📦 Inferred GetDevicesMetadata (protocol=$protocol, payloadSize=$payloadSize)")
                     handleGetDevicesMetadataResponse(data)
                     return
                 }
@@ -2169,8 +2172,13 @@ class OneControlGattCallback(
             val deviceId = (startId + index) and 0xFF
             val deviceAddr = (tableId shl 8) or deviceId
             
-            if (protocol == 2 && payloadSize == 17) {
-                // Function name is BIG-ENDIAN (high byte first)
+            // Official app protocol dispatch:
+            //   Protocol 0 (None): bare entry, no function name
+            //   Protocol 1 (Host): payloadSize=0 → default func=323/inst=15; payloadSize=17 → IDS CAN fields
+            //   Protocol 2 (IdsCan): payloadSize=17 → standard IDS CAN metadata
+            // Both protocol 1 and 2 with payloadSize=17 have identical field layout
+            if ((protocol == 1 || protocol == 2) && payloadSize == 17) {
+                // Function name is BIG-ENDIAN (high byte first) - confirmed from official app
                 val funcNameHi = data[offset + 2].toInt() and 0xFF
                 val funcNameLo = data[offset + 3].toInt() and 0xFF
                 val funcName = (funcNameHi shl 8) or funcNameLo
@@ -2186,7 +2194,7 @@ class OneControlGattCallback(
                     friendlyName = friendlyName
                 )
                 
-                Log.i(TAG, "📋 [$tableId:$deviceId] fn=$funcName ($friendlyName)")
+                Log.i(TAG, "📋 [$tableId:$deviceId] proto=$protocol fn=$funcName ($friendlyName)")
                 
                 // Publish metadata to MQTT
                 val json = JSONObject()
@@ -2195,6 +2203,7 @@ class OneControlGattCallback(
                 json.put("function_name", funcName)
                 json.put("function_instance", funcInstance)
                 json.put("friendly_name", friendlyName)
+                json.put("protocol", protocol)
                 mqttPublisher.publishState(
                     "onecontrol/${device.address}/device/$tableId/$deviceId/metadata",
                     json.toString(), true
@@ -2202,6 +2211,23 @@ class OneControlGattCallback(
                 
                 // Re-publish HA discovery with friendly name
                 republishDiscoveryWithFriendlyName(tableId, deviceId, friendlyName)
+            } else if (protocol == 1 && payloadSize == 0) {
+                // Host device with no IDS CAN metadata - default Gateway proxy
+                val funcName = 323  // Gateway RVLink (0x0143)
+                val funcInstance = 15
+                val friendlyName = FunctionNameMapper.getFriendlyName(funcName, funcInstance)
+                
+                deviceMetadata[deviceAddr] = DeviceMetadata(
+                    deviceTableId = tableId,
+                    deviceId = deviceId,
+                    functionName = funcName,
+                    functionInstance = funcInstance,
+                    friendlyName = friendlyName
+                )
+                
+                Log.i(TAG, "📋 [$tableId:$deviceId] proto=Host(default) fn=$funcName ($friendlyName)")
+            } else {
+                Log.d(TAG, "📋 [$tableId:$deviceId] skipped: proto=$protocol payloadSize=$payloadSize")
             }
             
             offset += entrySize

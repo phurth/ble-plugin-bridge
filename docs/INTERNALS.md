@@ -1830,7 +1830,19 @@ private fun encodeGetDevicesMetadataCommand(commandId: UShort, deviceTableId: By
 
 #### Response Parsing (Event Type 0x02)
 
-The gateway responds with metadata entries containing function names:
+The gateway responds with metadata entries containing function names. Each entry starts
+with a protocol byte and payload size:
+
+**Protocol Variants** (from official app `MyRvLinkDeviceProtocol` enum):
+- **Protocol 0 (None):** Bare entry, no function name to extract
+- **Protocol 1 (Host):** payloadSize=0 → default func=323 "Gateway RVLink", instance=15; payloadSize=17 → same IDS CAN field layout as protocol 2
+- **Protocol 2 (IdsCan):** payloadSize=17 → standard IDS CAN metadata with function name, instance, capability, version, circuit ID, software part number
+
+**CRITICAL FIX (2026-02-10):** Previously the parser only handled `protocol == 2 && payloadSize == 17`,
+silently skipping all protocol=1 (Host) entries. Some gateway variants (e.g., tableId=0x04) may
+use Host protocol entries with payloadSize=17 that contain valid IDS CAN function names.
+The official app (`MyRvLinkDeviceMetadata.TryDecodeFromRawBuffer`) handles all three protocols.
+Fix: accept protocol 1 AND 2 with payloadSize=17 for function name extraction.
 
 ```kotlin
 private fun handleGetDevicesMetadataResponse(data: ByteArray) {
@@ -1845,7 +1857,10 @@ private fun handleGetDevicesMetadataResponse(data: ByteArray) {
         val protocol = data[offset].toInt() and 0xFF
         val payloadSize = data[offset + 1].toInt() and 0xFF
         
-        if (protocol == 2 && payloadSize == 17) {  // IDS CAN device
+        // Official app protocol dispatch:
+        //   Protocol 1 (Host) with payloadSize=17: same fields as IdsCan
+        //   Protocol 2 (IdsCan) with payloadSize=17: standard metadata
+        if ((protocol == 1 || protocol == 2) && payloadSize == 17) {
             // CRITICAL: Function name is BIG-ENDIAN (unlike rest of protocol)
             val funcNameHi = data[offset + 2].toInt() and 0xFF
             val funcNameLo = data[offset + 3].toInt() and 0xFF
@@ -1869,6 +1884,9 @@ private fun handleGetDevicesMetadataResponse(data: ByteArray) {
             
             // Update any already-published entities with friendly name
             republishDiscoveryWithFriendlyName(tableId, deviceId, friendlyName)
+        } else if (protocol == 1 && payloadSize == 0) {
+            // Host device with no IDS CAN metadata - default Gateway proxy
+            // func=323 "Gateway RVLink", instance=15
         }
         
         offset += payloadSize + 2
