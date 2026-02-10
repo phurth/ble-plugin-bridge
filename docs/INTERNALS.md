@@ -1312,7 +1312,15 @@ private fun handleDimmableLightStatus(data: ByteArray) {
     val tableId = data[1].toInt() and 0xFF
     val deviceId = data[2].toInt() and 0xFF
     val modeByte = data[3].toInt() and 0xFF   // 0=Off, 1=On, 2=Blink, 3=Swell
-    val brightness = data[4].toInt() and 0xFF // 0-255
+    // Brightness per official app's LogicalDeviceLightDimmableStatus:
+    // 11-byte frame: [event][tableId][deviceId][8 status bytes]
+    //   statusBytes[0]=Mode, [1]=MaxBrightness, [2]=Duration, [3]=Brightness
+    // 5-byte legacy frame: [event][tableId][deviceId][mode][brightness]
+    val brightness = if (data.size >= 7) {
+        data[6].toInt() and 0xFF  // 11-byte: actual brightness at statusBytes[3]
+    } else {
+        data[4].toInt() and 0xFF  // 5-byte legacy: brightness at data[4]
+    }
     val isOn = modeByte > 0
     
     // Pending guard: suppress mismatching status during command execution
@@ -4026,7 +4034,13 @@ private fun handleDimmableLightStatus(data: ByteArray) {
     val tableId = data[1].toInt() and 0xFF
     val deviceId = data[2].toInt() and 0xFF
     val modeByte = data[3].toInt() and 0xFF
-    val brightness = data[4].toInt() and 0xFF
+    // 11-byte frame: brightness at data[6] (statusBytes[3])
+    // 5-byte legacy: brightness at data[4]
+    val brightness = if (data.size >= 7) {
+        data[6].toInt() and 0xFF
+    } else {
+        data[4].toInt() and 0xFF
+    }
     
     // Create entity instance
     val entity = OneControlEntity.DimmableLight(

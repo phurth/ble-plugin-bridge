@@ -1553,8 +1553,19 @@ class OneControlGattCallback(
         
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
-        val modeByte = data[3].toInt() and 0xFF  // Mode byte: 0=Off, 1=On, 2=Blink, 3=Swell
-        val brightness = data[4].toInt() and 0xFF  // Brightness: 0-255
+        val modeByte = data[3].toInt() and 0xFF  // Mode byte (statusBytes[0]): 0=Off, 1=On, 2=Blink, 3=Swell
+        
+        // Brightness extraction per official app's LogicalDeviceLightDimmableStatus:
+        // 11-byte frame: [event][tableId][deviceId][8 status bytes]
+        //   statusBytes[0]=Mode, [1]=MaxBrightness, [2]=Duration, [3]=Brightness
+        //   data[3]=Mode, data[4]=MaxBrightness, data[5]=Duration, data[6]=Brightness
+        // 5-byte frame (legacy): [event][tableId][deviceId][mode][brightness]
+        //   data[3]=Mode, data[4]=Brightness
+        val brightness = if (data.size >= 7) {
+            data[6].toInt() and 0xFF  // 11-byte frame: actual brightness at statusBytes[3]
+        } else {
+            data[4].toInt() and 0xFF  // 5-byte legacy frame: brightness at data[4]
+        }
         
         // Create entity instance
         val entity = OneControlEntity.DimmableLight(
