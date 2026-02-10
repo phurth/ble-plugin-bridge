@@ -466,6 +466,10 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "Starting status polling loop (${STATUS_POLL_INTERVAL_MS}ms interval)")
         isPollingActive = true
+        
+        // Defensive: Reset timestamp when polling starts to prevent stale values after service restart
+        lastSuccessfulOperationTime = System.currentTimeMillis()
+        
         publishDiagnosticsState(isConnected = true)
         
         // Request first status immediately, then continue on interval
@@ -819,6 +823,8 @@ class EasyTouchGattCallback(
                     Log.d(TAG, "Status update suppressed (command in progress)")
                 } else {
                     publishState(state)
+                    // Update health status to reflect current operational state
+                    publishDiagnosticsState(isConnected = true)
                     Log.i(TAG, "Status update received and published")
                 }
             }
@@ -833,6 +839,8 @@ class EasyTouchGattCallback(
                 // Skip publishing if status updates are suppressed (command in progress)
                 if (!isStatusSuppressed) {
                     publishState(state)
+                    // Update health status to reflect current operational state
+                    publishDiagnosticsState(isConnected = true)
                 }
             }
             type == "Change Result" || (type == "Response" && responseType == "Change") -> {

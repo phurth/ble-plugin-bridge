@@ -2444,6 +2444,60 @@ private val watchdogRunnable = object : Runnable {
 
 The `shouldContinue` flag prevents infinite loops when cleanup is triggered.
 
+### Health Status Reporting
+
+The plugin maintains three health indicators for UI display and Home Assistant integration:
+- **`connected`**: GATT connection established
+- **`authenticated`**: Protocol authentication successful (password write acknowledged)
+- **`dataHealthy`**: Actively receiving status responses
+
+**Critical:** Health status must be updated on every successful status poll, not just at startup, to ensure the UI accurately reflects the current operational state even after transient issues or service restarts.
+
+**Implementation:**
+
+1. **On Every Status Poll** (every 4 seconds):
+   ```kotlin
+   // In handleJsonResponse() after parsing status
+   type == "Response" && responseType == "Status" -> {
+       val state = parseMultiZoneStatus(json)
+       currentState = state
+       lastSuccessfulOperationTime = System.currentTimeMillis()
+       
+       if (!isStatusSuppressed) {
+           publishState(state)
+           // Update health status to reflect current operational state
+           publishDiagnosticsState(isConnected = true)
+       }
+   }
+   ```
+
+2. **On Polling Start** (defensive initialization):
+   ```kotlin
+   private fun startStatusPolling() {
+       isPollingActive = true
+       
+       // Defensive: Reset timestamp when polling starts 
+       // to prevent stale values after service restart
+       lastSuccessfulOperationTime = System.currentTimeMillis()
+       
+       publishDiagnosticsState(isConnected = true)
+       
+       // Request first status immediately, then continue on interval
+       mainHandler.postDelayed({
+           statusPollRunnable.run()
+       }, EasyTouchConstants.AUTH_STEP_DELAY_MS)
+   }
+   ```
+
+**Why This Matters:**
+
+Without updating health status on every poll, a transient issue (BLE dropout, brief authentication failure) could leave the health flags set to `false` permanently, even after the connection recovers and begins polling successfully. This causes:
+- UI to show "unhealthy" even though data is flowing
+- Watchdog may incorrectly attempt recovery despite active polling
+- Home Assistant availability status becomes out-of-sync with actual device state
+
+By publishing diagnostic state with each 4-second status poll, the health indicators automatically recover and stay current with the actual operational state.
+
 ### Optimistic State Updates & Status Suppression
 
 When a user changes a setpoint in Home Assistant, the plugin immediately publishes the new value to MQTT before sending the command to the device. This provides instant UI feedback and prevents the "bounce-back" issue where stale status data overwrites the command.
