@@ -136,11 +136,12 @@ object HomeAssistantMqttDiscovery {
             deviceAddr: Int,
             deviceName: String,
             baseTopic: String,
-            commandBaseTopic: String
+            commandBaseTopic: String,
+            includePresets: Boolean = false
         ): JSONObject {
             return getClimateDiscovery(
                 gatewayMac, deviceAddr, deviceName,
-                baseTopic, commandBaseTopic, appVersion
+                baseTopic, commandBaseTopic, includePresets, appVersion
             )
         }
         
@@ -553,6 +554,7 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         baseTopic: String,
         commandBaseTopic: String,
+        includePresets: Boolean = false,
         appVersion: String? = null
     ): JSONObject {
         val macClean = gatewayMac.replace(":", "").lowercase()
@@ -570,10 +572,12 @@ object HomeAssistantMqttDiscovery {
             put("modes", JSONArray(listOf("off", "heat", "cool", "heat_cool")))
             put("fan_modes", JSONArray(listOf("auto", "high", "low")))
 
-            // Preset modes for heat source selection (gas vs heat pump)
-            put("preset_modes", JSONArray(listOf("Prefer Gas", "Prefer Heat Pump")))
-            put("preset_mode_state_topic", "$baseTopic/state/preset_mode")
-            put("preset_mode_command_topic", "$commandBaseTopic/preset_mode")
+            // Preset modes for heat source selection — only for zones with both gas and heat pump
+            if (includePresets) {
+                put("preset_modes", JSONArray(listOf("Prefer Gas", "Prefer Heat Pump")))
+                put("preset_mode_state_topic", "$baseTopic/state/preset_mode")
+                put("preset_mode_command_topic", "$commandBaseTopic/preset_mode")
+            }
 
             put("temperature_unit", "F")
             put("temp_step", 1)

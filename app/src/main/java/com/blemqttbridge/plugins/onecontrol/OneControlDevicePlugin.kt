@@ -370,7 +370,8 @@ class OneControlGattCallback(
         val deviceId: Int,
         val functionName: Int,
         val functionInstance: Int,
-        val friendlyName: String
+        val friendlyName: String,
+        val rawCapability: Int = 0  // ClimateZoneCapabilityFlag bitmask (bit0=Gas, bit1=AC, bit2=HeatPump, bit3=MultiSpeedFan)
     )
     private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
     private var metadataRequested = false
@@ -402,7 +403,8 @@ class OneControlGattCallback(
                         deviceId = json.getInt("deviceId"),
                         functionName = json.getInt("functionName"),
                         functionInstance = json.getInt("functionInstance"),
-                        friendlyName = json.getString("friendlyName")
+                        friendlyName = json.getString("friendlyName"),
+                        rawCapability = json.optInt("rawCapability", 0)
                     )
                     loadedCount++
                 }
@@ -432,6 +434,7 @@ class OneControlGattCallback(
                 json.put("functionName", metadata.functionName)
                 json.put("functionInstance", metadata.functionInstance)
                 json.put("friendlyName", metadata.friendlyName)
+                json.put("rawCapability", metadata.rawCapability)
                 jsonArray.put(json)
             }
             
@@ -558,6 +561,23 @@ class OneControlGattCallback(
         val outdoorTempF: Double? // Outdoor temp °F (null=invalid)
     )
     private val hvacZoneStates = mutableMapOf<String, HvacZoneState>()
+
+    // HVAC command pending tracking — prevents status bounce-back after sending commands
+    // Mirrors the EasyTouch "StartIgnoreStatus" / dimmable light pending guard patterns:
+    // 1. User sends setpoint → optimistic MQTT publish for instant HA feedback
+    // 2. Register pending state (desired values + timestamp)
+    // 3. Suppress incoming HvacStatus updates that don't match desired values
+    // 4. Clear pending when gateway confirms (matching status) or window expires
+    data class PendingHvacCommand(
+        val heatMode: Int,
+        val heatSource: Int,
+        val fanMode: Int,
+        val lowTripTempF: Int,
+        val highTripTempF: Int,
+        val timestamp: Long
+    )
+    private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
+    private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
 
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
@@ -1727,6 +1747,32 @@ class OneControlGattCallback(
             )
             hvacZoneStates[zoneKey] = zoneState
             
+            // Pending command guard: suppress mismatching status during command window
+            // This prevents the UI from bouncing back to old values while the gateway processes
+            val pendingCmd = pendingHvacCommands[zoneKey]
+            if (pendingCmd != null) {
+                val age = System.currentTimeMillis() - pendingCmd.timestamp
+                if (age <= HVAC_PENDING_WINDOW_MS) {
+                    // Check if gateway's reported state matches what we commanded
+                    val matches = heatMode == pendingCmd.heatMode &&
+                        heatSource == pendingCmd.heatSource &&
+                        fanMode == pendingCmd.fanMode &&
+                        lowTripTempF == pendingCmd.lowTripTempF &&
+                        highTripTempF == pendingCmd.highTripTempF
+                    if (!matches) {
+                        Log.d(TAG, "🚫 Suppressing HVAC status (pending command, age=${age}ms): " +
+                            "got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
+                            "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}")
+                        offset += BYTES_PER_DEVICE
+                        continue  // Skip publishing this zone's status
+                    }
+                    // Matches! Gateway confirmed our command — clear pending
+                    Log.i(TAG, "✅ HVAC command confirmed by gateway (age=${age}ms)")
+                }
+                // Clear pending (either confirmed or window expired)
+                pendingHvacCommands.remove(zoneKey)
+            }
+            
             // Map to HA values
             val haMode = when (heatMode) {
                 0 -> "off"
@@ -1801,10 +1847,18 @@ class OneControlGattCallback(
                 stateMap["state/outdoor_temperature"] = "%.1f".format(it)
             }
             
-            // Always publish preset_mode — we cannot reliably detect which zones
-            // support multiple heat sources from status alone (heatSource=0 could mean
-            // gas-only OR gas-selected-on-a-dual-source zone)
-            stateMap["state/preset_mode"] = haPreset
+            // Determine if this zone supports multiple heat sources from device capability byte
+            // ClimateZoneCapabilityFlag: bit0=GasFurnace, bit1=AirConditioner, bit2=HeatPump
+            // Presets shown only when zone has BOTH gas (bit0) AND heat pump (bit2)
+            val deviceAddr = (tableId shl 8) or deviceId
+            val capability = deviceMetadata[deviceAddr]?.rawCapability ?: 0
+            val hasGas = (capability and 0x01) != 0
+            val hasHeatPump = (capability and 0x04) != 0
+            val includePresets = hasGas && hasHeatPump
+            
+            if (includePresets) {
+                stateMap["state/preset_mode"] = haPreset
+            }
             
             // Publish via centralized entity state method
             val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
@@ -1822,6 +1876,7 @@ class OneControlGattCallback(
                     deviceName = friendlyName,
                     baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
                     commandBaseTopic = "$prefix/$baseTopic/command/climate/$tableId/$deviceId",
+                    includePresets = includePresets,
                     appVersion = try {
                         context.packageManager.getPackageInfo(context.packageName, 0).versionName
                     } catch (_: Exception) { null }
@@ -2650,6 +2705,7 @@ class OneControlGattCallback(
                 val funcNameLo = data[offset + 3].toInt() and 0xFF
                 val funcName = (funcNameHi shl 8) or funcNameLo
                 val funcInstance = data[offset + 4].toInt() and 0xFF
+                val rawCapability = data[offset + 5].toInt() and 0xFF
                 
                 val friendlyName = FunctionNameMapper.getFriendlyName(funcName, funcInstance)
                 
@@ -2658,10 +2714,11 @@ class OneControlGattCallback(
                     deviceId = deviceId,
                     functionName = funcName,
                     functionInstance = funcInstance,
-                    friendlyName = friendlyName
+                    friendlyName = friendlyName,
+                    rawCapability = rawCapability
                 )
                 
-                Log.i(TAG, "📋 [$tableId:$deviceId] proto=$protocol fn=$funcName ($friendlyName)")
+                Log.i(TAG, "📋 [$tableId:$deviceId] proto=$protocol fn=$funcName ($friendlyName) cap=0x%02X".format(rawCapability))
                 
                 // Publish metadata to MQTT
                 val json = JSONObject()
@@ -2670,6 +2727,7 @@ class OneControlGattCallback(
                 json.put("function_name", funcName)
                 json.put("function_instance", funcInstance)
                 json.put("friendly_name", friendlyName)
+                json.put("raw_capability", rawCapability)
                 json.put("protocol", protocol)
                 mqttPublisher.publishState(
                     "onecontrol/${device.address}/device/$tableId/$deviceId/metadata",
@@ -3246,8 +3304,58 @@ class OneControlGattCallback(
             Log.i(TAG, "📤 Sent HVAC command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, " +
                 "mode=$heatMode, source=$heatSource, fan=$fanMode, low=$lowTrip, high=$highTrip, result=$result")
             
-            // No optimistic state — wait for HvacStatus event from gateway
-            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+            if (result == true) {
+                // Register pending command to suppress stale gateway status updates
+                pendingHvacCommands[zoneKey] = PendingHvacCommand(
+                    heatMode = heatMode,
+                    heatSource = heatSource,
+                    fanMode = fanMode,
+                    lowTripTempF = lowTrip,
+                    highTripTempF = highTrip,
+                    timestamp = System.currentTimeMillis()
+                )
+                
+                // Optimistic MQTT publish — give HA immediate feedback
+                // Uses same topic structure as handleHvacStatus
+                val tid = effectiveTableId.toInt() and 0xFF
+                val did = deviceId.toInt() and 0xFF
+                val baseTopic = "${mqttPublisher.topicPrefix}/onecontrol/${device.address}/device/$tid/$did"
+                
+                // Publish setpoint topics optimistically based on mode
+                when (heatMode) {
+                    0 -> {  // off
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature", "None", true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_low", "None", true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_high", "None", true)
+                    }
+                    1 -> {  // heat
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature", lowTrip.toString(), true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_low", "None", true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_high", "None", true)
+                    }
+                    2 -> {  // cool
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature", highTrip.toString(), true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_low", "None", true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_high", "None", true)
+                    }
+                    3 -> {  // heat_cool
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature", "None", true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_low", lowTrip.toString(), true)
+                        mqttPublisher.publishState("$baseTopic/state/target_temperature_high", highTrip.toString(), true)
+                    }
+                }
+                
+                // Also publish mode/fan/preset optimistically
+                val haMode = when (heatMode) { 0 -> "off"; 1 -> "heat"; 2 -> "cool"; 3 -> "heat_cool"; else -> "off" }
+                val haFanMode = when (fanMode) { 0 -> "auto"; 1 -> "high"; 2 -> "low"; else -> "auto" }
+                mqttPublisher.publishState("$baseTopic/state/mode", haMode, true)
+                mqttPublisher.publishState("$baseTopic/state/fan_mode", haFanMode, true)
+                
+                Log.i(TAG, "📤 Optimistic HVAC state published, suppressing stale updates for ${HVAC_PENDING_WINDOW_MS}ms")
+                return Result.success(Unit)
+            } else {
+                return Result.failure(Exception("Write failed"))
+            }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send HVAC command: ${e.message}", e)
             return Result.failure(e)
