@@ -131,6 +131,18 @@ object HomeAssistantMqttDiscovery {
                 stateTopic, deviceClass, icon, appVersion
             )
         }
+
+        fun buildClimate(
+            deviceAddr: Int,
+            deviceName: String,
+            baseTopic: String,
+            commandBaseTopic: String
+        ): JSONObject {
+            return getClimateDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                baseTopic, commandBaseTopic, appVersion
+            )
+        }
         
         /**
          * Get discovery topic for an entity
@@ -528,6 +540,60 @@ object HomeAssistantMqttDiscovery {
             "relay", "latching_relay" -> "switch"
             "hbridge_relay" -> "cover"
             else -> "sensor"
+        }
+    }
+
+    /**
+     * Generate discovery config for an HVAC climate entity
+     * Uses separate state/command topics per attribute (mode, fan, temp, preset)
+     */
+    fun getClimateDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        baseTopic: String,
+        commandBaseTopic: String,
+        appVersion: String? = null
+    ): JSONObject {
+        val macClean = gatewayMac.replace(":", "").lowercase()
+        val uniqueId = "onecontrol_ble_${macClean}_climate_${deviceAddr.toString(16)}"
+        val objectId = "climate_${deviceAddr.toString(16).padStart(4, '0')}"
+
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("object_id", objectId)
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+
+            // Modes: off, heat, cool, heat_cool (auto dual setpoint)
+            put("modes", JSONArray(listOf("off", "heat", "cool", "heat_cool")))
+            put("fan_modes", JSONArray(listOf("auto", "high", "low")))
+            put("preset_modes", JSONArray(listOf("Prefer Gas", "Prefer Heat Pump")))
+
+            put("temperature_unit", "F")
+            put("temp_step", 1)
+            put("min_temp", 50)
+            put("max_temp", 95)
+
+            // State topics (per-attribute)
+            put("mode_state_topic", "$baseTopic/state/mode")
+            put("current_temperature_topic", "$baseTopic/state/current_temperature")
+            put("temperature_state_topic", "$baseTopic/state/target_temperature")
+            put("temperature_high_state_topic", "$baseTopic/state/target_temperature_high")
+            put("temperature_low_state_topic", "$baseTopic/state/target_temperature_low")
+            put("fan_mode_state_topic", "$baseTopic/state/fan_mode")
+            put("action_topic", "$baseTopic/state/action")
+            put("preset_mode_state_topic", "$baseTopic/state/preset_mode")
+
+            // Command topics
+            put("mode_command_topic", "$commandBaseTopic/mode")
+            put("temperature_command_topic", "$commandBaseTopic/temperature")
+            put("temperature_high_command_topic", "$commandBaseTopic/temperature_high")
+            put("temperature_low_command_topic", "$commandBaseTopic/temperature_low")
+            put("fan_mode_command_topic", "$commandBaseTopic/fan_mode")
+            put("preset_mode_command_topic", "$commandBaseTopic/preset_mode")
+
+            put("icon", "mdi:thermostat")
         }
     }
 }

@@ -474,7 +474,8 @@ class OneControlGattCallback(
         GENERATOR_TEMP("sensor", "gen_temp"),
         GENERATOR_QUIET("binary_sensor", "gen_quiet"),
         GENERATOR_SWITCH("switch", "gen_switch"),
-        RUNTIME_HOURS("sensor", "runtime")
+        RUNTIME_HOURS("sensor", "runtime"),
+        CLIMATE("climate", "climate")
     }
 
     /**
@@ -511,6 +512,7 @@ class OneControlGattCallback(
             EntityType.GENERATOR_STATE, EntityType.GENERATOR_BATTERY,
             EntityType.GENERATOR_TEMP, EntityType.GENERATOR_QUIET,
             EntityType.GENERATOR_SWITCH, EntityType.RUNTIME_HOURS -> "Generator"
+            EntityType.CLIMATE -> "Climate"
         }
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackType)
         
@@ -542,6 +544,20 @@ class OneControlGattCallback(
 
     // Track pending commands by ID to match responses
     private val pendingCommands = mutableMapOf<Int, Int>()
+
+    // HVAC zone state tracking - needed to merge partial command updates
+    // Key: "tableId:deviceId", Value: last known HVAC state
+    data class HvacZoneState(
+        val heatMode: Int,      // ClimateZoneHeatMode: 0=Off,1=Heating,2=Cooling,3=Both
+        val heatSource: Int,    // ClimateZoneHeatSource: 0=PreferGas,1=PreferHeatPump
+        val fanMode: Int,       // ClimateZoneFanMode: 0=Auto,1=High,2=Low
+        val lowTripTempF: Int,  // Heat setpoint °F
+        val highTripTempF: Int, // Cool setpoint °F
+        val zoneStatus: Int,    // ClimateZoneStatus enum
+        val indoorTempF: Double?, // Indoor temp °F (null=invalid)
+        val outdoorTempF: Double? // Outdoor temp °F (null=invalid)
+    )
+    private val hvacZoneStates = mutableMapOf<String, HvacZoneState>()
 
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
@@ -1654,22 +1670,154 @@ class OneControlGattCallback(
     }
     
     /**
-     * Handle HvacStatus event
+     * Handle HvacStatus event (0x0B)
+     * Frame: [0x0B][DeviceTableId][DeviceId_1][8-byte status][2-byte statusEx]
+     *        [DeviceId_2][8-byte status][2-byte statusEx]...
+     * BytesPerDevice = 11 (1 deviceId + 8 status + 2 extended)
      */
     private fun handleHvacStatus(data: ByteArray) {
-        if (data.size < 10) return
+        if (data.size < 4) return
         
         val tableId = data[1].toInt() and 0xFF
-        val deviceId = data[2].toInt() and 0xFF
+        // Payload starts at offset 2, each device is 11 bytes (1 id + 8 status + 2 ext)
+        val BYTES_PER_DEVICE = 11
+        var offset = 2
         
-        Log.i(TAG, "📦 HVAC $tableId:$deviceId")
-        
-        val json = JSONObject().apply {
-            put("device_table_id", tableId)
-            put("device_id", deviceId)
-            put("raw", data.joinToString(" ") { "%02X".format(it) })
+        while (offset + BYTES_PER_DEVICE <= data.size) {
+            val deviceId = data[offset].toInt() and 0xFF
+            val commandByte = data[offset + 1].toInt() and 0xFF
+            val lowTripTempF = data[offset + 2].toInt() and 0xFF
+            val highTripTempF = data[offset + 3].toInt() and 0xFF
+            val statusByte = data[offset + 4].toInt() and 0x8F  // mask per spec
+            val indoorRaw = ((data[offset + 5].toInt() and 0xFF) shl 8) or (data[offset + 6].toInt() and 0xFF)
+            val outdoorRaw = ((data[offset + 7].toInt() and 0xFF) shl 8) or (data[offset + 8].toInt() and 0xFF)
+            // Bytes offset+9, offset+10: statusEx (DTC/UserMessage) - logged but not published yet
+            val dtcRaw = if (offset + 10 < data.size) {
+                ((data[offset + 9].toInt() and 0xFF) shl 8) or (data[offset + 10].toInt() and 0xFF)
+            } else 0
+            
+            // Decode bitfields from commandByte
+            val heatMode = commandByte and 0x07         // bits 0-2
+            val heatSource = (commandByte shr 4) and 0x03 // bits 4-5
+            val fanMode = (commandByte shr 6) and 0x03   // bits 6-7
+            
+            // Decode temperatures - signed 8.8 fixed-point
+            // Invalid sentinels: 0x8000, 0x2FF0
+            fun decodeTemp88(raw: Int): Double? {
+                if (raw == 0x8000 || raw == 0x2FF0 || raw == 0xFFFF) return null
+                val signed = if (raw >= 0x8000) raw - 0x10000 else raw
+                return signed / 256.0
+            }
+            val indoorTempF = decodeTemp88(indoorRaw)
+            val outdoorTempF = decodeTemp88(outdoorRaw)
+            
+            Log.i(TAG, "📦 HVAC $tableId:$deviceId mode=${heatModeToString(heatMode)} " +
+                "source=${heatSourceToString(heatSource)} fan=${fanModeToString(fanMode)} " +
+                "heat=$lowTripTempF°F cool=$highTripTempF°F status=${zoneStatusToString(statusByte)} " +
+                "indoor=${indoorTempF?.let { "%.1f°F".format(it) } ?: "N/A"} " +
+                "outdoor=${outdoorTempF?.let { "%.1f°F".format(it) } ?: "N/A"}")
+            
+            // Store zone state for command merging
+            val zoneKey = "$tableId:$deviceId"
+            val zoneState = HvacZoneState(
+                heatMode = heatMode, heatSource = heatSource, fanMode = fanMode,
+                lowTripTempF = lowTripTempF, highTripTempF = highTripTempF,
+                zoneStatus = statusByte,
+                indoorTempF = indoorTempF, outdoorTempF = outdoorTempF
+            )
+            hvacZoneStates[zoneKey] = zoneState
+            
+            // Map to HA values
+            val haMode = when (heatMode) {
+                0 -> "off"
+                1 -> "heat"
+                2 -> "cool"
+                3 -> "heat_cool"
+                else -> "off"
+            }
+            val haFanMode = when (fanMode) {
+                0 -> "auto"
+                1 -> "high"
+                2 -> "low"
+                else -> "auto"
+            }
+            val haAction = when (statusByte and 0x0F) {
+                0 -> "off"
+                1 -> "idle"
+                2 -> "cooling"
+                3, 4, 5, 6 -> "heating"  // heat pump, electric, gas, gas override
+                7, 8 -> "idle"           // dead time, load shedding
+                else -> "off"
+            }
+            val haPreset = when (heatSource) {
+                0 -> "Prefer Gas"
+                1 -> "Prefer Heat Pump"
+                else -> "none"
+            }
+            
+            // Build state map for publishEntityState
+            val stateMap = mutableMapOf(
+                "state/mode" to haMode,
+                "state/fan_mode" to haFanMode,
+                "state/action" to haAction,
+                "state/target_temperature_low" to lowTripTempF.toString(),
+                "state/target_temperature_high" to highTripTempF.toString(),
+                "state/preset_mode" to haPreset
+            )
+            // Single-setpoint target_temperature: use the relevant setpoint for the current mode
+            when (heatMode) {
+                1 -> stateMap["state/target_temperature"] = lowTripTempF.toString()   // heat
+                2 -> stateMap["state/target_temperature"] = highTripTempF.toString()  // cool
+                3 -> {} // heat_cool: HA uses high/low, no single target
+                else -> stateMap["state/target_temperature"] = highTripTempF.toString()
+            }
+            indoorTempF?.let {
+                stateMap["state/current_temperature"] = "%.1f".format(it)
+            }
+            outdoorTempF?.let {
+                stateMap["state/outdoor_temperature"] = "%.1f".format(it)
+            }
+            
+            // Publish via centralized entity state method
+            val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
+            publishEntityState(
+                entityType = EntityType.CLIMATE,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = discoveryKey,
+                state = stateMap
+            ) { friendlyName, deviceAddr, prefix, baseTopic ->
+                val macClean = device.address.replace(":", "").lowercase()
+                HomeAssistantMqttDiscovery.getClimateDiscovery(
+                    gatewayMac = device.address,
+                    deviceAddr = deviceAddr,
+                    deviceName = friendlyName,
+                    baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
+                    commandBaseTopic = "$prefix/$baseTopic/command/climate/$tableId/$deviceId",
+                    appVersion = try {
+                        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+                    } catch (_: Exception) { null }
+                )
+            }
+            
+            offset += BYTES_PER_DEVICE
         }
-        mqttPublisher.publishState("onecontrol/${device.address}/device/$tableId/$deviceId/hvac", json.toString(), true)
+    }
+    
+    /** HVAC enum helpers */
+    private fun heatModeToString(mode: Int) = when (mode) {
+        0 -> "Off"; 1 -> "Heating"; 2 -> "Cooling"; 3 -> "Both"; 4 -> "RunSchedule"; else -> "Unknown($mode)"
+    }
+    private fun heatSourceToString(source: Int) = when (source) {
+        0 -> "PreferGas"; 1 -> "PreferHeatPump"; 2 -> "Other"; else -> "Unknown($source)"
+    }
+    private fun fanModeToString(mode: Int) = when (mode) {
+        0 -> "Auto"; 1 -> "High"; 2 -> "Low"; else -> "Unknown($mode)"
+    }
+    private fun zoneStatusToString(status: Int) = when (status and 0x0F) {
+        0 -> "Off"; 1 -> "Idle"; 2 -> "Cooling"; 3 -> "HeatPump"; 4 -> "Electric"
+        5 -> "GasFurnace"; 6 -> "GasOverride"; 7 -> "DeadTime"; 8 -> "LoadShedding"
+        else -> "Unknown($status)"
     }
     
     /**
@@ -2837,6 +2985,7 @@ class OneControlGattCallback(
                 }
             }
             "generator" -> controlGenerator(tableId.toByte(), deviceId.toByte(), payload)
+            "climate" -> controlHvac(tableId.toByte(), deviceId.toByte(), subTopic, payload)
             // SAFETY: Cover control disabled - RV awnings/slides have no limit switches
             // or overcurrent protection. Motors rely on operator judgment.
             // "cover" -> controlCover(tableId.toByte(), deviceId.toByte(), payload)
@@ -2945,6 +3094,134 @@ class OneControlGattCallback(
             return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send generator command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
+    /**
+     * Control HVAC zone - handles partial updates (mode, fan, temp, preset)
+     * Merges the changed attribute with last known zone state, then sends full command.
+     * SubTopic determines which attribute is being changed:
+     *   mode, fan_mode, temperature, temperature_high, temperature_low, preset_mode
+     */
+    private fun controlHvac(tableId: Byte, deviceId: Byte, subTopic: String?, payload: String): Result<Unit> {
+        val zoneKey = "${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}"
+        val currentState = hvacZoneStates[zoneKey]
+        
+        if (subTopic == null) {
+            Log.w(TAG, "❌ HVAC command missing subTopic (expected mode/fan_mode/temperature/etc)")
+            return Result.failure(Exception("Missing HVAC command subTopic"))
+        }
+        
+        // Start with last known state, or defaults
+        var heatMode = currentState?.heatMode ?: 0
+        var heatSource = currentState?.heatSource ?: 0
+        var fanMode = currentState?.fanMode ?: 0
+        var lowTrip = currentState?.lowTripTempF ?: 68
+        var highTrip = currentState?.highTripTempF ?: 78
+        
+        // Apply the change based on subTopic
+        when (subTopic) {
+            "mode" -> {
+                heatMode = when (payload.lowercase()) {
+                    "off" -> 0
+                    "heat" -> 1
+                    "cool" -> 2
+                    "heat_cool" -> 3
+                    else -> {
+                        Log.w(TAG, "❌ Unknown HVAC mode: $payload")
+                        return Result.failure(Exception("Unknown mode: $payload"))
+                    }
+                }
+                Log.i(TAG, "📤 HVAC mode -> $payload (heatMode=$heatMode)")
+            }
+            "fan_mode" -> {
+                fanMode = when (payload.lowercase()) {
+                    "auto" -> 0
+                    "high" -> 1
+                    "low" -> 2
+                    else -> {
+                        Log.w(TAG, "❌ Unknown fan mode: $payload")
+                        return Result.failure(Exception("Unknown fan mode: $payload"))
+                    }
+                }
+                Log.i(TAG, "📤 HVAC fan_mode -> $payload (fanMode=$fanMode)")
+            }
+            "temperature" -> {
+                val temp = payload.toIntOrNull()
+                    ?: return Result.failure(Exception("Invalid temperature: $payload"))
+                // Single setpoint: apply to the relevant setpoint based on current mode
+                when (heatMode) {
+                    1 -> lowTrip = temp       // heat mode → adjust heat setpoint
+                    2 -> highTrip = temp      // cool mode → adjust cool setpoint
+                    else -> highTrip = temp   // default to cool setpoint
+                }
+                Log.i(TAG, "📤 HVAC temperature -> $temp°F (mode=$heatMode, low=$lowTrip, high=$highTrip)")
+            }
+            "temperature_high" -> {
+                highTrip = payload.toIntOrNull()
+                    ?: return Result.failure(Exception("Invalid temperature_high: $payload"))
+                Log.i(TAG, "📤 HVAC temperature_high -> $highTrip°F")
+            }
+            "temperature_low" -> {
+                lowTrip = payload.toIntOrNull()
+                    ?: return Result.failure(Exception("Invalid temperature_low: $payload"))
+                Log.i(TAG, "📤 HVAC temperature_low -> $lowTrip°F")
+            }
+            "preset_mode" -> {
+                heatSource = when (payload) {
+                    "Prefer Gas" -> 0
+                    "Prefer Heat Pump" -> 1
+                    "none" -> currentState?.heatSource ?: 0  // keep current
+                    else -> {
+                        Log.w(TAG, "❌ Unknown preset: $payload")
+                        return Result.failure(Exception("Unknown preset: $payload"))
+                    }
+                }
+                Log.i(TAG, "📤 HVAC preset_mode -> $payload (heatSource=$heatSource)")
+            }
+            else -> {
+                Log.w(TAG, "❌ Unknown HVAC subTopic: $subTopic")
+                return Result.failure(Exception("Unknown HVAC subTopic: $subTopic"))
+            }
+        }
+        
+        // Send the full command with the merged state
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        try {
+            val commandId = getNextCommandId()
+            val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+                deviceTableId
+            } else {
+                tableId
+            }
+            
+            val command = MyRvLinkCommandBuilder.buildActionHvac(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                heatMode = heatMode,
+                heatSource = heatSource,
+                fanMode = fanMode,
+                lowTripTempF = lowTrip,
+                highTripTempF = highTrip
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 HVAC command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent HVAC command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, " +
+                "mode=$heatMode, source=$heatSource, fan=$fanMode, low=$lowTrip, high=$highTrip, result=$result")
+            
+            // No optimistic state — wait for HvacStatus event from gateway
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send HVAC command: ${e.message}", e)
             return Result.failure(e)
         }
     }
