@@ -321,7 +321,11 @@ class MqttService : Service() {
 
         override fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit) {
             serviceScope.launch {
-                mqttPlugin?.subscribeToCommands(topicPattern, callback)
+                try {
+                    mqttPlugin?.subscribeToCommands(topicPattern, callback)
+                } catch (e: Exception) {
+                    Log.w("MqttService", "subscribeToCommands failed (MQTT not ready?): ${e.message}")
+                }
             }
         }
 

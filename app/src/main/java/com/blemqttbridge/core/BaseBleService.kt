@@ -115,7 +115,9 @@ class BaseBleService : Service() {
         val traceFilePath: kotlinx.coroutines.flow.StateFlow<String?> = _traceFilePath
     }
     
-    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val serviceSupervisorJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.Default + serviceSupervisorJob)
+    @Volatile private var serviceStopping = false  // Guard against reconnecting after destroy
     
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var bluetoothLeScanner: BluetoothLeScanner? = null
@@ -128,7 +130,9 @@ class BaseBleService : Service() {
     private var bleScannerPlugin: BleScannerPlugin? = null
     
     // Connected devices map: device address -> (BluetoothGatt, pluginId)
-    private val connectedDevices = mutableMapOf<String, Pair<BluetoothGatt, String>>()
+    // Uses ConcurrentHashMap for thread safety: mutated from serviceScope coroutines,
+    // main thread (disconnectAll), and BLE callbacks (handleDeviceDisconnect).
+    private val connectedDevices = java.util.concurrent.ConcurrentHashMap<String, Pair<BluetoothGatt, String>>()
     
     // Instance to plugin type mapping: instanceId -> pluginType (e.g., "easytouch_b1241e" -> "easytouch")
     private val instancePluginTypes = mutableMapOf<String, String>()
@@ -555,6 +559,9 @@ class BaseBleService : Service() {
         Log.i(TAG, "⚙️ onStartCommand: action=${intent?.action ?: "null"}, startId=$startId")
         appendServiceLog("onStartCommand: action=${intent?.action ?: "null"}")
         
+        // Reset stopping flag on any command (service is alive)
+        serviceStopping = false
+        
         when (intent?.action) {
             ACTION_START_SCAN -> {
                 synchronized(initializationLock) {
@@ -722,6 +729,10 @@ class BaseBleService : Service() {
         Log.i(TAG, "Service destroyed")
         appendServiceLog("Service destroyed")
         
+        // CRITICAL: Mark service as stopping FIRST to prevent reconnection loops.
+        // handleDeviceDisconnect checks this flag before scheduling reconnects.
+        serviceStopping = true
+        
         ServiceStateManager.setServiceRunning(applicationContext, false)
         _serviceRunning.value = false
         _pluginStatuses.value = emptyMap()
@@ -756,10 +767,15 @@ class BaseBleService : Service() {
         cancelKeepAlive()
         instance = null
         
-        serviceScope.launch {
-            pluginRegistry.cleanup()
-            memoryManager.logMemoryUsage()
+        // Cleanup plugins synchronously (quick), then cancel scope to kill
+        // all pending coroutines (reconnect loops, keepalive pings, etc.)
+        try {
+            kotlinx.coroutines.runBlocking { pluginRegistry.cleanup() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during plugin cleanup", e)
         }
+        serviceSupervisorJob.cancel()
+        Log.i(TAG, "serviceScope cancelled - all pending coroutines terminated")
     }
     
     /**
@@ -1210,8 +1226,18 @@ class BaseBleService : Service() {
             return
         }
         
+        // Use LOW_LATENCY when no active GATT connections (fast initial discovery).
+        // Use BALANCED when GATT is active: LOW_LATENCY scan competes with the GATT radio
+        // scheduling and can destabilize active BLE connections on many Android devices.
+        val hasActiveGatt = connectedDevices.isNotEmpty()
+        val scanMode = if (hasActiveGatt) {
+            Log.i(TAG, "📡 Using BALANCED scan (active GATT connections exist)")
+            ScanSettings.SCAN_MODE_BALANCED
+        } else {
+            ScanSettings.SCAN_MODE_LOW_LATENCY
+        }
         val scanSettings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(scanMode)
             .build()
         
         appendServiceLog("Starting BLE scan with ${scanFilters.size} device filters")
@@ -1597,9 +1623,15 @@ class BaseBleService : Service() {
      * Handle device disconnect (called by plugin-owned callbacks).
      */
     private fun handleDeviceDisconnect(device: BluetoothDevice, status: Int, pluginId: String) {
-        Log.i(TAG, "🔌 Device disconnected: ${device.address}, status=$status")
+        Log.i(TAG, "🔌 Device disconnected: ${device.address}, status=$status, serviceStopping=$serviceStopping")
         
         connectedDevices.remove(device.address)
+        
+        // If service is shutting down, do NOT schedule reconnection
+        if (serviceStopping) {
+            Log.i(TAG, "🔌 Service is stopping - skipping reconnection for ${device.address}")
+            return
+        }
         
         // Notify plugin
         val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)

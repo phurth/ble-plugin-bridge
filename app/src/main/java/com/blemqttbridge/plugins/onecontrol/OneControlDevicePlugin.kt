@@ -315,6 +315,7 @@ class OneControlGattCallback(
     private var isAuthenticated = false
     private var seedValue: ByteArray? = null
     private var currentGatt: BluetoothGatt? = null
+    private var connectionStartTimeMs: Long = 0L  // Track connection duration for diagnostics
     
     // GATT 133 retry tracking
     private var gatt133RetryCount = 0
@@ -354,7 +355,8 @@ class OneControlGattCallback(
     private var gatewayInfoReceived = false
     
     // Home Assistant discovery tracking - prevents duplicate discovery publishes
-    private val haDiscoveryPublished = mutableSetOf<String>()
+    // Uses ConcurrentHashMap-backed set for thread safety (accessed from stream reader + main thread)
+    private val haDiscoveryPublished: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     // Tank query response handling
     private val pendingTankResponses = mutableMapOf<String, TankQueryResponse>()
@@ -572,6 +574,7 @@ class OneControlGattCallback(
                         Log.i(TAG, "Bond state: ${device.bondState}")
                         isConnected = true
                         currentGatt = gatt
+                        connectionStartTimeMs = System.currentTimeMillis()
                         // Reset retry counters on successful connection
                         gatt133RetryCount = 0
                         consecutivePeerDisconnects = 0
@@ -583,10 +586,9 @@ class OneControlGattCallback(
                         gatt.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        Log.i(TAG, "❌ Disconnected from ${device.address} with status=$status")
-                        if (status == 133) {
-                            Log.w(TAG, "⚠️ Status 133: Connection timeout or GATT error - check authentication flow")
-                        }
+                        val uptime = if (connectionStartTimeMs > 0) (System.currentTimeMillis() - connectionStartTimeMs) / 1000 else 0
+                        Log.i(TAG, "❌ Disconnected from ${device.address} status=$status (was connected ${uptime}s)")
+                        mqttPublisher.logBleEvent("DISCONNECT status=$status uptime=${uptime}s")
                         cleanup(gatt)
                         onDisconnect(device, status)
                     }
@@ -632,14 +634,18 @@ class OneControlGattCallback(
                 }
             }
             8 -> {
-                Log.e(TAG, "⏱️ Connection timeout (status 8)")
+                val uptime = if (connectionStartTimeMs > 0) (System.currentTimeMillis() - connectionStartTimeMs) / 1000 else 0
+                Log.e(TAG, "⏱️ Connection timeout (status 8) after ${uptime}s")
+                mqttPublisher.logBleEvent("TIMEOUT status=8 uptime=${uptime}s")
                 cleanup(gatt)
                 onDisconnect(device, status)
             }
             19 -> {
                 consecutivePeerDisconnects++
                 lastPeerDisconnectTime = System.currentTimeMillis()
-                Log.e(TAG, "🚫 Peer terminated connection (status 19) - consecutive: $consecutivePeerDisconnects")
+                val uptime = if (connectionStartTimeMs > 0) (System.currentTimeMillis() - connectionStartTimeMs) / 1000 else 0
+                Log.e(TAG, "🚫 Peer terminated connection (status 19) after ${uptime}s - consecutive: $consecutivePeerDisconnects")
+                mqttPublisher.logBleEvent("PEER_DISCONNECT status=19 uptime=${uptime}s consecutive=$consecutivePeerDisconnects")
                 cleanup(gatt)
                 
                 if (consecutivePeerDisconnects >= MAX_CONSECUTIVE_PEER_DISCONNECTS) {
@@ -658,7 +664,9 @@ class OneControlGattCallback(
                 }
             }
             else -> {
-                Log.e(TAG, "❌ Connection failed with status: $status")
+                val uptime = if (connectionStartTimeMs > 0) (System.currentTimeMillis() - connectionStartTimeMs) / 1000 else 0
+                Log.e(TAG, "❌ Connection failed with status=$status newState=$newState after ${uptime}s")
+                mqttPublisher.logBleEvent("GATT_FAIL status=$status newState=$newState uptime=${uptime}s")
                 cleanup(gatt)
                 onDisconnect(device, status)
             }
@@ -1151,17 +1159,29 @@ class OneControlGattCallback(
      * Handle characteristic notification
      * COPIED FROM LEGACY APP - queues data for stream reading
      */
+    // Notification deduplication: skip if identical bytes arrive within a short window
+    private var lastNotifyBytes: ByteArray? = null
+    private var lastNotifyTimestampMs: Long = 0L
+    private val NOTIFY_DEDUP_WINDOW_MS = 15L  // 15ms window for dedup
+
     private fun handleCharacteristicNotification(uuid: UUID, data: ByteArray) {
         if (data.isEmpty()) {
             Log.w(TAG, "📨 Empty notification from $uuid")
             return
         }
         
-        val hex = data.joinToString(" ") { "%02X".format(it) }
-        // Log to trace file (observation only - doesn't affect comms)
-        mqttPublisher.logBleEvent("NOTIFY ${uuid.toString().lowercase()}: $hex")
+        // Deduplicate: if same bytes within a short window, skip
+        val now = System.currentTimeMillis()
+        val prevBytes = lastNotifyBytes
+        if (prevBytes != null && (now - lastNotifyTimestampMs) < NOTIFY_DEDUP_WINDOW_MS && data.contentEquals(prevBytes)) {
+            Log.d(TAG, "📨 Duplicate notification suppressed (${now - lastNotifyTimestampMs}ms)")
+            return
+        }
+        lastNotifyBytes = data.copyOf()
+        lastNotifyTimestampMs = now
+        
+        // NOTE: logBleEvent already called by onCharacteristicChanged; no double-log here
         Log.i(TAG, "📨 Notification from $uuid: ${data.size} bytes")
-        Log.d(TAG, "📨 Data: $hex")
         
         when (uuid) {
             DATA_READ_CHARACTERISTIC_UUID -> {
@@ -1186,6 +1206,7 @@ class OneControlGattCallback(
                 handleSeedNotification(data)
             }
             KEY_CHARACTERISTIC_UUID -> {
+                val hex = data.joinToString(" ") { "%02X".format(it) }
                 Log.i(TAG, "🔐 KEY (00000013) notification received: $hex")
                 // Check if this is "Unlocked" response
                 val text = String(data, Charsets.US_ASCII)
@@ -1195,6 +1216,7 @@ class OneControlGattCallback(
                 }
             }
             AUTH_STATUS_CHARACTERISTIC_UUID -> {
+                val hex = data.joinToString(" ") { "%02X".format(it) }
                 Log.i(TAG, "🔐 Auth Status (14) notification: $hex")
             }
             else -> {
@@ -1543,8 +1565,9 @@ class OneControlGattCallback(
                     put("fault", DtcCodes.isFault(dtc))
                     put("status_byte", "0x${statusByte.toString(16).uppercase().padStart(2, '0')}")
                 }
-                Log.d(TAG, "📋 Publishing DTC attributes for $friendlyName to $prefix/$attributesTopic: $attributesJson")
-                mqttPublisher.publishState("$prefix/$attributesTopic", attributesJson.toString(), true)
+                Log.d(TAG, "📋 Publishing DTC attributes for $friendlyName to $attributesTopic: $attributesJson")
+                // NOTE: publishState internally prepends the topic prefix - do NOT add prefix here
+                mqttPublisher.publishState("$attributesTopic", attributesJson.toString(), true)
             }
             
             discoveryBuilder.buildSwitch(
@@ -2108,14 +2131,13 @@ class OneControlGattCallback(
             }
 
             // Publish generator attributes (quiet hours, raw status byte)
-            val baseTopic = "onecontrol/${device.address}"
-            val prefix = mqttPublisher.topicPrefix
+            // NOTE: publishState internally prepends the topic prefix - do NOT add it here
             val attrJson = JSONObject().apply {
                 put("quiet_hours", quietHoursActive)
                 put("status_byte", "0x${statusByte0.toString(16).uppercase().padStart(2, '0')}")
             }
             mqttPublisher.publishState(
-                "$prefix/$baseTopic/device/$tableId/$deviceId/generator_attributes",
+                "onecontrol/${device.address}/device/$tableId/$deviceId/generator_attributes",
                 attrJson.toString(), true
             )
 
@@ -2245,8 +2267,7 @@ class OneControlGattCallback(
             }
 
             // Publish runtime attributes
-            val baseTopic = "onecontrol/${device.address}"
-            val prefix = mqttPublisher.topicPrefix
+            // NOTE: publishState internally prepends the topic prefix - do NOT add it here
             val attrJson = JSONObject().apply {
                 put("operating_seconds", opSec)
                 put("running", running)
@@ -2258,7 +2279,7 @@ class OneControlGattCallback(
                 put("status_bits", "0x${statusBits.toString(16).uppercase().padStart(2, '0')}")
             }
             mqttPublisher.publishState(
-                "$prefix/$baseTopic/device/$tableId/$deviceId/runtime_attributes",
+                "onecontrol/${device.address}/device/$tableId/$deviceId/runtime_attributes",
                 attrJson.toString(), true
             )
         }
@@ -3175,10 +3196,22 @@ class OneControlGattCallback(
     }
     
     private fun cleanup(gatt: BluetoothGatt) {
+        // Log connection duration for diagnostics
+        val duration = if (connectionStartTimeMs > 0) {
+            (System.currentTimeMillis() - connectionStartTimeMs) / 1000
+        } else 0
+        Log.i(TAG, "🧹 cleanup() called - connection duration: ${duration}s, wasConnected=$isConnected, wasAuth=$isAuthenticated")
+        
         stopHeartbeat()
         stopWatchdog()
         stopActiveStreamReading()
         
+        try {
+            // Android docs recommend calling disconnect() before close()
+            gatt.disconnect()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error disconnecting GATT (may already be disconnected)", e)
+        }
         try {
             gatt.close()
         } catch (e: Exception) {
