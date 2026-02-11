@@ -473,6 +473,7 @@ class OneControlGattCallback(
         GENERATOR_BATTERY("sensor", "gen_batt"),
         GENERATOR_TEMP("sensor", "gen_temp"),
         GENERATOR_QUIET("binary_sensor", "gen_quiet"),
+        GENERATOR_SWITCH("switch", "gen_switch"),
         RUNTIME_HOURS("sensor", "runtime")
     }
 
@@ -509,7 +510,7 @@ class OneControlGattCallback(
             EntityType.SYSTEM_SENSOR -> "Sensor"
             EntityType.GENERATOR_STATE, EntityType.GENERATOR_BATTERY,
             EntityType.GENERATOR_TEMP, EntityType.GENERATOR_QUIET,
-            EntityType.RUNTIME_HOURS -> "Generator"
+            EntityType.GENERATOR_SWITCH, EntityType.RUNTIME_HOURS -> "Generator"
         }
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackType)
         
@@ -2095,6 +2096,10 @@ class OneControlGattCallback(
             }
 
             val isRunning = stateEnum == 3  // RUNNING
+            // For switch entity: ON for any active state (priming/starting/running)
+            // OFF only when fully off or stopping. This prevents the user from
+            // re-sending ON during the startup sequence.
+            val isActive = stateEnum in 1..3  // PRIMING, STARTING, or RUNNING
 
             Log.i(TAG, "📦 Generator $tableId:$deviceId state=$stateName batt=${"%.2f".format(batteryVoltage)}V" +
                     " temp=${temperatureC?.let { "%.1f°C".format(it) } ?: "N/A"}" +
@@ -2184,6 +2189,24 @@ class OneControlGattCallback(
                     deviceName = "$friendlyName Quiet Hours",
                     stateTopic = "$prefix2/$qStateTopic",
                     icon = "mdi:volume-off"
+                )
+            }
+
+            // --- Entity 5: Generator switch (start/stop control) ---
+            publishEntityState(
+                entityType = EntityType.GENERATOR_SWITCH,
+                tableId = tableId,
+                deviceId = deviceId,
+                discoveryKey = "gen_switch_${"%02x%02x".format(tableId, deviceId)}",
+                state = mapOf("state" to if (isActive) "ON" else "OFF")
+            ) { friendlyName, deviceAddr, prefix2, baseTopic2 ->
+                val switchStateTopic = "$baseTopic2/device/$tableId/$deviceId/state"
+                val switchCommandTopic = "$baseTopic2/command/generator/$tableId/$deviceId"
+                discoveryBuilder.buildGeneratorSwitch(
+                    deviceAddr = deviceAddr,
+                    deviceName = "$friendlyName Switch",
+                    stateTopic = "$prefix2/$switchStateTopic",
+                    commandTopic = "$prefix2/$switchCommandTopic"
                 )
             }
         }
@@ -2813,6 +2836,7 @@ class OneControlGattCallback(
                     controlDimmableLight(tableId.toByte(), deviceId.toByte(), payload)
                 }
             }
+            "generator" -> controlGenerator(tableId.toByte(), deviceId.toByte(), payload)
             // SAFETY: Cover control disabled - RV awnings/slides have no limit switches
             // or overcurrent protection. Motors rely on operator judgment.
             // "cover" -> controlCover(tableId.toByte(), deviceId.toByte(), payload)
@@ -2871,6 +2895,56 @@ class OneControlGattCallback(
             return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send switch command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
+    /**
+     * Control the generator (start/stop) via ActionGeneratorGenie command (0x42).
+     * The gateway handles the state machine internally:
+     *   ON  → Off → Priming → Starting → Running
+     *   OFF → Running → Stopping → Off
+     */
+    private fun controlGenerator(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+        val turnOn = payload.equals("ON", ignoreCase = true) ||
+                     payload == "1" ||
+                     payload.equals("true", ignoreCase = true)
+        
+        Log.i(TAG, "📤 Generator control: table=$tableId, device=$deviceId, turnOn=$turnOn")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        try {
+            val commandId = getNextCommandId()
+            val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+                deviceTableId
+            } else {
+                tableId
+            }
+            
+            val command = MyRvLinkCommandBuilder.buildActionGeneratorGenie(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                turnOn = turnOn
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 Generator command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent generator command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, turnOn=$turnOn, result=$result")
+            
+            // Do NOT publish optimistic state — wait for actual GeneratorGenieStatus event.
+            // The generator transitions through priming/starting/stopping states, so the
+            // state sensor should reflect real hardware state, not our command intent.
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send generator command: ${e.message}", e)
             return Result.failure(e)
         }
     }

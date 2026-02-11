@@ -104,6 +104,21 @@ object HomeAssistantMqttDiscovery {
         /**
          * Build binary sensor discovery payload
          */
+        /**
+         * Build generator switch discovery payload (start/stop control)
+         */
+        fun buildGeneratorSwitch(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            commandTopic: String
+        ): JSONObject {
+            return getGeneratorSwitchDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, commandTopic, appVersion
+            )
+        }
+        
         fun buildBinarySensor(
             deviceAddr: Int,
             deviceName: String,
@@ -424,6 +439,38 @@ object HomeAssistantMqttDiscovery {
             put("icon", "mdi:engine")
             
             attributesTopic?.let { put("json_attributes_topic", it) }
+        }
+    }
+    
+    /**
+     * Generate discovery config for a generator switch (start/stop control)
+     * Uses MQTT switch component with state feedback from generator status events.
+     */
+    fun getGeneratorSwitchDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        stateTopic: String,
+        commandTopic: String,
+        appVersion: String? = null
+    ): JSONObject {
+        val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_gen_switch_${deviceAddr.toString(16)}"
+        val objectId = "gen_switch_${deviceAddr.toString(16).padStart(4, '0')}"
+        
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("default_entity_id", "switch.$objectId")
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+            
+            put("state_topic", stateTopic)
+            put("command_topic", commandTopic)
+            put("payload_on", "ON")
+            put("payload_off", "OFF")
+            put("state_on", "ON")
+            put("state_off", "OFF")
+            put("icon", "mdi:engine")
+            put("device_class", "switch")
         }
     }
     

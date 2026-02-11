@@ -215,6 +215,31 @@ object MyRvLinkCommandBuilder {
         )
     }
     
+    /**
+     * Build ActionGeneratorGenie command
+     * CommandType: 0x42 (ActionGeneratorGenie)
+     * Format: [ClientCommandId (2 bytes)][CommandType=0x42][DeviceTableId][DeviceId][RvLinkGeneratorCommand]
+     *
+     * RvLinkGeneratorCommand: 0x00 = Off, 0x01 = On
+     * The gateway handles the state machine (priming → starting → running) internally.
+     */
+    fun buildActionGeneratorGenie(
+        clientCommandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        turnOn: Boolean
+    ): ByteArray {
+        val commandByte = if (turnOn) 0x01.toByte() else 0x00.toByte()
+        return byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),           // CmdId low
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),  // CmdId high
+            0x42.toByte(),  // CommandType: ActionGeneratorGenie (66 = 0x42)
+            deviceTableId,
+            deviceId,
+            commandByte
+        )
+    }
+
     // H-Bridge command constants
     object HBridgeCommand {
         const val STOP: Byte = 0x00
