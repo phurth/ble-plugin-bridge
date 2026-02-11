@@ -1737,18 +1737,9 @@ class OneControlGattCallback(
                 "indoor=${indoorTempF?.let { "%.1f°F".format(it) } ?: "N/A"} " +
                 "outdoor=${outdoorTempF?.let { "%.1f°F".format(it) } ?: "N/A"}")
             
-            // Store zone state for command merging
-            val zoneKey = "$tableId:$deviceId"
-            val zoneState = HvacZoneState(
-                heatMode = heatMode, heatSource = heatSource, fanMode = fanMode,
-                lowTripTempF = lowTripTempF, highTripTempF = highTripTempF,
-                zoneStatus = statusByte,
-                indoorTempF = indoorTempF, outdoorTempF = outdoorTempF
-            )
-            hvacZoneStates[zoneKey] = zoneState
-            
             // Pending command guard: suppress mismatching status during command window
             // This prevents the UI from bouncing back to old values while the gateway processes
+            val zoneKey = "$tableId:$deviceId"
             val pendingCmd = pendingHvacCommands[zoneKey]
             if (pendingCmd != null) {
                 val age = System.currentTimeMillis() - pendingCmd.timestamp
@@ -1764,7 +1755,7 @@ class OneControlGattCallback(
                             "got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
                             "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}")
                         offset += BYTES_PER_DEVICE
-                        continue  // Skip publishing this zone's status
+                        continue  // Skip storing and publishing this zone's stale status
                     }
                     // Matches! Gateway confirmed our command — clear pending
                     Log.i(TAG, "✅ HVAC command confirmed by gateway (age=${age}ms)")
@@ -1772,6 +1763,16 @@ class OneControlGattCallback(
                 // Clear pending (either confirmed or window expired)
                 pendingHvacCommands.remove(zoneKey)
             }
+            
+            // Store zone state for command merging — AFTER pending guard
+            // so suppressed stale status doesn't corrupt the merge baseline
+            val zoneState = HvacZoneState(
+                heatMode = heatMode, heatSource = heatSource, fanMode = fanMode,
+                lowTripTempF = lowTripTempF, highTripTempF = highTripTempF,
+                zoneStatus = statusByte,
+                indoorTempF = indoorTempF, outdoorTempF = outdoorTempF
+            )
+            hvacZoneStates[zoneKey] = zoneState
             
             // Map to HA values
             val haMode = when (heatMode) {
@@ -1849,12 +1850,18 @@ class OneControlGattCallback(
             
             // Determine if this zone supports multiple heat sources from device capability byte
             // ClimateZoneCapabilityFlag: bit0=GasFurnace, bit1=AirConditioner, bit2=HeatPump
-            // Presets shown only when zone has BOTH gas (bit0) AND heat pump (bit2)
+            // Presets shown when zone has BOTH gas (bit0) AND heat pump (bit2)
+            // If capability byte is 0x00 (unknown/unpopulated firmware), default to including presets
+            // since they're harmless on single-source zones (controller ignores irrelevant source setting)
             val deviceAddr = (tableId shl 8) or deviceId
             val capability = deviceMetadata[deviceAddr]?.rawCapability ?: 0
-            val hasGas = (capability and 0x01) != 0
-            val hasHeatPump = (capability and 0x04) != 0
-            val includePresets = hasGas && hasHeatPump
+            val includePresets = if (capability == 0) {
+                true  // Unknown capability — include presets by default
+            } else {
+                val hasGas = (capability and 0x01) != 0
+                val hasHeatPump = (capability and 0x04) != 0
+                hasGas && hasHeatPump
+            }
             
             if (includePresets) {
                 stateMap["state/preset_mode"] = haPreset
@@ -3352,6 +3359,19 @@ class OneControlGattCallback(
                 mqttPublisher.publishState("$baseTopic/state/fan_mode", haFanMode, true)
                 
                 Log.i(TAG, "📤 Optimistic HVAC state published, suppressing stale updates for ${HVAC_PENDING_WINDOW_MS}ms")
+                
+                // Update hvacZoneStates with commanded values so next command merges correctly
+                hvacZoneStates[zoneKey] = HvacZoneState(
+                    heatMode = heatMode,
+                    heatSource = heatSource,
+                    fanMode = fanMode,
+                    lowTripTempF = lowTrip,
+                    highTripTempF = highTrip,
+                    zoneStatus = currentState?.zoneStatus ?: 0,
+                    indoorTempF = currentState?.indoorTempF,
+                    outdoorTempF = currentState?.outdoorTempF
+                )
+                
                 return Result.success(Unit)
             } else {
                 return Result.failure(Exception("Write failed"))
