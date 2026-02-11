@@ -1158,27 +1158,18 @@ class OneControlGattCallback(
     /**
      * Handle characteristic notification
      * COPIED FROM LEGACY APP - queues data for stream reading
+     *
+     * NOTE: Do NOT deduplicate notifications by content here. The DATA_READ characteristic
+     * delivers a continuous COBS byte stream split across arbitrary BLE notification chunks.
+     * Two consecutive chunks may have identical bytes but are distinct parts of the stream.
+     * Dropping "duplicates" corrupts the COBS decoder alignment, causing shifted frame
+     * boundaries and wrong tableId/deviceId values in parsed events.
      */
-    // Notification deduplication: skip if identical bytes arrive within a short window
-    private var lastNotifyBytes: ByteArray? = null
-    private var lastNotifyTimestampMs: Long = 0L
-    private val NOTIFY_DEDUP_WINDOW_MS = 15L  // 15ms window for dedup
-
     private fun handleCharacteristicNotification(uuid: UUID, data: ByteArray) {
         if (data.isEmpty()) {
             Log.w(TAG, "📨 Empty notification from $uuid")
             return
         }
-        
-        // Deduplicate: if same bytes within a short window, skip
-        val now = System.currentTimeMillis()
-        val prevBytes = lastNotifyBytes
-        if (prevBytes != null && (now - lastNotifyTimestampMs) < NOTIFY_DEDUP_WINDOW_MS && data.contentEquals(prevBytes)) {
-            Log.d(TAG, "📨 Duplicate notification suppressed (${now - lastNotifyTimestampMs}ms)")
-            return
-        }
-        lastNotifyBytes = data.copyOf()
-        lastNotifyTimestampMs = now
         
         // NOTE: logBleEvent already called by onCharacteristicChanged; no double-log here
         Log.i(TAG, "📨 Notification from $uuid: ${data.size} bytes")
