@@ -558,9 +558,6 @@ class OneControlGattCallback(
         val outdoorTempF: Double? // Outdoor temp °F (null=invalid)
     )
     private val hvacZoneStates = mutableMapOf<String, HvacZoneState>()
-    // Track zones that have been confirmed to have multiple heat sources (heatSource > 0)
-    // Only these zones get the preset_mode dropdown in HA discovery
-    private val hvacZonesWithHeatPump = mutableSetOf<String>()
 
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
@@ -1759,23 +1756,44 @@ class OneControlGattCallback(
             }
             
             // Build state map for publishEntityState
-            // Always publish all three temperature topics so HA correctly switches
-            // between single-setpoint (heat/cool) and dual-setpoint (heat_cool) views
+            // Use "None" pattern (like EasyTouch) so HA properly switches between
+            // single-setpoint (heat/cool) and dual-setpoint (heat_cool) views
             val stateMap = mutableMapOf(
                 "state/mode" to haMode,
                 "state/fan_mode" to haFanMode,
-                "state/action" to haAction,
-                "state/target_temperature_low" to lowTripTempF.toString(),
-                "state/target_temperature_high" to highTripTempF.toString()
+                "state/action" to haAction
             )
-            // Publish target_temperature in all modes (needed for thermostat card)
-            val singleSetpoint = when (heatMode) {
-                1 -> lowTripTempF    // heat: use heat setpoint
-                2 -> highTripTempF   // cool: use cool setpoint
-                3 -> highTripTempF   // heat_cool: HA uses high/low, but card may need this
-                else -> highTripTempF
+            // Publish temperature topics based on mode:
+            // - heat/cool: single setpoint via target_temperature, "None" for high/low
+            // - heat_cool: dual setpoints via high/low, "None" for single
+            // - off: all "None"
+            when (heatMode) {
+                0 -> {  // off
+                    stateMap["state/target_temperature"] = "None"
+                    stateMap["state/target_temperature_low"] = "None"
+                    stateMap["state/target_temperature_high"] = "None"
+                }
+                1 -> {  // heat
+                    stateMap["state/target_temperature"] = lowTripTempF.toString()
+                    stateMap["state/target_temperature_low"] = "None"
+                    stateMap["state/target_temperature_high"] = "None"
+                }
+                2 -> {  // cool
+                    stateMap["state/target_temperature"] = highTripTempF.toString()
+                    stateMap["state/target_temperature_low"] = "None"
+                    stateMap["state/target_temperature_high"] = "None"
+                }
+                3 -> {  // heat_cool (auto dual setpoint)
+                    stateMap["state/target_temperature"] = "None"
+                    stateMap["state/target_temperature_low"] = lowTripTempF.toString()
+                    stateMap["state/target_temperature_high"] = highTripTempF.toString()
+                }
+                else -> {
+                    stateMap["state/target_temperature"] = highTripTempF.toString()
+                    stateMap["state/target_temperature_low"] = "None"
+                    stateMap["state/target_temperature_high"] = "None"
+                }
             }
-            stateMap["state/target_temperature"] = singleSetpoint.toString()
             indoorTempF?.let {
                 stateMap["state/current_temperature"] = "%.1f".format(it)
             }
@@ -1783,24 +1801,13 @@ class OneControlGattCallback(
                 stateMap["state/outdoor_temperature"] = "%.1f".format(it)
             }
             
-            // Track heat source capability per zone
-            // If we see heatSource > 0 (PreferHeatPump), this zone has multiple heat sources
-            val isNewHeatPumpZone = heatSource > 0 && hvacZonesWithHeatPump.add(zoneKey)
-            val includePresets = zoneKey in hvacZonesWithHeatPump
-            
-            // Only publish preset_mode for zones with multiple heat sources
-            if (includePresets) {
-                stateMap["state/preset_mode"] = haPreset
-            }
+            // Always publish preset_mode — we cannot reliably detect which zones
+            // support multiple heat sources from status alone (heatSource=0 could mean
+            // gas-only OR gas-selected-on-a-dual-source zone)
+            stateMap["state/preset_mode"] = haPreset
             
             // Publish via centralized entity state method
             val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
-            
-            // Force re-discovery if zone was just detected as having multiple heat sources
-            if (isNewHeatPumpZone && haDiscoveryPublished.contains(discoveryKey)) {
-                Log.i(TAG, "📢 Re-publishing HVAC discovery for $zoneKey with preset support")
-                haDiscoveryPublished.remove(discoveryKey)
-            }
             
             publishEntityState(
                 entityType = EntityType.CLIMATE,
@@ -1815,7 +1822,6 @@ class OneControlGattCallback(
                     deviceName = friendlyName,
                     baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
                     commandBaseTopic = "$prefix/$baseTopic/command/climate/$tableId/$deviceId",
-                    includePresets = includePresets,
                     appVersion = try {
                         context.packageManager.getPackageInfo(context.packageName, 0).versionName
                     } catch (_: Exception) { null }

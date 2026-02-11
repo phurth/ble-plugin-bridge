@@ -11,8 +11,8 @@ android {
         applicationId = "com.blemqttbridge"
         minSdk = 26  // Android 8.0
         targetSdk = 34
-        versionCode = 58
-        versionName = "2.6.2-pre5"
+        versionCode = 59
+        versionName = "2.6.2-pre6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
