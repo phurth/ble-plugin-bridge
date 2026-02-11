@@ -558,6 +558,9 @@ class OneControlGattCallback(
         val outdoorTempF: Double? // Outdoor temp °F (null=invalid)
     )
     private val hvacZoneStates = mutableMapOf<String, HvacZoneState>()
+    // Track zones that have been confirmed to have multiple heat sources (heatSource > 0)
+    // Only these zones get the preset_mode dropdown in HA discovery
+    private val hvacZonesWithHeatPump = mutableSetOf<String>()
 
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
@@ -1756,21 +1759,23 @@ class OneControlGattCallback(
             }
             
             // Build state map for publishEntityState
+            // Always publish all three temperature topics so HA correctly switches
+            // between single-setpoint (heat/cool) and dual-setpoint (heat_cool) views
             val stateMap = mutableMapOf(
                 "state/mode" to haMode,
                 "state/fan_mode" to haFanMode,
                 "state/action" to haAction,
                 "state/target_temperature_low" to lowTripTempF.toString(),
-                "state/target_temperature_high" to highTripTempF.toString(),
-                "state/preset_mode" to haPreset
+                "state/target_temperature_high" to highTripTempF.toString()
             )
-            // Single-setpoint target_temperature: use the relevant setpoint for the current mode
-            when (heatMode) {
-                1 -> stateMap["state/target_temperature"] = lowTripTempF.toString()   // heat
-                2 -> stateMap["state/target_temperature"] = highTripTempF.toString()  // cool
-                3 -> {} // heat_cool: HA uses high/low, no single target
-                else -> stateMap["state/target_temperature"] = highTripTempF.toString()
+            // Publish target_temperature in all modes (needed for thermostat card)
+            val singleSetpoint = when (heatMode) {
+                1 -> lowTripTempF    // heat: use heat setpoint
+                2 -> highTripTempF   // cool: use cool setpoint
+                3 -> highTripTempF   // heat_cool: HA uses high/low, but card may need this
+                else -> highTripTempF
             }
+            stateMap["state/target_temperature"] = singleSetpoint.toString()
             indoorTempF?.let {
                 stateMap["state/current_temperature"] = "%.1f".format(it)
             }
@@ -1778,8 +1783,25 @@ class OneControlGattCallback(
                 stateMap["state/outdoor_temperature"] = "%.1f".format(it)
             }
             
+            // Track heat source capability per zone
+            // If we see heatSource > 0 (PreferHeatPump), this zone has multiple heat sources
+            val isNewHeatPumpZone = heatSource > 0 && hvacZonesWithHeatPump.add(zoneKey)
+            val includePresets = zoneKey in hvacZonesWithHeatPump
+            
+            // Only publish preset_mode for zones with multiple heat sources
+            if (includePresets) {
+                stateMap["state/preset_mode"] = haPreset
+            }
+            
             // Publish via centralized entity state method
             val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
+            
+            // Force re-discovery if zone was just detected as having multiple heat sources
+            if (isNewHeatPumpZone && haDiscoveryPublished.contains(discoveryKey)) {
+                Log.i(TAG, "📢 Re-publishing HVAC discovery for $zoneKey with preset support")
+                haDiscoveryPublished.remove(discoveryKey)
+            }
+            
             publishEntityState(
                 entityType = EntityType.CLIMATE,
                 tableId = tableId,
@@ -1787,13 +1809,13 @@ class OneControlGattCallback(
                 discoveryKey = discoveryKey,
                 state = stateMap
             ) { friendlyName, deviceAddr, prefix, baseTopic ->
-                val macClean = device.address.replace(":", "").lowercase()
                 HomeAssistantMqttDiscovery.getClimateDiscovery(
                     gatewayMac = device.address,
                     deviceAddr = deviceAddr,
                     deviceName = friendlyName,
                     baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
                     commandBaseTopic = "$prefix/$baseTopic/command/climate/$tableId/$deviceId",
+                    includePresets = includePresets,
                     appVersion = try {
                         context.packageManager.getPackageInfo(context.packageName, 0).versionName
                     } catch (_: Exception) { null }
@@ -3148,7 +3170,7 @@ class OneControlGattCallback(
                 Log.i(TAG, "📤 HVAC fan_mode -> $payload (fanMode=$fanMode)")
             }
             "temperature" -> {
-                val temp = payload.toIntOrNull()
+                val temp = payload.toDoubleOrNull()?.toInt()
                     ?: return Result.failure(Exception("Invalid temperature: $payload"))
                 // Single setpoint: apply to the relevant setpoint based on current mode
                 when (heatMode) {
@@ -3159,12 +3181,12 @@ class OneControlGattCallback(
                 Log.i(TAG, "📤 HVAC temperature -> $temp°F (mode=$heatMode, low=$lowTrip, high=$highTrip)")
             }
             "temperature_high" -> {
-                highTrip = payload.toIntOrNull()
+                highTrip = payload.toDoubleOrNull()?.toInt()
                     ?: return Result.failure(Exception("Invalid temperature_high: $payload"))
                 Log.i(TAG, "📤 HVAC temperature_high -> $highTrip°F")
             }
             "temperature_low" -> {
-                lowTrip = payload.toIntOrNull()
+                lowTrip = payload.toDoubleOrNull()?.toInt()
                     ?: return Result.failure(Exception("Invalid temperature_low: $payload"))
                 Log.i(TAG, "📤 HVAC temperature_low -> $lowTrip°F")
             }

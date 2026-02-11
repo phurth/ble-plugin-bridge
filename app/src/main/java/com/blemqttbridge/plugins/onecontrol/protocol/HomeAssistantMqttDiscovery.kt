@@ -136,11 +136,12 @@ object HomeAssistantMqttDiscovery {
             deviceAddr: Int,
             deviceName: String,
             baseTopic: String,
-            commandBaseTopic: String
+            commandBaseTopic: String,
+            includePresets: Boolean = true
         ): JSONObject {
             return getClimateDiscovery(
                 gatewayMac, deviceAddr, deviceName,
-                baseTopic, commandBaseTopic, appVersion
+                baseTopic, commandBaseTopic, includePresets, appVersion
             )
         }
         
@@ -553,6 +554,7 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         baseTopic: String,
         commandBaseTopic: String,
+        includePresets: Boolean = true,
         appVersion: String? = null
     ): JSONObject {
         val macClean = gatewayMac.replace(":", "").lowercase()
@@ -564,11 +566,18 @@ object HomeAssistantMqttDiscovery {
             put("name", deviceName)
             put("object_id", objectId)
             put("device", getDeviceInfo(gatewayMac, appVersion))
+            put("has_entity_name", false)
 
             // Modes: off, heat, cool, heat_cool (auto dual setpoint)
             put("modes", JSONArray(listOf("off", "heat", "cool", "heat_cool")))
             put("fan_modes", JSONArray(listOf("auto", "high", "low")))
-            put("preset_modes", JSONArray(listOf("Prefer Gas", "Prefer Heat Pump")))
+
+            // Only include preset modes for zones with multiple heat sources
+            if (includePresets) {
+                put("preset_modes", JSONArray(listOf("Prefer Gas", "Prefer Heat Pump")))
+                put("preset_mode_state_topic", "$baseTopic/state/preset_mode")
+                put("preset_mode_command_topic", "$commandBaseTopic/preset_mode")
+            }
 
             put("temperature_unit", "F")
             put("temp_step", 1)
@@ -583,7 +592,6 @@ object HomeAssistantMqttDiscovery {
             put("temperature_low_state_topic", "$baseTopic/state/target_temperature_low")
             put("fan_mode_state_topic", "$baseTopic/state/fan_mode")
             put("action_topic", "$baseTopic/state/action")
-            put("preset_mode_state_topic", "$baseTopic/state/preset_mode")
 
             // Command topics
             put("mode_command_topic", "$commandBaseTopic/mode")
@@ -591,7 +599,6 @@ object HomeAssistantMqttDiscovery {
             put("temperature_high_command_topic", "$commandBaseTopic/temperature_high")
             put("temperature_low_command_topic", "$commandBaseTopic/temperature_low")
             put("fan_mode_command_topic", "$commandBaseTopic/fan_mode")
-            put("preset_mode_command_topic", "$commandBaseTopic/preset_mode")
 
             put("icon", "mdi:thermostat")
         }
