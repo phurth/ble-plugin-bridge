@@ -1858,7 +1858,7 @@ class OneControlGattCallback(
             val capability = metaEntry?.rawCapability ?: 0
             val capDiag = "🔍 HVAC $tableId:$deviceId addr=0x%04X meta=${metaEntry != null} cap=0x%02X fn=${metaEntry?.functionName ?: -1} includePresets=${capability == 0 || ((capability and 0x01) != 0 && (capability and 0x04) != 0)}".format(deviceAddr, capability)
             Log.i(TAG, capDiag)
-            mqttPublisher.logBleEvent(capDiag)
+            mqttPublisher.logServiceEvent(capDiag)
             val includePresets = if (capability == 0) {
                 true  // Unknown capability — include presets by default
             } else {

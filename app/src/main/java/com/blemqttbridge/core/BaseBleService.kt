@@ -73,7 +73,7 @@ class BaseBleService : Service() {
         
         // Debug and trace limits
         private const val MAX_DEBUG_LOG_LINES = 2000
-        private const val MAX_BLE_TRACE_LINES = 1000
+        private const val MAX_BLE_TRACE_LINES = 5000
         private const val TRACE_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
         private const val TRACE_MAX_DURATION_MS = 10 * 60 * 1000L  // 10 minutes
         
@@ -186,7 +186,7 @@ class BaseBleService : Service() {
     // Thread-safe: uses ConcurrentLinkedDeque to protect against concurrent access
     // from BLE callbacks and web server threads
     private val bleTraceBuffer = ConcurrentLinkedDeque<String>()
-    private val MAX_BLE_TRACE_LINES = 1000
+    // Uses companion MAX_BLE_TRACE_LINES = 5000
     private var traceEnabled = false
     private var traceWriter: java.io.BufferedWriter? = null
     private var traceFile: java.io.File? = null
@@ -373,6 +373,10 @@ class BaseBleService : Service() {
         
         override fun logBleEvent(message: String) {
             appendBleTrace(message)
+        }
+
+        override fun logServiceEvent(message: String) {
+            appendServiceLog(message)
         }
     }
 

@@ -111,4 +111,13 @@ interface MqttPublisher {
      * @param message Event description (e.g., "WRITE uuid: hex_data (status=0)")
      */
     fun logBleEvent(message: String)
+
+    /**
+     * Log a service-level event to the debug log (serviceLogBuffer).
+     * Use this for important diagnostic messages that should survive BLE trace buffer churn.
+     * These appear in the "Export Debug Log" output.
+     *
+     * @param message Event description
+     */
+    fun logServiceEvent(message: String) { /* default no-op */ }
 }
