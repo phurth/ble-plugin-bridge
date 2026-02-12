@@ -1854,7 +1854,9 @@ class OneControlGattCallback(
             // If capability byte is 0x00 (unknown/unpopulated firmware), default to including presets
             // since they're harmless on single-source zones (controller ignores irrelevant source setting)
             val deviceAddr = (tableId shl 8) or deviceId
-            val capability = deviceMetadata[deviceAddr]?.rawCapability ?: 0
+            val metaEntry = deviceMetadata[deviceAddr]
+            val capability = metaEntry?.rawCapability ?: 0
+            Log.i(TAG, "🔍 HVAC $tableId:$deviceId addr=0x%04X meta=${metaEntry != null} cap=0x%02X fn=${metaEntry?.functionName ?: -1} includePresets=${capability == 0 || ((capability and 0x01) != 0 && (capability and 0x04) != 0)}".format(deviceAddr, capability))
             val includePresets = if (capability == 0) {
                 true  // Unknown capability — include presets by default
             } else {
