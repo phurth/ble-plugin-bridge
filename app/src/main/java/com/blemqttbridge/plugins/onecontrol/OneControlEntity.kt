@@ -63,6 +63,48 @@ sealed class OneControlEntity {
     }
     
     /**
+     * RGB light entity - supports color and effects
+     * 
+     * @param tableId Device table ID
+     * @param deviceId Device ID within table
+     * @param red Red channel (0-255)
+     * @param green Green channel (0-255)
+     * @param blue Blue channel (0-255)
+     * @param mode Mode byte (0=Off, 1=On/Solid, 2=Blink, 4=Jump3, 5=Jump7, 6=Fade3, 7=Fade7, 8=Rainbow)
+     * @param autoOff Auto-off timer in minutes (0=disabled)
+     * @param interval Effect interval in ms (for blink/transition effects)
+     */
+    data class RgbLight(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val red: Int,
+        val green: Int,
+        val blue: Int,
+        val mode: Int,
+        val autoOff: Int = 0,
+        val interval: Int = 0
+    ) : OneControlEntity() {
+        val isOn: Boolean get() = mode > 0
+        val state: String get() = if (isOn) "ON" else "OFF"
+        
+        /** Brightness computed from max RGB channel (for HA brightness slider) */
+        val brightness: Int get() = maxOf(red, green, blue)
+        
+        /** Effect name for HA */
+        val effectName: String get() = when (mode) {
+            0 -> "Solid"   // When off, default effect is Solid (will turn on with Solid)
+            1 -> "Solid"
+            2 -> "Blink"
+            4 -> "Jump 3"
+            5 -> "Jump 7"
+            6 -> "Fade 3"
+            7 -> "Fade 7"
+            8 -> "Rainbow"
+            else -> "Solid"
+        }
+    }
+    
+    /**
      * Tank sensor entity - monitors tank level percentage
      * 
      * @param tableId Device table ID

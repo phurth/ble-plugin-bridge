@@ -89,6 +89,66 @@ object MyRvLinkCommandBuilder {
     }
     
     /**
+     * Build ActionRgb command for RGB light control
+     * CommandType: 0x44 (ActionRgb)
+     * Format: CmdId_lo, CmdId_hi, 0x44, DeviceTableId, DeviceId, Mode, payload...
+     * 
+     * Payload varies by mode:
+     *   Off(0): no additional bytes
+     *   On(1): [R][G][B][AutoOff]
+     *   Blink(2): [R][G][B][AutoOff][IntervalHi][IntervalLo]
+     *   Transitions(4-8): [AutoOff][IntervalHi][IntervalLo]
+     *   Restore(127): no additional bytes
+     */
+    fun buildActionRgb(
+        clientCommandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        mode: Int,
+        red: Int = 0,
+        green: Int = 0,
+        blue: Int = 0,
+        autoOff: Int = 0,
+        intervalMs: Int = 500
+    ): ByteArray {
+        val header = byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),
+            0x44.toByte(),  // CommandType: ActionRgb
+            deviceTableId,
+            deviceId
+        )
+        
+        val payload = when (mode) {
+            0, 127 -> byteArrayOf(mode.toByte())  // Off or Restore
+            1 -> byteArrayOf(  // On (Solid)
+                mode.toByte(),
+                red.coerceIn(0, 255).toByte(),
+                green.coerceIn(0, 255).toByte(),
+                blue.coerceIn(0, 255).toByte(),
+                autoOff.coerceIn(0, 255).toByte()
+            )
+            2 -> byteArrayOf(  // Blink
+                mode.toByte(),
+                red.coerceIn(0, 255).toByte(),
+                green.coerceIn(0, 255).toByte(),
+                blue.coerceIn(0, 255).toByte(),
+                autoOff.coerceIn(0, 255).toByte(),
+                ((intervalMs shr 8) and 0xFF).toByte(),
+                (intervalMs and 0xFF).toByte()
+            )
+            else -> byteArrayOf(  // Transition effects (4-8)
+                mode.toByte(),
+                autoOff.coerceIn(0, 255).toByte(),
+                ((intervalMs shr 8) and 0xFF).toByte(),
+                (intervalMs and 0xFF).toByte()
+            )
+        }
+        
+        return header + payload
+    }
+    
+    /**
      * Build ActionDimmable with full command structure
      * This is a simplified version - full implementation would use LogicalDeviceLightDimmableCommand
      */

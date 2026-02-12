@@ -22,6 +22,22 @@ object MyRvLinkCommandEncoder {
     }
     
     /**
+     * RGB Light Mode/Command types
+     * From official app's LogicalDeviceLightRGBCommand
+     */
+    enum class RgbLightMode(val value: Byte) {
+        Off(0),
+        On(1),        // Solid color
+        Blink(2),     // Blink effect
+        Jump3(4),     // 3-color jump transition
+        Jump7(5),     // 7-color jump transition
+        Fade3(6),     // 3-color fade transition
+        Fade7(7),     // 7-color fade transition
+        Rainbow(8),   // Rainbow cycle
+        Restore(127.toByte())  // Restore last settings
+    }
+    
+    /**
      * Encode ActionDimmable command for controlling dimmable lights.
      *
      * Wire format to match the HCI capture (commandId first, then CommandType):
@@ -61,6 +77,75 @@ object MyRvLinkCommandEncoder {
         Log.d(TAG, "Encoded ActionDimmable (HCI format): cmdId=0x${commandId.toString(16)}, " +
                    "device=0x${deviceTableId.toString(16)}:${deviceId.toString(16)}, " +
                    "mode=0x${(modeByte.toInt() and 0xFF).toString(16)}, brightness=0x${(brightnessByte.toInt() and 0xFF).toString(16)}, size=8 bytes")
+        Log.d(TAG, "Raw command bytes: ${commandBytes.joinToString(" ") { "%02X".format(it) }}")
+        
+        return commandBytes
+    }
+    
+    /**
+     * Encode ActionRgb command for controlling RGB lights.
+     *
+     * Wire format:
+     *   CmdId_lo, CmdId_hi, CommandType=0x44, DeviceTableId, DeviceId, Mode, payload...
+     *
+     * Payload varies by mode:
+     *   Off(0):      [Mode]  (1 byte, no additional payload)
+     *   On(1):       [Mode][R][G][B][AutoOff]  (5 bytes)
+     *   Blink(2):    [Mode][R][G][B][AutoOff][OnIntervalHi][OnIntervalLo]  (7 bytes - simplified, off interval mirrors on)
+     *   Transitions: [Mode][AutoOff][IntervalHi][IntervalLo]  (4 bytes, modes 4-8)
+     *   Restore(127):[Mode]  (1 byte)
+     */
+    fun encodeActionRgb(
+        commandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        mode: RgbLightMode,
+        red: Int = 0,
+        green: Int = 0,
+        blue: Int = 0,
+        autoOff: Int = 0,
+        intervalMs: Int = 500
+    ): ByteArray {
+        val header = byteArrayOf(
+            (commandId.toInt() and 0xFF).toByte(),            // CmdId low
+            ((commandId.toInt() shr 8) and 0xFF).toByte(),   // CmdId high
+            0x44.toByte(),                                   // CommandType: ActionRgb
+            deviceTableId,
+            deviceId
+        )
+        
+        val payload = when (mode) {
+            RgbLightMode.Off, RgbLightMode.Restore -> byteArrayOf(mode.value)
+            RgbLightMode.On -> byteArrayOf(
+                mode.value,
+                red.coerceIn(0, 255).toByte(),
+                green.coerceIn(0, 255).toByte(),
+                blue.coerceIn(0, 255).toByte(),
+                autoOff.coerceIn(0, 255).toByte()
+            )
+            RgbLightMode.Blink -> byteArrayOf(
+                mode.value,
+                red.coerceIn(0, 255).toByte(),
+                green.coerceIn(0, 255).toByte(),
+                blue.coerceIn(0, 255).toByte(),
+                autoOff.coerceIn(0, 255).toByte(),
+                ((intervalMs shr 8) and 0xFF).toByte(),      // Interval high
+                (intervalMs and 0xFF).toByte()                // Interval low
+            )
+            // Transition effects (Jump3/Jump7/Fade3/Fade7/Rainbow) — no color, just timing
+            else -> byteArrayOf(
+                mode.value,
+                autoOff.coerceIn(0, 255).toByte(),
+                ((intervalMs shr 8) and 0xFF).toByte(),      // Interval high
+                (intervalMs and 0xFF).toByte()                // Interval low
+            )
+        }
+        
+        val commandBytes = header + payload
+        
+        Log.d(TAG, "Encoded ActionRgb: cmdId=0x${commandId.toString(16)}, " +
+                   "device=0x${deviceTableId.toString(16)}:${deviceId.toString(16)}, " +
+                   "mode=${mode.name}, R=$red G=$green B=$blue, size=${commandBytes.size} bytes")
         Log.d(TAG, "Raw command bytes: ${commandBytes.joinToString(" ") { "%02X".format(it) }}")
         
         return commandBytes

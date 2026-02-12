@@ -170,12 +170,57 @@ data class DimmableLightStatus(
 
 /**
  * RGB light status data class
+ * Status bytes layout (8 bytes from official app LogicalDeviceLightRGBStatus):
+ *   [0] Mode:      0=Off, 1=On, 2=Blink, 4=Jump3, 5=Jump7, 6=Fade3, 7=Fade7, 8=Rainbow, 127=Restore
+ *   [1] Red:       0-255
+ *   [2] Green:     0-255
+ *   [3] Blue:      0-255
+ *   [4] AutoOff:   0-255 (minutes, 0=disabled)
+ *   [5] IntervalHi: interval high byte (big-endian)
+ *   [6] IntervalLo: interval low byte (big-endian)
+ *   [7] Reserved
  */
 data class RgbLightStatus(
     val deviceTableId: Byte,
     val deviceId: Byte,
     val statusBytes: ByteArray
 ) {
+    /** Mode byte: 0=Off, 1=On, 2=Blink, 4=Jump3, 5=Jump7, 6=Fade3, 7=Fade7, 8=Rainbow */
+    val mode: Int get() = if (statusBytes.isNotEmpty()) statusBytes[0].toInt() and 0xFF else 0
+
+    /** Red channel 0-255 */
+    val red: Int get() = if (statusBytes.size > 1) statusBytes[1].toInt() and 0xFF else 0
+
+    /** Green channel 0-255 */
+    val green: Int get() = if (statusBytes.size > 2) statusBytes[2].toInt() and 0xFF else 0
+
+    /** Blue channel 0-255 */
+    val blue: Int get() = if (statusBytes.size > 3) statusBytes[3].toInt() and 0xFF else 0
+
+    /** Auto-off timer in minutes (0 = disabled) */
+    val autoOff: Int get() = if (statusBytes.size > 4) statusBytes[4].toInt() and 0xFF else 0
+
+    /** Effect interval in milliseconds (big-endian 16-bit) */
+    val interval: Int get() = if (statusBytes.size > 6) {
+        ((statusBytes[5].toInt() and 0xFF) shl 8) or (statusBytes[6].toInt() and 0xFF)
+    } else 0
+
+    /** Whether the light is on (mode > 0) */
+    val isOn: Boolean get() = mode > 0
+
+    /** Effect name for HA effect_list */
+    val effectName: String get() = when (mode) {
+        0 -> "Off"
+        1 -> "Solid"
+        2 -> "Blink"
+        4 -> "Jump 3"
+        5 -> "Jump 7"
+        6 -> "Fade 3"
+        7 -> "Fade 7"
+        8 -> "Rainbow"
+        else -> "Unknown"
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false

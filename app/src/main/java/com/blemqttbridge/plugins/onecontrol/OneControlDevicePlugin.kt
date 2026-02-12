@@ -469,6 +469,7 @@ class OneControlGattCallback(
     enum class EntityType(val haComponent: String, val topicPrefix: String) {
         SWITCH("switch", "switch"),
         LIGHT("light", "light"),
+        RGB_LIGHT("light", "rgb_light"),
         COVER_SENSOR("sensor", "cover_state"),  // Cover as state sensor for safety
         TANK_SENSOR("sensor", "tank"),
         SYSTEM_SENSOR("sensor", "system"),
@@ -509,6 +510,7 @@ class OneControlGattCallback(
         val fallbackType = when (entityType) {
             EntityType.SWITCH -> "Switch"
             EntityType.LIGHT -> "Light"
+            EntityType.RGB_LIGHT -> "RGB Light"
             EntityType.COVER_SENSOR -> "Cover"
             EntityType.TANK_SENSOR -> "Tank"
             EntityType.SYSTEM_SENSOR -> "Sensor"
@@ -599,6 +601,16 @@ class OneControlGattCallback(
     // Pending send: debounce rapid slider changes
     private val pendingDimmableSend = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, timestamp)
     private val DIMMER_DEBOUNCE_MS = 200L
+    
+    // RGB light control tracking
+    // Key: "tableId:deviceId", Value: last known RGB color
+    private val lastKnownRgbColor = mutableMapOf<String, Triple<Int, Int, Int>>()  // key -> (R, G, B)
+    // Pending RGB: tracks in-flight commands to suppress conflicting gateway status
+    private val pendingRgb = mutableMapOf<String, Pair<String, Long>>()  // key -> (description, timestamp)
+    private val RGB_PENDING_WINDOW_MS = 12000L
+    // Pending send: debounce rapid color changes
+    private val pendingRgbSend = mutableMapOf<String, Pair<() -> Unit, Long>>()  // key -> (action, timestamp)
+    private val RGB_DEBOUNCE_MS = 200L
     
     // Heartbeat
     private var heartbeatRunnable: Runnable? = null
@@ -1448,6 +1460,11 @@ class OneControlGattCallback(
                 Log.i(TAG, "📦 DimmableLightStatus event")
                 handleDimmableLightStatus(decodedFrame)
             }
+            0x09 -> {
+                // RgbLightStatus
+                Log.i(TAG, "📦 RgbLightStatus event")
+                handleRgbLightStatus(decodedFrame)
+            }
             0x0A -> {
                 // GeneratorGenieStatus
                 Log.i(TAG, "📦 GeneratorGenieStatus event")
@@ -1719,6 +1736,114 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
                 brightnessTopic = "$prefix/$brightnessTopic"
+            )
+        }
+    }
+    
+    /**
+     * Handle RgbLightStatus event (0x09)
+     * Frame: [0x09][DeviceTableId][DeviceId_1][8-byte status]
+     *        [DeviceId_2][8-byte status]...
+     * BytesPerDevice = 9 (1 deviceId + 8 status bytes)
+     * Status: [Mode][R][G][B][AutoOff][IntervalHi][IntervalLo][Reserved]
+     */
+    private fun handleRgbLightStatus(data: ByteArray) {
+        if (data.size < 11) return  // Minimum: event(1) + tableId(1) + 1 device(9)
+        
+        val tableId = data[1].toInt() and 0xFF
+        
+        // Parse multi-device frame: each device is 9 bytes (1 deviceId + 8 status)
+        var offset = 2
+        while (offset + 9 <= data.size) {
+            val deviceId = data[offset].toInt() and 0xFF
+            val statusBytes = data.sliceArray(offset + 1 until offset + 9)
+            offset += 9
+            
+            val mode = statusBytes[0].toInt() and 0xFF
+            val red = statusBytes[1].toInt() and 0xFF
+            val green = statusBytes[2].toInt() and 0xFF
+            val blue = statusBytes[3].toInt() and 0xFF
+            val autoOff = statusBytes[4].toInt() and 0xFF
+            val intervalHi = statusBytes[5].toInt() and 0xFF
+            val intervalLo = statusBytes[6].toInt() and 0xFF
+            val interval = (intervalHi shl 8) or intervalLo
+            
+            val entity = OneControlEntity.RgbLight(
+                tableId = tableId,
+                deviceId = deviceId,
+                red = red,
+                green = green,
+                blue = blue,
+                mode = mode,
+                autoOff = autoOff,
+                interval = interval
+            )
+            
+            Log.i(TAG, "📦 RGB ${entity.address} mode=${entity.mode} R=${entity.red} G=${entity.green} B=${entity.blue} effect=${entity.effectName}")
+            
+            // Pending guard: suppress mismatching status updates while a command is pending
+            val pending = pendingRgb[entity.address]
+            val now = System.currentTimeMillis()
+            if (pending != null) {
+                val (_, ts) = pending
+                val age = now - ts
+                if (age <= RGB_PENDING_WINDOW_MS) {
+                    Log.d(TAG, "🚫 Ignoring RGB status during pending window: age=${age}ms")
+                    continue
+                }
+                pendingRgb.remove(entity.address)
+            }
+            
+            // Track last known RGB color for restore-on-ON
+            if (entity.isOn) {
+                lastKnownRgbColor[entity.address] = Triple(entity.red, entity.green, entity.blue)
+            }
+            
+            // Build state map for MQTT
+            val stateMap = mutableMapOf(
+                "state" to entity.state,
+                "brightness" to entity.brightness.toString(),
+                "rgb" to "${entity.red},${entity.green},${entity.blue}",
+                "effect" to entity.effectName
+            )
+            
+            publishEntityState(
+                entityType = EntityType.RGB_LIGHT,
+                tableId = entity.tableId,
+                deviceId = entity.deviceId,
+                discoveryKey = "rgb_light_${entity.key}",
+                state = stateMap
+            ) { friendlyName, deviceAddr, prefix, baseTopic ->
+                val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+                val commandTopic = "$baseTopic/command/rgb/${entity.tableId}/${entity.deviceId}"
+                discoveryBuilder.buildRgbLight(
+                    deviceAddr = deviceAddr,
+                    deviceName = friendlyName,
+                    stateTopic = "$prefix/$stateTopic",
+                    commandTopic = "$prefix/$commandTopic",
+                    baseTopic = "$prefix/$baseTopic/device/${entity.tableId}/${entity.deviceId}"
+                )
+            }
+            
+            // Publish JSON state for HA JSON schema light
+            val baseTopic = "onecontrol/${device.address}"
+            val prefix = mqttPublisher.topicPrefix
+            val jsonState = org.json.JSONObject().apply {
+                put("state", entity.state)
+                if (entity.isOn) {
+                    put("brightness", entity.brightness)
+                    put("color_mode", "rgb")
+                    put("color", org.json.JSONObject().apply {
+                        put("r", entity.red)
+                        put("g", entity.green)
+                        put("b", entity.blue)
+                    })
+                    put("effect", entity.effectName)
+                }
+            }
+            mqttPublisher.publishState(
+                "$baseTopic/device/${entity.tableId}/${entity.deviceId}/json_state",
+                jsonState.toString(), true
             )
         }
     }
@@ -3091,6 +3216,9 @@ class OneControlGattCallback(
             is OneControlEntity.DimmableLight -> 
                 controlDimmableLight(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
             
+            is OneControlEntity.RgbLight ->
+                controlRgbLight(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
+            
             is OneControlEntity.Cover -> {
                 Log.w(TAG, "⚠️ Cover control is disabled for safety - use physical controls")
                 Result.failure(Exception("Cover control disabled for safety"))
@@ -3160,6 +3288,7 @@ class OneControlGattCallback(
                     controlDimmableLight(tableId.toByte(), deviceId.toByte(), payload)
                 }
             }
+            "rgb" -> controlRgbLight(tableId.toByte(), deviceId.toByte(), payload)
             "generator" -> controlGenerator(tableId.toByte(), deviceId.toByte(), payload)
             "climate" -> controlHvac(tableId.toByte(), deviceId.toByte(), subTopic, payload)
             // SAFETY: Cover control disabled - RV awnings/slides have no limit switches
@@ -3588,6 +3717,193 @@ class OneControlGattCallback(
             return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send dimmable command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
+    /**
+     * Control an RGB light - parse JSON payload from HA JSON schema
+     * HA sends JSON like: {"state":"ON","color":{"r":255,"g":0,"b":128},"brightness":200,"effect":"Rainbow"}
+     */
+    private fun controlRgbLight(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+        Log.i(TAG, "📤 RGB control: table=$tableId, device=$deviceId, payload=$payload")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+            deviceTableId
+        } else {
+            tableId
+        }
+        
+        val tableIdInt = effectiveTableId.toInt() and 0xFF
+        val deviceIdInt = deviceId.toInt() and 0xFF
+        val key = "$tableIdInt:$deviceIdInt"
+        
+        // Parse JSON payload from HA
+        try {
+            val json = org.json.JSONObject(payload)
+            val state = json.optString("state", "").uppercase()
+            
+            // Handle OFF
+            if (state == "OFF") {
+                pendingRgb.remove(key)
+                pendingRgbSend.remove(key)
+                return sendRgbCommand(writeChar, effectiveTableId, deviceId, mode = 0)
+            }
+            
+            // Determine mode from effect name
+            val effectStr = json.optString("effect", "")
+            val mode = when (effectStr.lowercase()) {
+                "solid", "" -> 1  // Default to solid when no effect specified
+                "blink" -> 2
+                "jump 3" -> 4
+                "jump 7" -> 5
+                "fade 3" -> 6
+                "fade 7" -> 7
+                "rainbow" -> 8
+                else -> 1  // Default to solid for unknown effects
+            }
+            
+            // Get color from JSON (HA sends {"r":R,"g":G,"b":B})
+            val colorObj = json.optJSONObject("color")
+            var red = colorObj?.optInt("r", 255) ?: 255
+            var green = colorObj?.optInt("g", 255) ?: 255
+            var blue = colorObj?.optInt("b", 255) ?: 255
+            
+            // If no color in payload, use last known or default white
+            if (colorObj == null) {
+                val lastColor = lastKnownRgbColor[key]
+                if (lastColor != null) {
+                    red = lastColor.first
+                    green = lastColor.second
+                    blue = lastColor.third
+                }
+            }
+            
+            // Apply brightness scaling if provided
+            val brightness = json.optInt("brightness", -1)
+            if (brightness >= 0) {
+                val scale = brightness.coerceIn(0, 255) / 255.0
+                val maxChannel = maxOf(red, green, blue).coerceAtLeast(1)
+                // Normalize to max brightness, then scale
+                red = (red.toDouble() / maxChannel * 255 * scale).toInt().coerceIn(0, 255)
+                green = (green.toDouble() / maxChannel * 255 * scale).toInt().coerceIn(0, 255)
+                blue = (blue.toDouble() / maxChannel * 255 * scale).toInt().coerceIn(0, 255)
+            }
+            
+            // Debounce rapid color changes
+            val nowTs = System.currentTimeMillis()
+            val finalRed = red
+            val finalGreen = green
+            val finalBlue = blue
+            val sendAction = {
+                sendRgbCommand(writeChar, effectiveTableId, deviceId, mode, finalRed, finalGreen, finalBlue)
+                lastKnownRgbColor[key] = Triple(finalRed, finalGreen, finalBlue)
+                pendingRgb[key] = "R=$finalRed G=$finalGreen B=$finalBlue mode=$mode" to System.currentTimeMillis()
+                
+                // Publish optimistic state
+                val baseTopic = "onecontrol/${device.address}"
+                val jsonState = org.json.JSONObject().apply {
+                    put("state", "ON")
+                    put("brightness", maxOf(finalRed, finalGreen, finalBlue))
+                    put("color_mode", "rgb")
+                    put("color", org.json.JSONObject().apply {
+                        put("r", finalRed)
+                        put("g", finalGreen)
+                        put("b", finalBlue)
+                    })
+                    put("effect", when (mode) {
+                        1 -> "Solid"; 2 -> "Blink"; 4 -> "Jump 3"; 5 -> "Jump 7"
+                        6 -> "Fade 3"; 7 -> "Fade 7"; 8 -> "Rainbow"; else -> "Solid"
+                    })
+                }
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/json_state", jsonState.toString(), true)
+            }
+            
+            pendingRgbSend[key] = sendAction to nowTs
+            handler.postDelayed({
+                val entry = pendingRgbSend[key]
+                if (entry != null && entry.second == nowTs) {
+                    pendingRgbSend.remove(key)
+                    entry.first()
+                }
+            }, RGB_DEBOUNCE_MS)
+            
+            return Result.success(Unit)
+        } catch (e: Exception) {
+            // Not JSON — try simple ON/OFF
+            return when {
+                payload.equals("ON", ignoreCase = true) || payload.equals("true", ignoreCase = true) -> {
+                    val lastColor = lastKnownRgbColor[key]
+                    val r = lastColor?.first ?: 255
+                    val g = lastColor?.second ?: 255
+                    val b = lastColor?.third ?: 255
+                    sendRgbCommand(writeChar, effectiveTableId, deviceId, mode = 1, red = r, green = g, blue = b)
+                }
+                payload.equals("OFF", ignoreCase = true) || payload.equals("false", ignoreCase = true) || payload == "0" -> {
+                    sendRgbCommand(writeChar, effectiveTableId, deviceId, mode = 0)
+                }
+                else -> {
+                    Log.w(TAG, "❌ Cannot parse RGB command: $payload")
+                    Result.failure(Exception("Invalid RGB payload"))
+                }
+            }
+        }
+    }
+    
+    /**
+     * Send RGB command to BLE (via COBS)
+     */
+    private fun sendRgbCommand(
+        writeChar: BluetoothGattCharacteristic,
+        effectiveTableId: Byte,
+        deviceId: Byte,
+        mode: Int,
+        red: Int = 0,
+        green: Int = 0,
+        blue: Int = 0,
+        autoOff: Int = 0,
+        intervalMs: Int = 500
+    ): Result<Unit> {
+        try {
+            val commandId = getNextCommandId()
+            val tableIdInt = effectiveTableId.toInt() and 0xFF
+            val deviceIdInt = deviceId.toInt() and 0xFF
+            
+            val command = MyRvLinkCommandBuilder.buildActionRgb(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                mode = mode,
+                red = red,
+                green = green,
+                blue = blue,
+                autoOff = autoOff,
+                intervalMs = intervalMs
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 RGB command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent RGB command: table=$tableIdInt, device=$deviceIdInt, mode=$mode, R=$red G=$green B=$blue, result=$result")
+            
+            // For OFF command, publish state immediately
+            if (mode == 0) {
+                val baseTopic = "onecontrol/${device.address}"
+                val jsonState = org.json.JSONObject().apply {
+                    put("state", "OFF")
+                }
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/json_state", jsonState.toString(), true)
+            }
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send RGB command: ${e.message}", e)
             return Result.failure(e)
         }
     }

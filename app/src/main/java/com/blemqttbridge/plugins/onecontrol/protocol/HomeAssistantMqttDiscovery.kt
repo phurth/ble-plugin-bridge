@@ -56,6 +56,22 @@ object HomeAssistantMqttDiscovery {
         }
         
         /**
+         * Build RGB light discovery payload
+         */
+        fun buildRgbLight(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            commandTopic: String,
+            baseTopic: String
+        ): JSONObject {
+            return getRgbLightDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, commandTopic, baseTopic, appVersion
+            )
+        }
+        
+        /**
          * Build cover state sensor discovery payload (state-only, no control)
          */
         fun buildCoverStateSensor(
@@ -251,6 +267,58 @@ object HomeAssistantMqttDiscovery {
             put("on_command_type", "brightness")
             put("optimistic", false)  // Wait for state updates from gateway
             put("icon", "mdi:lightbulb")
+        }
+    }
+    
+    /**
+     * Generate discovery config for an RGB light
+     * Uses HA MQTT JSON light schema for color + effects support
+     * https://www.home-assistant.io/integrations/light.mqtt/#json-schema
+     */
+    fun getRgbLightDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        stateTopic: String,
+        commandTopic: String,
+        baseTopic: String,
+        appVersion: String? = null
+    ): JSONObject {
+        val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_rgb_${deviceAddr.toString(16)}"
+        val objectId = "rgb_light_${deviceAddr.toString(16).padStart(4, '0')}"
+        
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("default_entity_id", "light.$objectId")
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+            
+            // JSON schema for full color + effect support
+            put("schema", "json")
+            put("state_topic", "$baseTopic/json_state")
+            put("command_topic", commandTopic)
+            
+            // Supported features
+            put("supported_color_modes", JSONArray().apply {
+                put("rgb")
+            })
+            put("brightness", true)
+            put("brightness_scale", 255)
+            
+            // Effects
+            put("effect", true)
+            put("effect_list", JSONArray().apply {
+                put("Solid")
+                put("Blink")
+                put("Jump 3")
+                put("Jump 7")
+                put("Fade 3")
+                put("Fade 7")
+                put("Rainbow")
+            })
+            
+            put("optimistic", false)
+            put("icon", "mdi:led-strip-variant")
         }
     }
     
