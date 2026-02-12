@@ -3432,12 +3432,22 @@ class OneControlGattCallback(
             return Result.failure(Exception("Missing HVAC command subTopic"))
         }
         
-        // Start with last known state, or defaults
-        var heatMode = currentState?.heatMode ?: 0
-        var heatSource = currentState?.heatSource ?: 0
-        var fanMode = currentState?.fanMode ?: 0
-        var lowTrip = currentState?.lowTripTempF ?: 68
-        var highTrip = currentState?.highTripTempF ?: 78
+        // CRITICAL: Require at least one status reading before processing commands.
+        // This ensures hvacZoneStates is populated with the device's actual setpoints,
+        // not hard-coded defaults. Otherwise, the pending guard compares against 68/78
+        // defaults instead of the device's real values, and rejects all updates.
+        // See: https://github.com/phurth/ble-plugin-bridge/issues/XXX
+        if (currentState == null) {
+            Log.w(TAG, "⏳ HVAC command ignored: waiting for first status from $zoneKey (device not yet initialized)")
+            return Result.failure(Exception("HVAC zone not initialized; waiting for first status update"))
+        }
+        
+        // Start with last known state
+        var heatMode = currentState.heatMode
+        var heatSource = currentState.heatSource
+        var fanMode = currentState.fanMode
+        var lowTrip = currentState.lowTripTempF
+        var highTrip = currentState.highTripTempF
         
         val isSetpointChange = when (subTopic) {
             "temperature", "temperature_high", "temperature_low" -> true
