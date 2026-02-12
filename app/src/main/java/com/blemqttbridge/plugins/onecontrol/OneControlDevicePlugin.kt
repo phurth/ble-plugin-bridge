@@ -758,7 +758,7 @@ class OneControlGattCallback(
         handler.postDelayed({
             if (!mtuReady && servicesDiscovered) {
                 Log.w(TAG, "MTU exchange timed out after 5s - proceeding with default MTU")
-                mqttPublisher.logServiceEvent("MTU timeout - proceeding with default MTU")
+                mqttPublisher.logBleEvent("MTU timeout - proceeding with default MTU")
                 mtuReady = true
                 currentGatt?.let { checkAndStartAuthentication(it) }
             }
