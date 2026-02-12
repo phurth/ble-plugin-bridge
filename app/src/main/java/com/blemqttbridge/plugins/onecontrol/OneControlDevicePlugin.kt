@@ -579,6 +579,17 @@ class OneControlGattCallback(
     private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
     private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
 
+    // Observed HVAC capability bits — learned from status broadcasts
+    // Key: "tableId:deviceId", Value: accumulated ClimateZoneCapabilityFlag bitmask
+    // bit0=GasFurnace, bit1=AirConditioner, bit2=HeatPump, bit3=MultiSpeedFan
+    // This provides capability data when GetDevicesMetadata returns 0x00,
+    // same class of bug as the tank data nested inside encrypted E0-E9 frames:
+    // the data exists but arrives through a path we weren't extracting from.
+    // The official app gets capability from V2 Packed BLE messages (byte 17),
+    // but our COBS-based transport receives MyRvLink events directly without
+    // the V2 Packed wrapper, so we infer capability from observed behavior.
+    private val observedHvacCapability = mutableMapOf<String, Int>()
+
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()
@@ -1764,6 +1775,49 @@ class OneControlGattCallback(
                 pendingHvacCommands.remove(zoneKey)
             }
             
+            // --- Behavioral capability detection ---
+            // Learn what this zone supports from its actual status broadcasts.
+            // This is our primary capability source since GetDevicesMetadata
+            // returns 0x00 on many gateways. The official app gets capability
+            // from V2 Packed BLE messages (a transport layer we don't use).
+            val prevCap = observedHvacCapability[zoneKey] ?: 0
+            var newCap = prevCap
+            
+            // Zone status tells us what hardware is actively running
+            val activeStatus = statusByte and 0x0F
+            when (activeStatus) {
+                2 -> newCap = newCap or 0x02       // Cooling → has AC
+                3 -> newCap = newCap or 0x06       // HeatPump → has HeatPump+AC (pump IS an AC)
+                4 -> {}                             // Electric heat — no flag needed
+                5, 6 -> newCap = newCap or 0x01    // GasFurnace / GasOverride → has Gas
+            }
+            
+            // Heat mode + source together reveal capability:
+            // If mode is Heating(1) or Both(3), the heatSource field is meaningful
+            if (heatMode == 1 || heatMode == 3) {
+                when (heatSource) {
+                    0 -> newCap = newCap or 0x01    // PreferGas → zone has gas furnace
+                    1 -> newCap = newCap or 0x04    // PreferHeatPump → zone has heat pump
+                }
+            }
+            
+            // If mode is Cooling(2) or Both(3), zone has AC
+            if (heatMode == 2 || heatMode == 3) {
+                newCap = newCap or 0x02             // AC capability confirmed
+            }
+            
+            // Fan mode Low(2) → multi-speed fan
+            if (fanMode == 2) {
+                newCap = newCap or 0x08
+            }
+            
+            if (newCap != prevCap) {
+                observedHvacCapability[zoneKey] = newCap
+                val capDiag = "🔧 HVAC $tableId:$deviceId observed cap 0x%02X→0x%02X (status=$activeStatus mode=$heatMode src=$heatSource fan=$fanMode)".format(prevCap, newCap)
+                Log.i(TAG, capDiag)
+                mqttPublisher.logServiceEvent(capDiag)
+            }
+            
             // Store zone state for command merging — AFTER pending guard
             // so suppressed stale status doesn't corrupt the merge baseline
             val zoneState = HvacZoneState(
@@ -1848,24 +1902,26 @@ class OneControlGattCallback(
                 stateMap["state/outdoor_temperature"] = "%.1f".format(it)
             }
             
-            // Determine if this zone supports multiple heat sources from device capability byte
-            // ClimateZoneCapabilityFlag: bit0=GasFurnace, bit1=AirConditioner, bit2=HeatPump
-            // Presets shown when zone has BOTH gas (bit0) AND heat pump (bit2)
-            // If capability byte is 0x00 (unknown/unpopulated firmware), default to including presets
-            // since they're harmless on single-source zones (controller ignores irrelevant source setting)
+            // Determine if this zone supports multiple heat sources.
+            // Merge two capability sources:
+            //   1. GetDevicesMetadata rawCapability (offset+5) — often 0x00 on older gateways
+            //   2. observedHvacCapability — learned from HVAC status broadcasts above
+            // The official app gets capability from V2 Packed BLE messages (byte 17
+            // of each Packed message in BleCommunicationsAdapter.OnDataReceived),
+            // but our COBS-based transport doesn't include that V2 wrapper layer.
             val deviceAddr = (tableId shl 8) or deviceId
             val metaEntry = deviceMetadata[deviceAddr]
-            val capability = metaEntry?.rawCapability ?: 0
-            val capDiag = "🔍 HVAC $tableId:$deviceId addr=0x%04X meta=${metaEntry != null} cap=0x%02X fn=${metaEntry?.functionName ?: -1} includePresets=${capability == 0 || ((capability and 0x01) != 0 && (capability and 0x04) != 0)}".format(deviceAddr, capability)
+            val metaCap = metaEntry?.rawCapability ?: 0
+            val observedCap = observedHvacCapability[zoneKey] ?: 0
+            val capability = metaCap or observedCap  // Merge: either source can contribute bits
+            
+            val hasGas = (capability and 0x01) != 0
+            val hasHeatPump = (capability and 0x04) != 0
+            val includePresets = hasGas && hasHeatPump
+            
+            val capDiag = "🔍 HVAC $tableId:$deviceId addr=0x%04X meta=0x%02X observed=0x%02X merged=0x%02X gas=$hasGas hp=$hasHeatPump presets=$includePresets".format(deviceAddr, metaCap, observedCap, capability)
             Log.i(TAG, capDiag)
             mqttPublisher.logServiceEvent(capDiag)
-            val includePresets = if (capability == 0) {
-                true  // Unknown capability — include presets by default
-            } else {
-                val hasGas = (capability and 0x01) != 0
-                val hasHeatPump = (capability and 0x04) != 0
-                hasGas && hasHeatPump
-            }
             
             if (includePresets) {
                 stateMap["state/preset_mode"] = haPreset
