@@ -576,10 +576,12 @@ class OneControlGattCallback(
         val fanMode: Int,
         val lowTripTempF: Int,
         val highTripTempF: Int,
+        val isSetpointChange: Boolean,
         val timestamp: Long
     )
     private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
     private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
+    private val HVAC_SETPOINT_PENDING_WINDOW_MS = 20000L  // Allow longer for setpoint changes to apply
 
     // Observed HVAC capability bits — learned from status broadcasts
     // Key: "tableId:deviceId", Value: accumulated ClimateZoneCapabilityFlag bitmask
@@ -591,6 +593,7 @@ class OneControlGattCallback(
     // but our COBS-based transport receives MyRvLink events directly without
     // the V2 Packed wrapper, so we infer capability from observed behavior.
     private val observedHvacCapability = mutableMapOf<String, Int>()
+    private val hvacPresetDiscoveryState = mutableMapOf<String, Boolean>()
 
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
@@ -1902,13 +1905,20 @@ class OneControlGattCallback(
             val pendingCmd = pendingHvacCommands[zoneKey]
             if (pendingCmd != null) {
                 val age = System.currentTimeMillis() - pendingCmd.timestamp
-                if (age <= HVAC_PENDING_WINDOW_MS) {
+                val windowMs = if (pendingCmd.isSetpointChange) {
+                    HVAC_SETPOINT_PENDING_WINDOW_MS
+                } else {
+                    HVAC_PENDING_WINDOW_MS
+                }
+                if (age <= windowMs) {
                     // Check if gateway's reported state matches what we commanded
+                    val lowMatches = kotlin.math.abs(lowTripTempF - pendingCmd.lowTripTempF) <= 1
+                    val highMatches = kotlin.math.abs(highTripTempF - pendingCmd.highTripTempF) <= 1
                     val matches = heatMode == pendingCmd.heatMode &&
                         heatSource == pendingCmd.heatSource &&
                         fanMode == pendingCmd.fanMode &&
-                        lowTripTempF == pendingCmd.lowTripTempF &&
-                        highTripTempF == pendingCmd.highTripTempF
+                        lowMatches &&
+                        highMatches
                     if (!matches) {
                         Log.d(TAG, "🚫 Suppressing HVAC status (pending command, age=${age}ms): " +
                             "got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
@@ -2065,18 +2075,22 @@ class OneControlGattCallback(
             
             val hasGas = (capability and 0x01) != 0
             val hasHeatPump = (capability and 0x04) != 0
-            val includePresets = hasGas && hasHeatPump
+            val includePresets = hasGas || hasHeatPump
             
             val capDiag = "🔍 HVAC $tableId:$deviceId addr=0x%04X meta=0x%02X observed=0x%02X merged=0x%02X gas=$hasGas hp=$hasHeatPump presets=$includePresets".format(deviceAddr, metaCap, observedCap, capability)
             Log.i(TAG, capDiag)
             mqttPublisher.logServiceEvent(capDiag)
             
-            if (includePresets) {
-                stateMap["state/preset_mode"] = haPreset
-            }
+            stateMap["state/preset_mode"] = if (includePresets) haPreset else "none"
             
             // Publish via centralized entity state method
             val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
+            val prevIncludePresets = hvacPresetDiscoveryState[zoneKey]
+            if (prevIncludePresets != null && prevIncludePresets != includePresets) {
+                haDiscoveryPublished.remove(discoveryKey)
+                Log.i(TAG, "🔁 HVAC presets changed for $zoneKey: $prevIncludePresets -> $includePresets (republish discovery)")
+            }
+            hvacPresetDiscoveryState[zoneKey] = includePresets
             
             publishEntityState(
                 entityType = EntityType.CLIMATE,
@@ -3425,6 +3439,11 @@ class OneControlGattCallback(
         var lowTrip = currentState?.lowTripTempF ?: 68
         var highTrip = currentState?.highTripTempF ?: 78
         
+        val isSetpointChange = when (subTopic) {
+            "temperature", "temperature_high", "temperature_low" -> true
+            else -> false
+        }
+
         // Apply the change based on subTopic
         when (subTopic) {
             "mode" -> {
@@ -3531,6 +3550,7 @@ class OneControlGattCallback(
                     fanMode = fanMode,
                     lowTripTempF = lowTrip,
                     highTripTempF = highTrip,
+                    isSetpointChange = isSetpointChange,
                     timestamp = System.currentTimeMillis()
                 )
                 
