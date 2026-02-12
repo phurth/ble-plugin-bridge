@@ -375,6 +375,7 @@ class OneControlGattCallback(
     )
     private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
     private var metadataRequested = false
+    private val metadataRequestedTableIds: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     
     init {
         // Load cached metadata immediately so friendly names are available from first state update
@@ -410,11 +411,14 @@ class OneControlGattCallback(
                 }
                 
                 Log.i(TAG, "💾 Loaded $loadedCount cached metadata entries for ${device.address}")
+                mqttPublisher.logServiceEvent("💾 Loaded $loadedCount cached metadata entries for ${device.address}")
             } else {
                 Log.d(TAG, "💾 No cached metadata found for ${device.address}")
+                mqttPublisher.logServiceEvent("💾 No cached metadata found for ${device.address}")
             }
         } catch (e: Exception) {
             Log.e(TAG, "💾 Error loading cached metadata: ${e.message}", e)
+            mqttPublisher.logServiceEvent("💾 Error loading cached metadata: ${e.message}")
         }
     }
     
@@ -443,8 +447,10 @@ class OneControlGattCallback(
             prefs.edit().putString(cacheKey, jsonArray.toString()).apply()
             
             Log.i(TAG, "💾 Saved ${deviceMetadata.size} metadata entries to cache for ${device.address}")
+            mqttPublisher.logServiceEvent("💾 Saved ${deviceMetadata.size} metadata entries to cache for ${device.address}")
         } catch (e: Exception) {
             Log.e(TAG, "💾 Error saving metadata to cache: ${e.message}", e)
+            mqttPublisher.logServiceEvent("💾 Error saving metadata to cache: ${e.message}")
         }
     }
     
@@ -505,6 +511,10 @@ class OneControlGattCallback(
         val prefix = mqttPublisher.topicPrefix
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val deviceAddr = (tableId shl 8) or deviceId
+
+        // If GatewayInformation never arrives, tableId may never be set.
+        // Request metadata for the observed tableId so friendly names still load.
+        ensureMetadataRequestedForTable(tableId)
         
         // Determine fallback type from entity type
         val fallbackType = when (entityType) {
@@ -581,7 +591,16 @@ class OneControlGattCallback(
     )
     private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
     private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
-    private val HVAC_SETPOINT_PENDING_WINDOW_MS = 20000L  // Allow longer for setpoint changes to apply
+    private val HVAC_SETPOINT_PENDING_WINDOW_MS = 60000L  // Allow longer for setpoint changes to apply
+
+    // Pending HVAC setpoint send: debounce rapid slider changes
+    data class PendingHvacSetpointSend(
+        val subTopic: String,
+        val payload: String,
+        val timestamp: Long
+    )
+    private val pendingHvacSetpointSend = mutableMapOf<String, PendingHvacSetpointSend>()
+    private val HVAC_SETPOINT_DEBOUNCE_MS = 250L
 
     // Observed HVAC capability bits — learned from status broadcasts
     // Key: "tableId:deviceId", Value: accumulated ClimateZoneCapabilityFlag bitmask
@@ -1923,11 +1942,16 @@ class OneControlGattCallback(
                         Log.d(TAG, "🚫 Suppressing HVAC status (pending command, age=${age}ms): " +
                             "got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
                             "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}")
+                        mqttPublisher.logServiceEvent(
+                            "🚫 Suppressing HVAC status (age=${age}ms): got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
+                                "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}"
+                        )
                         offset += BYTES_PER_DEVICE
                         continue  // Skip storing and publishing this zone's stale status
                     }
                     // Matches! Gateway confirmed our command — clear pending
                     Log.i(TAG, "✅ HVAC command confirmed by gateway (age=${age}ms)")
+                    mqttPublisher.logServiceEvent("✅ HVAC command confirmed by gateway (age=${age}ms)")
                 }
                 // Clear pending (either confirmed or window expired)
                 pendingHvacCommands.remove(zoneKey)
@@ -2902,6 +2926,7 @@ class OneControlGattCallback(
         val count = data[6].toInt() and 0xFF
         
         Log.i(TAG, "📋 Metadata: table=$tableId, start=$startId, count=$count")
+        mqttPublisher.logServiceEvent("📋 Metadata: table=$tableId, start=$startId, count=$count")
         
         var offset = 7
         var index = 0
@@ -2989,6 +3014,7 @@ class OneControlGattCallback(
         }
         
         Log.i(TAG, "📋 Parsed $index entries, ${deviceMetadata.size} total")
+        mqttPublisher.logServiceEvent("📋 Parsed $index entries, ${deviceMetadata.size} total")
         
         // Save metadata to persistent cache
         saveMetadataToCache()
@@ -3202,17 +3228,57 @@ class OneControlGattCallback(
             pendingCommands[commandId.toInt()] = 0x02
             
             Log.i(TAG, "🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
+            mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            val tableIdInt = tableId.toInt() and 0xFF
+            metadataRequestedTableIds.add(tableIdInt)
             Log.i(TAG, "🔍 Encoded: ${encoded.joinToString(" ") { "%02X".format(it) }}")
             
             writeChar.value = encoded
             writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             val result = currentGatt?.writeCharacteristic(writeChar)
+            if (result != true) {
+                metadataRequestedTableIds.remove(tableIdInt)
+            }
             
             Log.i(TAG, "🔍 Sent GetDevicesMetadata: result=$result")
+            mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata: result=$result")
         } catch (e: Exception) {
             Log.e(TAG, "🔍 Failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Ensure metadata request is sent for the given tableId.
+     * Some gateways never emit GatewayInformation, so deviceTableId stays 0x00.
+     * This fallback uses observed tableIds from status events to fetch friendly names.
+     */
+    private fun ensureMetadataRequestedForTable(tableId: Int) {
+        val normalized = tableId and 0xFF
+        if (normalized == 0) return
+        if (metadataRequestedTableIds.contains(normalized)) return
+        if (!isConnected || currentGatt == null) return
+        val writeChar = dataWriteChar ?: return
+        Log.i(TAG, "🔍 Requesting metadata for observed tableId=0x${normalized.toString(16)}")
+        mqttPublisher.logServiceEvent("🔍 Requesting metadata for observed tableId=0x${normalized.toString(16)}")
+        try {
+            val commandId = getNextCommandId()
+            val command = encodeGetDevicesMetadataCommand(commandId, normalized.toByte())
+            pendingCommands[commandId.toInt()] = 0x02
+
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            metadataRequestedTableIds.add(normalized)
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            if (result != true) {
+                metadataRequestedTableIds.remove(normalized)
+            }
+            Log.i(TAG, "🔍 Sent GetDevicesMetadata (observed table): tableId=0x${normalized.toString(16)}, result=$result")
+            mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata (observed table): tableId=0x${normalized.toString(16)}, result=$result")
+        } catch (e: Exception) {
+            Log.e(TAG, "🔍 Failed to send GetDevicesMetadata (observed table): ${e.message}", e)
         }
     }
     
@@ -3424,13 +3490,62 @@ class OneControlGattCallback(
      *   mode, fan_mode, temperature, temperature_high, temperature_low, preset_mode
      */
     private fun controlHvac(tableId: Byte, deviceId: Byte, subTopic: String?, payload: String): Result<Unit> {
-        val zoneKey = "${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}"
-        val currentState = hvacZoneStates[zoneKey]
-        
         if (subTopic == null) {
             Log.w(TAG, "❌ HVAC command missing subTopic (expected mode/fan_mode/temperature/etc)")
             return Result.failure(Exception("Missing HVAC command subTopic"))
         }
+
+        val isSetpointChange = when (subTopic) {
+            "temperature", "temperature_high", "temperature_low" -> true
+            else -> false
+        }
+
+        return if (isSetpointChange) {
+            scheduleHvacSetpointCommand(tableId, deviceId, subTopic, payload)
+        } else {
+            sendHvacCommand(tableId, deviceId, subTopic, payload)
+        }
+    }
+
+    /**
+     * Debounce HVAC setpoint commands to avoid rapid slider bursts.
+     */
+    private fun scheduleHvacSetpointCommand(
+        tableId: Byte,
+        deviceId: Byte,
+        subTopic: String,
+        payload: String
+    ): Result<Unit> {
+        val zoneKey = "${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}"
+        val currentState = hvacZoneStates[zoneKey]
+
+        if (currentState == null) {
+            Log.w(TAG, "⏳ HVAC command queued: zone $zoneKey not initialized yet (waiting for first status)")
+            return Result.failure(Exception("HVAC zone not initialized; command will retry"))
+        }
+
+        val nowTs = System.currentTimeMillis()
+        pendingHvacSetpointSend[zoneKey] = PendingHvacSetpointSend(subTopic, payload, nowTs)
+        Log.i(TAG, "⏳ HVAC setpoint scheduled: zone=$zoneKey subTopic=$subTopic payload=$payload")
+        mqttPublisher.logServiceEvent("⏳ HVAC setpoint scheduled: zone=$zoneKey subTopic=$subTopic payload=$payload")
+
+        handler.postDelayed({
+            val entry = pendingHvacSetpointSend[zoneKey]
+            if (entry != null && entry.timestamp == nowTs) {
+                pendingHvacSetpointSend.remove(zoneKey)
+                sendHvacCommand(tableId, deviceId, entry.subTopic, entry.payload)
+            }
+        }, HVAC_SETPOINT_DEBOUNCE_MS)
+
+        return Result.success(Unit)
+    }
+
+    /**
+     * Send HVAC command immediately using merged state.
+     */
+    private fun sendHvacCommand(tableId: Byte, deviceId: Byte, subTopic: String, payload: String): Result<Unit> {
+        val zoneKey = "${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}"
+        val currentState = hvacZoneStates[zoneKey]
         
         // CRITICAL: Require initialized state before processing commands.
         // No hard-coded defaults. If we haven't seen status from this zone yet,
@@ -3550,6 +3665,10 @@ class OneControlGattCallback(
             
             Log.i(TAG, "📤 Sent HVAC command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, " +
                 "mode=$heatMode, source=$heatSource, fan=$fanMode, low=$lowTrip, high=$highTrip, result=$result")
+            mqttPublisher.logServiceEvent(
+                "📤 Sent HVAC command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, " +
+                    "mode=$heatMode, source=$heatSource, fan=$fanMode, low=$lowTrip, high=$highTrip, result=$result"
+            )
             
             if (result == true) {
                 // Register pending command — state is guaranteed initialized (checked above).
