@@ -571,6 +571,17 @@ class OneControlGattCallback(
                         // Publish online availability status
                         publishAvailability(true)
                         
+                        // Clear stale GATT cache before service discovery.
+                        // Resolves status=133 errors after OS updates or bond changes
+                        // by forcing Android to re-read the service table from the device.
+                        try {
+                            val refreshMethod = BluetoothGatt::class.java.getMethod("refresh")
+                            val refreshResult = refreshMethod.invoke(gatt) as Boolean
+                            Log.i(TAG, "GATT cache refresh: $refreshResult")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "GATT cache refresh not available: ${e.message}")
+                        }
+                        
                         // Discover services
                         gatt.discoverServices()
                     }
@@ -740,6 +751,18 @@ class OneControlGattCallback(
         // Request MTU - when both MTU ready and services discovered, auth will start
         Log.i(TAG, "📐 Requesting MTU size $BLE_MTU_SIZE...")
         gatt.requestMtu(BLE_MTU_SIZE)
+        
+        // MTU timeout fallback: some Android BLE stacks (especially after OS updates)
+        // never fire onMtuChanged, leaving mtuReady=false and auth stuck forever.
+        // If MTU hasn't completed in 5 seconds, proceed with default MTU.
+        handler.postDelayed({
+            if (!mtuReady && servicesDiscovered) {
+                Log.w(TAG, "MTU exchange timed out after 5s - proceeding with default MTU")
+                mqttPublisher.logServiceEvent("MTU timeout - proceeding with default MTU")
+                mtuReady = true
+                currentGatt?.let { checkAndStartAuthentication(it) }
+            }
+        }, 5000)
         
         // Also check if MTU already completed (race condition where MTU fires first)
         checkAndStartAuthentication(gatt)
