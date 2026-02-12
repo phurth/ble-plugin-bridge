@@ -3432,14 +3432,21 @@ class OneControlGattCallback(
             return Result.failure(Exception("Missing HVAC command subTopic"))
         }
         
-        // Start with last known state, or conservative defaults
-        // If zone hasn't been initialized yet, we'll send the command anyway
-        // but won't set a pending guard (see below) so device status is accepted immediately
-        var heatMode = currentState?.heatMode ?: 0
-        var heatSource = currentState?.heatSource ?: 0
-        var fanMode = currentState?.fanMode ?: 0
-        var lowTrip = currentState?.lowTripTempF ?: 68
-        var highTrip = currentState?.highTripTempF ?: 78
+        // CRITICAL: Require initialized state before processing commands.
+        // No hard-coded defaults. If we haven't seen status from this zone yet,
+        // we don't know what the device actually has configured. Reject the command
+        // and let it queue until device state arrives (normally <1 second after connect).
+        if (currentState == null) {
+            Log.w(TAG, "⏳ HVAC command queued: zone $zoneKey not initialized yet (waiting for first status)")
+            return Result.failure(Exception("HVAC zone not initialized; command will retry"))
+        }
+        
+        // Start with last known state (we now know it exists)
+        var heatMode = currentState.heatMode
+        var heatSource = currentState.heatSource
+        var fanMode = currentState.fanMode
+        var lowTrip = currentState.lowTripTempF
+        var highTrip = currentState.highTripTempF
         
         val isSetpointChange = when (subTopic) {
             "temperature", "temperature_high", "temperature_low" -> true
@@ -3545,25 +3552,17 @@ class OneControlGattCallback(
                 "mode=$heatMode, source=$heatSource, fan=$fanMode, low=$lowTrip, high=$highTrip, result=$result")
             
             if (result == true) {
-                // Register pending command ONLY if zone was already initialized.
-                // If this is the first command (currentState == null), we used defaults (68/78)
-                // which likely don't match device's real setpoints. Suppress the pending guard
-                // so the device's response is accepted immediately, allowing hvacZoneStates
-                // to be populated with real values for subsequent commands.
-                // See: setpoint control regression fix - crossing temp boundary bug
-                if (currentState != null) {
-                    pendingHvacCommands[zoneKey] = PendingHvacCommand(
-                        heatMode = heatMode,
-                        heatSource = heatSource,
-                        fanMode = fanMode,
-                        lowTripTempF = lowTrip,
-                        highTripTempF = highTrip,
-                        isSetpointChange = isSetpointChange,
-                        timestamp = System.currentTimeMillis()
-                    )
-                } else {
-                    Log.i(TAG, "ℹ️ Zone $zoneKey first command: no pending guard (accepting device response as truth to populate real setpoints)")
-                }
+                // Register pending command — state is guaranteed initialized (checked above).
+                // Use real device values to suppress stale gateway echo-backs during processing.
+                pendingHvacCommands[zoneKey] = PendingHvacCommand(
+                    heatMode = heatMode,
+                    heatSource = heatSource,
+                    fanMode = fanMode,
+                    lowTripTempF = lowTrip,
+                    highTripTempF = highTrip,
+                    isSetpointChange = isSetpointChange,
+                    timestamp = System.currentTimeMillis()
+                )
                 
                 // Optimistic MQTT publish — give HA immediate feedback
                 // Uses same topic structure as handleHvacStatus
