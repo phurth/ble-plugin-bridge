@@ -617,8 +617,9 @@ class OneControlGattCallback(
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()
-    // Pending dimmable: tracks in-flight brightness commands to suppress conflicting gateway status
-    private val pendingDimmable = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, timestamp)
+    // Pending dimmable: tracks in-flight commands to suppress conflicting gateway status
+    // Triple: (brightness, mode, timestamp)
+    private val pendingDimmable = mutableMapOf<String, Triple<Int, Int, Long>>()  // key -> (brightness, mode, timestamp)
     private val DIMMER_PENDING_WINDOW_MS = 12000L
     // Pending send: debounce rapid slider changes
     private val pendingDimmableSend = mutableMapOf<String, Pair<Int, Long>>()  // key -> (brightness, timestamp)
@@ -1719,12 +1720,17 @@ class OneControlGattCallback(
         val pending = pendingDimmable[entity.address]
         val now = System.currentTimeMillis()
         if (pending != null) {
-            val (desired, ts) = pending
+            val (desired, desiredMode, ts) = pending
             val age = now - ts
             if (age <= DIMMER_PENDING_WINDOW_MS) {
-                // If reported brightness doesn't match desired, or mode is off when we want on, ignore
-                if (entity.brightness != desired || (entity.mode == 0 && desired > 0)) {
-                    Log.d(TAG, "🚫 Ignoring dimmer mismatch during pending window: reported=${entity.brightness} desired=$desired age=${age}ms")
+                // If reported brightness or mode doesn't match desired, ignore
+                val brightnessMismatch = entity.brightness != desired
+                val modeMismatch = entity.mode != desiredMode
+                val offWhenWantOn = entity.mode == 0 && desired > 0
+                if (brightnessMismatch || modeMismatch || offWhenWantOn) {
+                    Log.d(TAG, "🚫 Ignoring dimmer mismatch during pending window: " +
+                            "reported=${entity.brightness}/mode=${entity.mode} " +
+                            "desired=$desired/mode=$desiredMode age=${age}ms")
                     return  // Don't publish this status update
                 }
             }
@@ -1746,18 +1752,21 @@ class OneControlGattCallback(
             discoveryKey = "light_${entity.key}",
             state = mapOf(
                 "state" to entity.state,
-                "brightness" to entity.brightness.toString()
+                "brightness" to entity.brightness.toString(),
+                "effect" to entity.effectName
             )
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
             val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
             val brightnessTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/brightness"
+            val effectTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/effect"
             val commandTopic = "$baseTopic/command/dimmable/${entity.tableId}/${entity.deviceId}"
             discoveryBuilder.buildDimmableLight(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
-                brightnessTopic = "$prefix/$brightnessTopic"
+                brightnessTopic = "$prefix/$brightnessTopic",
+                effectTopic = "$prefix/$effectTopic"
             )
         }
     }
@@ -3062,6 +3071,7 @@ class OneControlGattCallback(
             Log.i(TAG, "📢 Re-pub light: $friendlyName")
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
             val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
+            val effectTopic = "$baseTopic/device/$tableId/$deviceId/effect"
             val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
             val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
                 gatewayMac = device.address,
@@ -3070,6 +3080,7 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
                 brightnessTopic = "$prefix/$brightnessTopic",
+                effectTopic = "$prefix/$effectTopic",
                 appVersion = appVersion
             )
             val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
@@ -3363,6 +3374,9 @@ class OneControlGattCallback(
                     } else {
                         Result.failure(Exception("Invalid brightness value"))
                     }
+                } else if (subTopic == "effect") {
+                    // Effect command: payload is effect name (e.g. "Blink", "Swell", "Solid")
+                    controlDimmableLightEffect(tableId.toByte(), deviceId.toByte(), payload)
                 } else {
                     // On/Off or brightness command
                     controlDimmableLight(tableId.toByte(), deviceId.toByte(), payload)
@@ -3801,7 +3815,7 @@ class OneControlGattCallback(
         if (brightness <= 0) {
             pendingDimmable.remove(key)
             pendingDimmableSend.remove(key)
-            return sendDimmableCommand(writeChar, effectiveTableId, deviceId, 0)
+            return sendDimmableCommand(writeChar, effectiveTableId, deviceId, 0, mode = 0)
         }
         
         // Handle brightness: treat all values including 255 as literal brightness
@@ -3817,14 +3831,15 @@ class OneControlGattCallback(
             if (entry != null && entry.second == nowTs) {
                 // This is still the latest request - send it
                 pendingDimmableSend.remove(key)
-                sendDimmableCommand(writeChar, effectiveTableId, deviceId, targetBrightness)
+                sendDimmableCommand(writeChar, effectiveTableId, deviceId, targetBrightness, mode = 1)
                 lastKnownDimmableBrightness[key] = targetBrightness
-                pendingDimmable[key] = targetBrightness to System.currentTimeMillis()
+                pendingDimmable[key] = Triple(targetBrightness, 1, System.currentTimeMillis())
                 
                 // Publish optimistic state update
                 val baseTopic = "onecontrol/${device.address}"
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "ON", true)
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", targetBrightness.toString(), true)
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", "Solid", true)
             }
         }, DIMMER_DEBOUNCE_MS)
         
@@ -3833,18 +3848,23 @@ class OneControlGattCallback(
     
     /**
      * Actually send the dimmable command to BLE (called after debounce)
+     * @param mode OneControl mode byte: 0=Off, 1=On, 2=Blink, 3=Swell
      */
-    private fun sendDimmableCommand(writeChar: BluetoothGattCharacteristic, effectiveTableId: Byte, deviceId: Byte, brightness: Int): Result<Unit> {
+    private fun sendDimmableCommand(writeChar: BluetoothGattCharacteristic, effectiveTableId: Byte, deviceId: Byte, brightness: Int, mode: Int = -1): Result<Unit> {
         try {
             val commandId = getNextCommandId()
             val tableIdInt = effectiveTableId.toInt() and 0xFF
             val deviceIdInt = deviceId.toInt() and 0xFF
             
+            // If mode not explicitly provided, infer from brightness (legacy behavior)
+            val effectiveMode = if (mode >= 0) mode else if (brightness == 0) 0 else 1
+            
             val command = MyRvLinkCommandBuilder.buildActionDimmable(
                 clientCommandId = commandId,
                 deviceTableId = effectiveTableId,
                 deviceId = deviceId,
-                brightness = brightness
+                brightness = brightness,
+                mode = effectiveMode
             )
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
@@ -3861,6 +3881,7 @@ class OneControlGattCallback(
                 val baseTopic = "onecontrol/${device.address}"
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "OFF", true)
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", "0", true)
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", "Solid", true)
             }
             
             return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
@@ -3868,6 +3889,46 @@ class OneControlGattCallback(
             Log.e(TAG, "❌ Failed to send dimmable command: ${e.message}", e)
             return Result.failure(e)
         }
+    }
+    
+    /**
+     * Control a dimmable light effect - from HA effect_command_topic
+     * Payload is the effect name string: "Solid", "Blink", "Swell"
+     * Sends the corresponding mode byte while preserving current brightness.
+     */
+    private fun controlDimmableLightEffect(tableId: Byte, deviceId: Byte, effectName: String): Result<Unit> {
+        Log.i(TAG, "📤 Dimmable effect: table=$tableId, device=$deviceId, effect=$effectName")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+            deviceTableId
+        } else {
+            tableId
+        }
+        
+        val tableIdInt = effectiveTableId.toInt() and 0xFF
+        val deviceIdInt = deviceId.toInt() and 0xFF
+        val key = "$tableIdInt:$deviceIdInt"
+        
+        val mode = OneControlEntity.DimmableLight.effectToMode(effectName)
+        
+        // Use last known brightness, default to 255 if unknown
+        val brightness = lastKnownDimmableBrightness[key] ?: 255
+        
+        // Send immediately (no debounce for effect changes — instant feedback)
+        val result = sendDimmableCommand(writeChar, effectiveTableId, deviceId, brightness, mode = mode)
+        
+        // Register pending guard and publish optimistic state
+        pendingDimmable[key] = Triple(brightness, mode, System.currentTimeMillis())
+        
+        val baseTopic = "onecontrol/${device.address}"
+        val effectDisplayName = OneControlEntity.DimmableLight(tableIdInt, deviceIdInt, brightness, mode).effectName
+        mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "ON", true)
+        mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", brightness.toString(), true)
+        mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", effectDisplayName, true)
+        
+        return result
     }
     
     /**

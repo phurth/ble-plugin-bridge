@@ -60,6 +60,26 @@ sealed class OneControlEntity {
     ) : OneControlEntity() {
         val isOn: Boolean get() = mode > 0
         val state: String get() = if (isOn) "ON" else "OFF"
+
+        /** Effect name for HA - mirrors RgbLight.effectName */
+        val effectName: String get() = when (mode) {
+            0 -> "Solid"   // Default when off
+            1 -> "Solid"
+            2 -> "Blink"
+            3 -> "Swell"
+            else -> "Solid"
+        }
+
+        companion object {
+            /** Map HA effect name → OneControl mode byte */
+            fun effectToMode(effect: String): Int = when (effect.lowercase()) {
+                "blink" -> 2
+                "swell" -> 3
+                else -> 1  // "Solid" or unknown → On
+            }
+
+            val EFFECT_LIST = listOf("Solid", "Blink", "Swell")
+        }
     }
     
     /**

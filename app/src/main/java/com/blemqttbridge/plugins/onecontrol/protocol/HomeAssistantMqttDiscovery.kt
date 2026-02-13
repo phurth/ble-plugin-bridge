@@ -47,11 +47,12 @@ object HomeAssistantMqttDiscovery {
             deviceName: String,
             stateTopic: String,
             commandTopic: String,
-            brightnessTopic: String
+            brightnessTopic: String,
+            effectTopic: String
         ): JSONObject {
             return getDimmableLightDiscovery(
                 gatewayMac, deviceAddr, deviceName,
-                stateTopic, commandTopic, brightnessTopic, appVersion
+                stateTopic, commandTopic, brightnessTopic, effectTopic, appVersion
             )
         }
         
@@ -238,6 +239,8 @@ object HomeAssistantMqttDiscovery {
     
     /**
      * Generate discovery config for a dimmable light
+     * Uses default (template) MQTT light schema with effect topics
+     * https://www.home-assistant.io/integrations/light.mqtt/#default-schema
      */
     fun getDimmableLightDiscovery(
         gatewayMac: String,
@@ -246,6 +249,7 @@ object HomeAssistantMqttDiscovery {
         stateTopic: String,
         commandTopic: String,
         brightnessTopic: String,
+        effectTopic: String,
         appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_light_${deviceAddr.toString(16)}"
@@ -267,6 +271,13 @@ object HomeAssistantMqttDiscovery {
             put("on_command_type", "brightness")
             put("optimistic", false)  // Wait for state updates from gateway
             put("icon", "mdi:lightbulb")
+
+            // Effect support via separate topics (default schema)
+            put("effect_state_topic", effectTopic)
+            put("effect_command_topic", "$commandTopic/effect")
+            put("effect_list", JSONArray().apply {
+                com.blemqttbridge.plugins.onecontrol.OneControlEntity.DimmableLight.EFFECT_LIST.forEach { put(it) }
+            })
         }
     }
     

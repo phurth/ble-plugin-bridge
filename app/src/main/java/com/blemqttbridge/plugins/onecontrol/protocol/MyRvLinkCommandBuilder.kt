@@ -59,19 +59,24 @@ object MyRvLinkCommandBuilder {
      * Wire format matching legacy app HCI capture:
      *   [CmdId_lo][CmdId_hi][CommandType=0x43][DeviceTableId][DeviceId][ModeByte][BrightnessByte][Reserved]
      * 
-     * ModeByte: 0x00=Off, 0x01=On/Settings, 0x7F=Restore
+     * ModeByte: 0x00=Off, 0x01=On/Settings, 0x02=Blink, 0x03=Swell, 0x7F=Restore
      * BrightnessByte: 0-255
      */
     fun buildActionDimmable(
         clientCommandId: UShort,
         deviceTableId: Byte,
         deviceId: Byte,
-        brightness: Int
+        brightness: Int,
+        mode: Int = -1
     ): ByteArray {
         val b = brightness.coerceIn(0, 255)
         
-        // Mode: 0x00 for off, 0x01 for on/settings, 0x7F for restore
-        val modeByte = if (b == 0) 0x00.toByte() else 0x01.toByte()
+        // Mode: use explicit mode if provided, otherwise infer from brightness
+        val modeByte = if (mode >= 0) {
+            mode.coerceIn(0, 127).toByte()
+        } else {
+            if (b == 0) 0x00.toByte() else 0x01.toByte()
+        }
         val brightnessByte = b.toByte()
         val reservedByte = 0x00.toByte()
         
