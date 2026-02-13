@@ -41,6 +41,7 @@ const PLUGIN_TYPE_NAMES = {
     'easytouch': 'EasyTouch',
     'gopower': 'GoPower',
     'hughes_watchdog': 'Hughes Watchdog',
+    'hughes_gen2': 'Hughes Watchdog Gen2',
     'mopeka': 'Mopeka',
     'blescanner': 'BLE Scanner',
     'peplink': 'Peplink Router'
@@ -120,7 +121,7 @@ function setMacAddress(prefix, mac) {
 }
 
 // Plugin type categorization
-const BLE_PLUGINS = ['onecontrol', 'easytouch', 'gopower', 'hughes_watchdog', 'blescanner', 'mopeka'];
+const BLE_PLUGINS = ['onecontrol', 'easytouch', 'gopower', 'hughes_watchdog', 'hughes_gen2', 'blescanner', 'mopeka'];
 const HTTP_PLUGINS = ['peplink'];
 
 function isBlePlugin(pluginType) {
@@ -422,7 +423,7 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
             // Passive plugins (mopeka, gopower, blescanner) only need dataHealthy to be green
             // Active plugins (onecontrol, easytouch) need full connection
             // HTTP plugins (peplink) need all three flags
-            const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner' || pluginType === 'hughes_watchdog';
+            const isPassive = pluginType === 'mopeka' || pluginType === 'gopower' || pluginType === 'blescanner' || pluginType === 'hughes_watchdog' || pluginType === 'hughes_gen2';
             const isHttpPlugin = pluginType === 'peplink';
             
             // Use correct service state per section
@@ -454,6 +455,9 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
                 const expectedName = instance.config?.expected_name || 'Any';
                 const forceVersion = instance.config?.force_version || 'Auto';
                 configDetails = `<div class="instance-detail-line">Name: ${expectedName} | Gen: ${forceVersion}</div>`;
+            } else if (pluginType === 'hughes_gen2') {
+                const expectedName = instance.config?.expected_name || 'Any';
+                configDetails = `<div class="instance-detail-line">Name: ${expectedName}</div>`;
             } else if (pluginType === 'mopeka') {
                 const mediumType = instance.config?.medium_type || 'propane';
                 const tankType = instance.config?.tank_type || '20lb_v';
@@ -735,6 +739,9 @@ async function confirmAddInstance() {
         const forceVersion = document.getElementById('new-force-version')?.value;
         if (expectedName) config.expected_name = expectedName;
         if (forceVersion && forceVersion !== 'auto') config.force_version = forceVersion;
+    } else if (pluginType === 'hughes_gen2') {
+        const expectedName = document.getElementById('new-expected-name')?.value.trim();
+        if (expectedName) config.expected_name = expectedName;
     } else if (pluginType === 'mopeka') {
         const mediumType = document.getElementById('new-medium-type')?.value || 'propane';
         const tankType = document.getElementById('new-tank-type')?.value || '20lb_v';
@@ -1121,6 +1128,14 @@ function updatePluginSpecificFields() {
                 </select>
             </div>
         `;
+    } else if (pluginType === 'hughes_gen2') {
+        container.innerHTML = `
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Expected Device Name (optional):</label>
+                <input type="text" id="new-expected-name" placeholder="e.g., WD_E8_12345 (leave empty for any)" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="margin-top: 4px; font-size: 12px; color: #666;">Gen2 devices advertise as WD_{type}_{serial} (types: E5-E9, V5-V9)</div>
+            </div>
+        `;
     } else if (pluginType === 'mopeka') {
         container.innerHTML = `
             <div style="margin-bottom: 15px;">
@@ -1273,6 +1288,15 @@ function updateEditPluginSpecificFields(pluginType, config) {
                     <option value="gen1" ${forceVersion === 'gen1' ? 'selected' : ''}>Gen 1 (E2)</option>
                     <option value="gen2" ${forceVersion === 'gen2' ? 'selected' : ''}>Gen 2+ (E3/E4)</option>
                 </select>
+            </div>
+        `;
+    } else if (pluginType === 'hughes_gen2') {
+        const expectedName = config?.expected_name || '';
+        container.innerHTML = `
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-weight: 500;">Expected Device Name (optional):</label>
+                <input type="text" id="edit-expected-name" value="${expectedName}" placeholder="e.g., WD_E8_12345 (leave empty for any)" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="margin-top: 4px; font-size: 12px; color: #666;">Gen2 devices advertise as WD_{type}_{serial} (types: E5-E9, V5-V9)</div>
             </div>
         `;
     } else if (pluginType === 'mopeka') {

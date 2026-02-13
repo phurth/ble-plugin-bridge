@@ -978,7 +978,7 @@ class WebServerManager(
             }
 
             // Validate plugin type
-            val validTypes = setOf("onecontrol", "easytouch", "gopower", "mopeka", "hughes_watchdog", "blescanner")
+            val validTypes = setOf("onecontrol", "easytouch", "gopower", "mopeka", "hughes_watchdog", "hughes_gen2", "blescanner")
             if (!validTypes.contains(pluginType)) {
                 return newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
