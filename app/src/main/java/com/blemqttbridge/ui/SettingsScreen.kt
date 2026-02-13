@@ -343,7 +343,7 @@ fun SettingsScreen(
                                 !serviceRunning -> "⚫ Stopped" to MaterialTheme.colorScheme.onSurfaceVariant
                                 !bluetoothAvailable -> "⚠️ Bluetooth OFF" to Color(0xFFFF9800) // Orange
                                 bleScanningActive -> "🟢 Scanning" to Color(0xFF4CAF50) // Green
-                                else -> "🟡 Running (not scanning)" to Color(0xFFFFC107) // Yellow
+                                else -> "� Running" to Color(0xFF4CAF50) // Green
                             }
                             Text(
                                 text = statusText,
@@ -354,16 +354,6 @@ fun SettingsScreen(
                         Switch(
                             checked = serviceRunning,
                             onCheckedChange = { viewModel.setServiceEnabled(it) }
-                        )
-                    }
-                    
-                    // Warning message when service running but not scanning
-                    if (serviceRunning && !bleScanningActive && bluetoothAvailable) {
-                        Text(
-                            text = "⚠️ Service is enabled but not scanning. Try toggling Bluetooth or the service.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFFC107), // Yellow
-                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                     
