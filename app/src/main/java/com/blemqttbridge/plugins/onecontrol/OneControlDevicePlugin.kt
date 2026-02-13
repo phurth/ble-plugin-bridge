@@ -3826,10 +3826,10 @@ class OneControlGattCallback(
         // Handle brightness: treat all values including 255 as literal brightness
         val targetBrightness = brightness.coerceIn(1, 255)
         
-        // Preserve current effect mode for brightness-only changes
-        // If the light is in Blink/Swell mode, changing brightness should keep that mode
-        val currentMode = lastKnownDimmableMode[key] ?: 1
-        val effectiveMode = if (currentMode > 1) currentMode else 1  // Keep Blink(2)/Swell(3), default to On(1)
+        // Brightness commands always use mode=1 (On/Solid).
+        // Don't try to preserve Blink/Swell mode during brightness changes —
+        // effects use the extended command format which brightness doesn't support.
+        val effectiveMode = 1
         
         // Debounce: schedule the command after DIMMER_DEBOUNCE_MS
         // If another command comes in before then, it will replace this one
@@ -3955,11 +3955,10 @@ class OneControlGattCallback(
     }
     
     /**
-     * Send dimmable effect command using extended format (buildActionDimmableFull).
-     * Includes cycle timing parameters needed for Blink/Swell effects to sustain.
-     * 
-     * The extended format: [CmdId(2)][0x43][TableId][DeviceId][Brightness][Mode][OnDuration][CycleTime1][CycleTime2][Reserved(3)]
-     * CycleTime1/CycleTime2 control the effect animation speed.
+     * Send dimmable effect command using extended simple format.
+     * Extends the proven 8-byte layout: [Mode][Brightness][Reserved] with
+     * [Mode][Brightness][OnDuration][CycleTime1][CycleTime2].
+     * This keeps Mode in the same byte position (proven to work) and adds timing.
      */
     private fun sendDimmableEffectCommand(
         writeChar: BluetoothGattCharacteristic,
@@ -3973,34 +3972,32 @@ class OneControlGattCallback(
             val tableIdInt = effectiveTableId.toInt() and 0xFF
             val deviceIdInt = deviceId.toInt() and 0xFF
             
-            // Scale brightness from 0-255 to 0-100 for the full command format
-            val brightnessScaled = (brightness * 100 / 255).coerceIn(0, 100)
+            // Default cycle times for effects (experimental)
+            // Using various values to find what works with the gateway
+            val cycleTime1 = 10  // Half-cycle duration
+            val cycleTime2 = 10  // Half-cycle duration
             
-            // Default cycle times for effects (experimental — adjust based on hardware response)
-            // These likely control animation speed in some unit (100ms? 10ms?)
-            val cycleTime1: Byte = 10  // ~1 second per half-cycle
-            val cycleTime2: Byte = 10  // ~1 second per half-cycle
-            
-            val command = MyRvLinkCommandBuilder.buildActionDimmableFull(
+            val command = MyRvLinkCommandBuilder.buildActionDimmableEffect(
                 clientCommandId = commandId,
                 deviceTableId = effectiveTableId,
                 deviceId = deviceId,
-                brightness = brightnessScaled,
-                mode = mode.toByte(),
-                onDuration = 0,  // No auto-off
-                blinkSwellCycleTime1 = cycleTime1,
-                blinkSwellCycleTime2 = cycleTime2
+                mode = mode,
+                brightness = brightness,
+                onDuration = 0,
+                cycleTime1 = cycleTime1,
+                cycleTime2 = cycleTime2
             )
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
-            Log.d(TAG, "📤 Dimmable effect command (full format): ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            Log.d(TAG, "📤 Dimmable effect command (extended): ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            Log.d(TAG, "📤 Raw pre-COBS: ${command.joinToString(" ") { "%02X".format(it) }}")
             
             writeChar.value = encoded
             writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             val result = currentGatt?.writeCharacteristic(writeChar)
             
             Log.i(TAG, "📤 Sent dimmable effect: table=$tableIdInt, device=$deviceIdInt, " +
-                    "brightness=$brightnessScaled/100, mode=$mode, cycleTime=$cycleTime1/$cycleTime2, result=$result")
+                    "mode=$mode, brightness=$brightness, cycleTime=$cycleTime1/$cycleTime2, result=$result")
             
             return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
         } catch (e: Exception) {

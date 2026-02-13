@@ -194,6 +194,42 @@ object MyRvLinkCommandBuilder {
     }
     
     /**
+     * Build ActionDimmable with effect support (Blink/Swell + cycle timing).
+     * Extends the proven simple format layout: Mode first, then brightness,
+     * then appends onDuration + cycle time bytes.
+     *
+     * Wire: [CmdId_lo][CmdId_hi][0x43][TableId][DeviceId][Mode][Brightness][OnDuration][CT1][CT2]
+     *
+     * The simple 8-byte format (Mode, Brightness, Reserved) is proven to deliver
+     * mode 2/3 to the gateway. This extended version keeps that byte order and
+     * adds timing parameters so effects sustain instead of completing instantly.
+     */
+    fun buildActionDimmableEffect(
+        clientCommandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        mode: Int,
+        brightness: Int,
+        onDuration: Int = 0,
+        cycleTime1: Int = 10,
+        cycleTime2: Int = 10
+    ): ByteArray {
+        val b = brightness.coerceIn(0, 255)
+        return byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),
+            0x43.toByte(),  // CommandType: ActionDimmable
+            deviceTableId,
+            deviceId,
+            mode.coerceIn(0, 127).toByte(),   // Mode byte (same position as simple format)
+            b.toByte(),                         // Brightness (same position as simple format)
+            onDuration.coerceIn(0, 255).toByte(),  // OnDuration (was Reserved=0x00 in simple)
+            cycleTime1.coerceIn(0, 255).toByte(),  // BlinkSwellCycleTime1
+            cycleTime2.coerceIn(0, 255).toByte()   // BlinkSwellCycleTime2
+        )
+    }
+    
+    /**
      * Build ActionHvac command
      * Format: [ClientCommandId (2 bytes)][CommandType=0x45][DeviceTableId][DeviceId][Command (3 bytes)]
      * Command payload: [command_byte][low_trip_temp][high_trip_temp]
