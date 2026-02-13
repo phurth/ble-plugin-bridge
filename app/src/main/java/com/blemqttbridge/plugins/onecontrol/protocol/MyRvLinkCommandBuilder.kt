@@ -55,12 +55,18 @@ object MyRvLinkCommandBuilder {
     }
     
     /**
-     * Build ActionDimmable command
-     * Wire format matching legacy app HCI capture:
-     *   [CmdId_lo][CmdId_hi][CommandType=0x43][DeviceTableId][DeviceId][ModeByte][BrightnessByte][Reserved]
-     * 
-     * ModeByte: 0x00=Off, 0x01=On/Settings, 0x02=Blink, 0x03=Swell, 0x7F=Restore
-     * BrightnessByte: 0-255
+     * Build ActionDimmable command per official OneControl app format.
+     *
+     * Official LogicalDeviceLightDimmableCommand payload (after 5-byte header):
+     *   [Command][MaxBrightness][Duration(min)][CT1_hi][CT1_lo][CT2_hi][CT2_lo][Reserved]
+     *
+     * Minimum lengths per mode:
+     *   Off(0), Restore(0x7F): 1 byte  (command only) → 6 total
+     *   On(1), Settings(0x7E): 3 bytes (command + brightness + duration) → 8 total
+     *   Blink(2), Swell(3):   7 bytes (+ 4 cycle time bytes) → 12 total
+     *
+     * This method builds On/Off/Restore format (no cycle times).
+     * For Blink/Swell, use buildActionDimmableEffect().
      */
     fun buildActionDimmable(
         clientCommandId: UShort,
@@ -77,20 +83,27 @@ object MyRvLinkCommandBuilder {
         } else {
             if (b == 0) 0x00.toByte() else 0x01.toByte()
         }
-        val brightnessByte = b.toByte()
-        val reservedByte = 0x00.toByte()
+        val modeInt = modeByte.toInt() and 0xFF
         
-        // 8 bytes total: matching legacy app format
-        return byteArrayOf(
+        val header = byteArrayOf(
             (clientCommandId.toInt() and 0xFF).toByte(),            // CmdId low
             ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),    // CmdId high
             0x43.toByte(),                                           // CommandType: ActionDimmable
             deviceTableId,
-            deviceId,
-            modeByte,
-            brightnessByte,
-            reservedByte
+            deviceId
         )
+        
+        // Official app variable-length payload per mode
+        val payload = when (modeInt) {
+            0, 0x7F -> byteArrayOf(modeByte)  // Off / Restore: just command byte
+            else -> byteArrayOf(               // On / Settings: command + brightness + duration
+                modeByte,
+                b.toByte(),
+                0x00.toByte()  // Duration = 0 (no auto-off)
+            )
+        }
+        
+        return header + payload
     }
     
     /**
@@ -154,55 +167,22 @@ object MyRvLinkCommandBuilder {
     }
     
     /**
-     * Build ActionDimmable with full command structure
-     * This is a simplified version - full implementation would use LogicalDeviceLightDimmableCommand
-     */
-    fun buildActionDimmableFull(
-        clientCommandId: UShort,
-        deviceTableId: Byte,
-        deviceId: Byte,
-        brightness: Int,
-        mode: Byte = 0,
-        onDuration: Byte = 0,
-        blinkSwellCycleTime1: Byte = 0,
-        blinkSwellCycleTime2: Byte = 0
-    ): ByteArray {
-        // Full command structure (8 bytes minimum for dimmable command)
-        val commandData = byteArrayOf(
-            brightness.coerceIn(0, 100).toByte(),
-            mode,
-            onDuration,
-            blinkSwellCycleTime1,
-            blinkSwellCycleTime2,
-            0.toByte(),  // Reserved
-            0.toByte(),  // Reserved
-            0.toByte()   // Reserved
-        )
-        
-        val command = ByteArray(5 + commandData.size)
-        command[0] = (clientCommandId.toInt() and 0xFF).toByte()
-        command[1] = ((clientCommandId.toInt() shr 8) and 0xFF).toByte()
-        command[2] = 0x43.toByte()  // CommandType: ActionDimmable
-        command[3] = deviceTableId
-        command[4] = deviceId
-        
-        commandData.forEachIndexed { index, byte ->
-            command[5 + index] = byte
-        }
-        
-        return command
-    }
-    
-    /**
-     * Build ActionDimmable with effect support (Blink/Swell + cycle timing).
-     * Extends the proven simple format layout: Mode first, then brightness,
-     * then appends onDuration + cycle time bytes.
+     * Build ActionDimmable for Blink/Swell effects per official OneControl app.
      *
-     * Wire: [CmdId_lo][CmdId_hi][0x43][TableId][DeviceId][Mode][Brightness][OnDuration][CT1][CT2]
+     * Wire format (12 bytes):
+     *   [CmdId_lo][CmdId_hi][0x43][TableId][DeviceId]
+     *   [Command][MaxBrightness][Duration(min)][CT1_hi][CT1_lo][CT2_hi][CT2_lo]
      *
-     * The simple 8-byte format (Mode, Brightness, Reserved) is proven to deliver
-     * mode 2/3 to the gateway. This extended version keeps that byte order and
-     * adds timing parameters so effects sustain instead of completing instantly.
+     * CycleTime values are big-endian uint16 in milliseconds.
+     *   Blink: CT1 = on duration, CT2 = off duration
+     *   Swell: CT1 = ramp-up duration, CT2 = ramp-down duration
+     *
+     * Official app defaults both to 220ms if either is 0.
+     * Speed presets: Fast=220ms, Medium=1055ms, Slow=2447ms.
+     *
+     * @param cycleTime1Ms CT1 in milliseconds (big-endian uint16)
+     * @param cycleTime2Ms CT2 in milliseconds (big-endian uint16)
+     * @param durationMin Auto-off timer in minutes (0 = no auto-off)
      */
     fun buildActionDimmableEffect(
         clientCommandId: UShort,
@@ -210,22 +190,28 @@ object MyRvLinkCommandBuilder {
         deviceId: Byte,
         mode: Int,
         brightness: Int,
-        onDuration: Int = 0,
-        cycleTime1: Int = 10,
-        cycleTime2: Int = 10
+        cycleTime1Ms: Int = 220,
+        cycleTime2Ms: Int = 220,
+        durationMin: Int = 0
     ): ByteArray {
         val b = brightness.coerceIn(0, 255)
+        // Force default 220ms if either cycle time is 0, matching official app
+        val ct1 = if (cycleTime1Ms <= 0 || cycleTime2Ms <= 0) 220 else cycleTime1Ms.coerceIn(1, 65535)
+        val ct2 = if (cycleTime1Ms <= 0 || cycleTime2Ms <= 0) 220 else cycleTime2Ms.coerceIn(1, 65535)
+        
         return byteArrayOf(
-            (clientCommandId.toInt() and 0xFF).toByte(),
-            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),
-            0x43.toByte(),  // CommandType: ActionDimmable
-            deviceTableId,
-            deviceId,
-            mode.coerceIn(0, 127).toByte(),   // Mode byte (same position as simple format)
-            b.toByte(),                         // Brightness (same position as simple format)
-            onDuration.coerceIn(0, 255).toByte(),  // OnDuration (was Reserved=0x00 in simple)
-            cycleTime1.coerceIn(0, 255).toByte(),  // BlinkSwellCycleTime1
-            cycleTime2.coerceIn(0, 255).toByte()   // BlinkSwellCycleTime2
+            (clientCommandId.toInt() and 0xFF).toByte(),            // [0] CmdId low
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),    // [1] CmdId high
+            0x43.toByte(),                                           // [2] CommandType: ActionDimmable
+            deviceTableId,                                           // [3] DeviceTableId
+            deviceId,                                                // [4] DeviceId
+            mode.coerceIn(2, 3).toByte(),                            // [5] Command: Blink(2) or Swell(3)
+            b.toByte(),                                              // [6] MaxBrightness 0-255
+            durationMin.coerceIn(0, 255).toByte(),                   // [7] Duration (auto-off minutes, 0=infinite)
+            ((ct1 shr 8) and 0xFF).toByte(),                         // [8] CycleTime1 MSB
+            (ct1 and 0xFF).toByte(),                                 // [9] CycleTime1 LSB
+            ((ct2 shr 8) and 0xFF).toByte(),                         // [10] CycleTime2 MSB
+            (ct2 and 0xFF).toByte()                                  // [11] CycleTime2 LSB
         )
     }
     
