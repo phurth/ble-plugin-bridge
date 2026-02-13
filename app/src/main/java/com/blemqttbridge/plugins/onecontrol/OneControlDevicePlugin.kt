@@ -4152,8 +4152,10 @@ class OneControlGattCallback(
         red: Int = 0,
         green: Int = 0,
         blue: Int = 0,
-        autoOff: Int = 0,
-        intervalMs: Int = 500
+        autoOff: Int = 0xFF,
+        blinkOnInterval: Int = 207,
+        blinkOffInterval: Int = 207,
+        transitionIntervalMs: Int = 750
     ): Result<Unit> {
         try {
             val commandId = getNextCommandId()
@@ -4169,7 +4171,9 @@ class OneControlGattCallback(
                 green = green,
                 blue = blue,
                 autoOff = autoOff,
-                intervalMs = intervalMs
+                blinkOnInterval = blinkOnInterval,
+                blinkOffInterval = blinkOffInterval,
+                transitionIntervalMs = transitionIntervalMs
             )
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
