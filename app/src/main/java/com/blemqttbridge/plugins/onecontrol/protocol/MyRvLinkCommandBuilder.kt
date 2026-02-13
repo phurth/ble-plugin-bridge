@@ -110,14 +110,14 @@ object MyRvLinkCommandBuilder {
      * Build ActionRgb command for RGB light control per official OneControl app.
      * CommandType: 0x44 (ActionRgb)
      *
-     * Wire format: [CmdId_lo][CmdId_hi][0x44][DeviceTableId][DeviceId][DataMinimum...]
+     * Wire: CmdId_lo, CmdId_hi, 0x44, DeviceTableId, DeviceId, DataMinimum...
      *
      * DataMinimum varies by mode:
-     *   Off(0):        [0x00]                                           (6 bytes total)
-     *   On(1):         [0x01][R][G][B][AutoOff]                         (10 bytes total)
-     *   Blink(2):      [0x02][R][G][B][AutoOff][OnInterval][OffInterval] (12 bytes total)
-     *   Transitions(4-8): [Mode][AutoOff][IntervalHi][IntervalLo]       (9 bytes total)
-     *   Restore(127):  [0x7F]                                           (6 bytes total)
+     *   Off(0):           0x00                                      (6 bytes total)
+     *   On(1):            0x01, R, G, B, AutoOff                    (10 bytes total)
+     *   Blink(2):         0x02, R, G, B, AutoOff, OnIntv, OffIntv   (12 bytes total)
+     *   Transitions(4-8): Mode, AutoOff, IntvHi, IntvLo             (9 bytes total)
+     *   Restore(127):     0x7F                                      (6 bytes total)
      *
      * IMPORTANT: Blink uses TWO SEPARATE single-byte intervals (on/off),
      * NOT a big-endian uint16. Transition modes (4-8) use big-endian uint16.
