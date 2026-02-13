@@ -71,14 +71,30 @@ sealed class OneControlEntity {
         }
 
         companion object {
+            /** Official app speed presets (milliseconds per half-cycle) */
+            const val CYCLE_FAST = 220
+            const val CYCLE_MEDIUM = 1055
+            const val CYCLE_SLOW = 2447
+
             /** Map HA effect name → OneControl mode byte */
-            fun effectToMode(effect: String): Int = when (effect.lowercase()) {
-                "blink" -> 2
-                "swell" -> 3
+            fun effectToMode(effect: String): Int = when {
+                effect.lowercase().startsWith("blink") -> 2
+                effect.lowercase().startsWith("swell") -> 3
                 else -> 1  // "Solid" or unknown → On
             }
 
-            val EFFECT_LIST = listOf("Solid", "Blink", "Swell")
+            /** Map HA effect name → cycle time in ms */
+            fun effectToCycleTime(effect: String): Int = when {
+                effect.lowercase().contains("slow") -> CYCLE_SLOW
+                effect.lowercase().contains("medium") -> CYCLE_MEDIUM
+                else -> CYCLE_FAST  // Default to fast
+            }
+
+            val EFFECT_LIST = listOf(
+                "Solid",
+                "Blink Slow", "Blink Medium", "Blink Fast",
+                "Swell Slow", "Swell Medium", "Swell Fast"
+            )
         }
     }
     

@@ -3923,6 +3923,7 @@ class OneControlGattCallback(
         val key = "$tableIdInt:$deviceIdInt"
         
         val mode = OneControlEntity.DimmableLight.effectToMode(effectName)
+        val cycleTimeMs = OneControlEntity.DimmableLight.effectToCycleTime(effectName)
         
         // Cancel any pending debounced brightness send — otherwise it fires
         // after this effect command and overwrites the mode back to On(1)
@@ -3940,17 +3941,16 @@ class OneControlGattCallback(
         val result = if (mode <= 1) {
             sendDimmableCommand(writeChar, effectiveTableId, deviceId, brightness, mode = mode)
         } else {
-            sendDimmableEffectCommand(writeChar, effectiveTableId, deviceId, brightness, mode)
+            sendDimmableEffectCommand(writeChar, effectiveTableId, deviceId, brightness, mode, cycleTimeMs)
         }
         
         // Register pending guard and publish optimistic state
         pendingDimmable[key] = Triple(brightness, mode, System.currentTimeMillis())
         
         val baseTopic = "onecontrol/${device.address}"
-        val effectDisplayName = OneControlEntity.DimmableLight(tableIdInt, deviceIdInt, brightness, mode).effectName
         mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "ON", true)
         mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", brightness.toString(), true)
-        mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", effectDisplayName, true)
+        mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", effectName, true)
         
         return result
     }
@@ -3973,15 +3973,13 @@ class OneControlGattCallback(
         effectiveTableId: Byte,
         deviceId: Byte,
         brightness: Int,
-        mode: Int
+        mode: Int,
+        cycleTimeMs: Int = 220
     ): Result<Unit> {
         try {
             val commandId = getNextCommandId()
             val tableIdInt = effectiveTableId.toInt() and 0xFF
             val deviceIdInt = deviceId.toInt() and 0xFF
-            
-            // Default cycle times: 220ms (official app "Fast" / default)
-            val cycleTimeMs = 220
             
             val command = MyRvLinkCommandBuilder.buildActionDimmableEffect(
                 clientCommandId = commandId,
