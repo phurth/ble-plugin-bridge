@@ -3935,7 +3935,9 @@ class OneControlGattCallback(
         lastKnownDimmableMode[key] = mode
         
         // For Solid (mode=1), use the simple command format (proven to work)
-        // For Blink/Swell, use the extended format with cycle timing parameters
+        // Re-send last known brightness explicitly so we don't get stuck at
+        // whatever brightness the gateway last reported during Swell/Blink.
+        // For Blink/Swell, use the extended format with cycle timing parameters.
         val result = if (mode <= 1) {
             sendDimmableCommand(writeChar, effectiveTableId, deviceId, brightness, mode = mode)
         } else {
@@ -3977,13 +3979,19 @@ class OneControlGattCallback(
             val cycleTime1 = 10  // Half-cycle duration
             val cycleTime2 = 10  // Half-cycle duration
             
+            // For Blink (mode=2), onDuration controls how long the light stays ON
+            // during each cycle. Zero means "on for 0 time" → light stays off.
+            // Set it equal to the cycle time so it's on as long as it's off.
+            // For Swell (mode=3), onDuration is unused (continuous fade).
+            val onDuration = if (mode == 2) cycleTime1 else 0
+            
             val command = MyRvLinkCommandBuilder.buildActionDimmableEffect(
                 clientCommandId = commandId,
                 deviceTableId = effectiveTableId,
                 deviceId = deviceId,
                 mode = mode,
                 brightness = brightness,
-                onDuration = 0,
+                onDuration = onDuration,
                 cycleTime1 = cycleTime1,
                 cycleTime2 = cycleTime2
             )
