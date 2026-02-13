@@ -617,6 +617,8 @@ class OneControlGattCallback(
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()
+    // Key: "tableId:deviceId", Value: last known mode (0=Off, 1=On, 2=Blink, 3=Swell)
+    private val lastKnownDimmableMode = mutableMapOf<String, Int>()
     // Pending dimmable: tracks in-flight commands to suppress conflicting gateway status
     // Triple: (brightness, mode, timestamp)
     private val pendingDimmable = mutableMapOf<String, Triple<Int, Int, Long>>()  // key -> (brightness, mode, timestamp)
@@ -1743,6 +1745,8 @@ class OneControlGattCallback(
         if (entity.brightness > 0) {
             lastKnownDimmableBrightness[entity.address] = entity.brightness
         }
+        // Track mode from gateway so brightness commands can preserve the active effect
+        lastKnownDimmableMode[entity.address] = entity.mode
         
         // Use centralized publishing for discovery and state
         publishEntityState(
@@ -3815,11 +3819,17 @@ class OneControlGattCallback(
         if (brightness <= 0) {
             pendingDimmable.remove(key)
             pendingDimmableSend.remove(key)
+            lastKnownDimmableMode[key] = 0
             return sendDimmableCommand(writeChar, effectiveTableId, deviceId, 0, mode = 0)
         }
         
         // Handle brightness: treat all values including 255 as literal brightness
         val targetBrightness = brightness.coerceIn(1, 255)
+        
+        // Preserve current effect mode for brightness-only changes
+        // If the light is in Blink/Swell mode, changing brightness should keep that mode
+        val currentMode = lastKnownDimmableMode[key] ?: 1
+        val effectiveMode = if (currentMode > 1) currentMode else 1  // Keep Blink(2)/Swell(3), default to On(1)
         
         // Debounce: schedule the command after DIMMER_DEBOUNCE_MS
         // If another command comes in before then, it will replace this one
@@ -3831,15 +3841,16 @@ class OneControlGattCallback(
             if (entry != null && entry.second == nowTs) {
                 // This is still the latest request - send it
                 pendingDimmableSend.remove(key)
-                sendDimmableCommand(writeChar, effectiveTableId, deviceId, targetBrightness, mode = 1)
+                sendDimmableCommand(writeChar, effectiveTableId, deviceId, targetBrightness, mode = effectiveMode)
                 lastKnownDimmableBrightness[key] = targetBrightness
-                pendingDimmable[key] = Triple(targetBrightness, 1, System.currentTimeMillis())
+                pendingDimmable[key] = Triple(targetBrightness, effectiveMode, System.currentTimeMillis())
                 
                 // Publish optimistic state update
                 val baseTopic = "onecontrol/${device.address}"
+                val effectName = OneControlEntity.DimmableLight(tableIdInt, deviceIdInt, targetBrightness, effectiveMode).effectName
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/state", "ON", true)
                 mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/brightness", targetBrightness.toString(), true)
-                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", "Solid", true)
+                mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", effectName, true)
             }
         }, DIMMER_DEBOUNCE_MS)
         
@@ -3894,7 +3905,7 @@ class OneControlGattCallback(
     /**
      * Control a dimmable light effect - from HA effect_command_topic
      * Payload is the effect name string: "Solid", "Blink", "Swell"
-     * Sends the corresponding mode byte while preserving current brightness.
+     * Uses the extended ActionDimmable format with cycle timing parameters.
      */
     private fun controlDimmableLightEffect(tableId: Byte, deviceId: Byte, effectName: String): Result<Unit> {
         Log.i(TAG, "📤 Dimmable effect: table=$tableId, device=$deviceId, effect=$effectName")
@@ -3913,11 +3924,23 @@ class OneControlGattCallback(
         
         val mode = OneControlEntity.DimmableLight.effectToMode(effectName)
         
+        // Cancel any pending debounced brightness send — otherwise it fires
+        // after this effect command and overwrites the mode back to On(1)
+        pendingDimmableSend.remove(key)
+        
         // Use last known brightness, default to 255 if unknown
         val brightness = lastKnownDimmableBrightness[key] ?: 255
         
-        // Send immediately (no debounce for effect changes — instant feedback)
-        val result = sendDimmableCommand(writeChar, effectiveTableId, deviceId, brightness, mode = mode)
+        // Update tracked mode BEFORE sending so any HA feedback preserves it
+        lastKnownDimmableMode[key] = mode
+        
+        // For Solid (mode=1), use the simple command format (proven to work)
+        // For Blink/Swell, use the extended format with cycle timing parameters
+        val result = if (mode <= 1) {
+            sendDimmableCommand(writeChar, effectiveTableId, deviceId, brightness, mode = mode)
+        } else {
+            sendDimmableEffectCommand(writeChar, effectiveTableId, deviceId, brightness, mode)
+        }
         
         // Register pending guard and publish optimistic state
         pendingDimmable[key] = Triple(brightness, mode, System.currentTimeMillis())
@@ -3929,6 +3952,61 @@ class OneControlGattCallback(
         mqttPublisher.publishState("$baseTopic/device/$tableIdInt/$deviceIdInt/effect", effectDisplayName, true)
         
         return result
+    }
+    
+    /**
+     * Send dimmable effect command using extended format (buildActionDimmableFull).
+     * Includes cycle timing parameters needed for Blink/Swell effects to sustain.
+     * 
+     * The extended format: [CmdId(2)][0x43][TableId][DeviceId][Brightness][Mode][OnDuration][CycleTime1][CycleTime2][Reserved(3)]
+     * CycleTime1/CycleTime2 control the effect animation speed.
+     */
+    private fun sendDimmableEffectCommand(
+        writeChar: BluetoothGattCharacteristic,
+        effectiveTableId: Byte,
+        deviceId: Byte,
+        brightness: Int,
+        mode: Int
+    ): Result<Unit> {
+        try {
+            val commandId = getNextCommandId()
+            val tableIdInt = effectiveTableId.toInt() and 0xFF
+            val deviceIdInt = deviceId.toInt() and 0xFF
+            
+            // Scale brightness from 0-255 to 0-100 for the full command format
+            val brightnessScaled = (brightness * 100 / 255).coerceIn(0, 100)
+            
+            // Default cycle times for effects (experimental — adjust based on hardware response)
+            // These likely control animation speed in some unit (100ms? 10ms?)
+            val cycleTime1: Byte = 10  // ~1 second per half-cycle
+            val cycleTime2: Byte = 10  // ~1 second per half-cycle
+            
+            val command = MyRvLinkCommandBuilder.buildActionDimmableFull(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                brightness = brightnessScaled,
+                mode = mode.toByte(),
+                onDuration = 0,  // No auto-off
+                blinkSwellCycleTime1 = cycleTime1,
+                blinkSwellCycleTime2 = cycleTime2
+            )
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 Dimmable effect command (full format): ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent dimmable effect: table=$tableIdInt, device=$deviceIdInt, " +
+                    "brightness=$brightnessScaled/100, mode=$mode, cycleTime=$cycleTime1/$cycleTime2, result=$result")
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send dimmable effect command: ${e.message}", e)
+            return Result.failure(e)
+        }
     }
     
     /**
