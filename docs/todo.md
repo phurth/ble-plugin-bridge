@@ -1,0 +1,3 @@
+- Green Mountain Grill
+- Peplink unavailable
+- RPC over MQTT — JSON-RPC 2.0 request/response for confirmed commands, on-demand queries, and service control (see docs/PLANNING_RPC_OVER_MQTT.md)
