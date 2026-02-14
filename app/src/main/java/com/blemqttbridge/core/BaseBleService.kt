@@ -906,7 +906,7 @@ class BaseBleService : Service() {
         // Cleanup: Remove plugin types from enabled_ble_plugins that should only be instances
         // The enabled set should ONLY contain instanceIds, not plugin types
         val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext).toMutableSet()
-        val pluginTypes = setOf("onecontrol", "onecontrol_v2", "easytouch", "gopower", "mopeka", "hughes_watchdog", "blescanner")
+        val pluginTypes = setOf("onecontrol", "onecontrol_v2", "easytouch", "gopower", "mopeka", "hughes_watchdog", "hughes_gen2", "blescanner")
         val removedPluginTypes = enabledPlugins.filter { it in pluginTypes }
         if (removedPluginTypes.isNotEmpty()) {
             Log.i(TAG, "🔄 Cleanup: Removing legacy plugin types from enabled set: $removedPluginTypes")

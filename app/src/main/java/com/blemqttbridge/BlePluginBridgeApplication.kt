@@ -13,6 +13,7 @@ import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
 import com.blemqttbridge.plugins.gopower.GoPowerDevicePlugin
 import com.blemqttbridge.plugins.hughes.HughesWatchdogDevicePlugin
+import com.blemqttbridge.plugins.hughes.gen2.HughesGen2DevicePlugin
 import com.blemqttbridge.plugins.mopeka.MopekaDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.plugins.peplink.PeplinkPlugin
@@ -62,9 +63,14 @@ class BlePluginBridgeApplication : Application() {
             GoPowerDevicePlugin()
         }
         
-        // Hughes Power Watchdog surge protector plugin
+        // Hughes Power Watchdog surge protector plugin (Gen1: E2-E4)
         registry.registerBlePlugin("hughes_watchdog") {
             HughesWatchdogDevicePlugin()
+        }
+
+        // Hughes Power Watchdog Gen2 plugin (E5-E9, V5-V9)
+        registry.registerBlePlugin("hughes_gen2") {
+            HughesGen2DevicePlugin()
         }
         
         // Mopeka tank sensor plugin (passive BLE scanning)
