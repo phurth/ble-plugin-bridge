@@ -107,16 +107,25 @@ object MyRvLinkCommandBuilder {
     }
     
     /**
-     * Build ActionRgb command for RGB light control
+     * Build ActionRgb command for RGB light control per official OneControl app.
      * CommandType: 0x44 (ActionRgb)
-     * Format: CmdId_lo, CmdId_hi, 0x44, DeviceTableId, DeviceId, Mode, payload...
-     * 
-     * Payload varies by mode:
-     *   Off(0): no additional bytes
-     *   On(1): [R][G][B][AutoOff]
-     *   Blink(2): [R][G][B][AutoOff][IntervalHi][IntervalLo]
-     *   Transitions(4-8): [AutoOff][IntervalHi][IntervalLo]
-     *   Restore(127): no additional bytes
+     *
+     * Wire: CmdId_lo, CmdId_hi, 0x44, DeviceTableId, DeviceId, DataMinimum...
+     *
+     * DataMinimum varies by mode:
+     *   Off(0):           0x00                                      (6 bytes total)
+     *   On(1):            0x01, R, G, B, AutoOff                    (10 bytes total)
+     *   Blink(2):         0x02, R, G, B, AutoOff, OnIntv, OffIntv   (12 bytes total)
+     *   Transitions(4-8): Mode, AutoOff, IntvHi, IntvLo             (9 bytes total)
+     *   Restore(127):     0x7F                                      (6 bytes total)
+     *
+     * IMPORTANT: Blink uses TWO SEPARATE single-byte intervals (on/off),
+     * NOT a big-endian uint16. Transition modes (4-8) use big-endian uint16.
+     *
+     * @param autoOff Auto-off timer in minutes. 0xFF (255) = disabled (default).
+     * @param blinkOnInterval Blink on-time (single byte). Official: Slow=207, Medium=87, Fast=15.
+     * @param blinkOffInterval Blink off-time (single byte). Usually equal to onInterval.
+     * @param transitionIntervalMs Transition interval (uint16 ms). Official: Slow=750, Medium=500, Fast=250.
      */
     fun buildActionRgb(
         clientCommandId: UShort,
@@ -126,8 +135,10 @@ object MyRvLinkCommandBuilder {
         red: Int = 0,
         green: Int = 0,
         blue: Int = 0,
-        autoOff: Int = 0,
-        intervalMs: Int = 500
+        autoOff: Int = 0xFF,
+        blinkOnInterval: Int = 207,
+        blinkOffInterval: Int = 207,
+        transitionIntervalMs: Int = 750
     ): ByteArray {
         val header = byteArrayOf(
             (clientCommandId.toInt() and 0xFF).toByte(),
@@ -146,20 +157,20 @@ object MyRvLinkCommandBuilder {
                 blue.coerceIn(0, 255).toByte(),
                 autoOff.coerceIn(0, 255).toByte()
             )
-            2 -> byteArrayOf(  // Blink
+            2 -> byteArrayOf(  // Blink: two separate single-byte intervals
                 mode.toByte(),
                 red.coerceIn(0, 255).toByte(),
                 green.coerceIn(0, 255).toByte(),
                 blue.coerceIn(0, 255).toByte(),
                 autoOff.coerceIn(0, 255).toByte(),
-                ((intervalMs shr 8) and 0xFF).toByte(),
-                (intervalMs and 0xFF).toByte()
+                blinkOnInterval.coerceIn(0, 255).toByte(),   // OnInterval (single byte)
+                blinkOffInterval.coerceIn(0, 255).toByte()   // OffInterval (single byte)
             )
-            else -> byteArrayOf(  // Transition effects (4-8)
+            else -> byteArrayOf(  // Transition effects (4-8): uint16 interval
                 mode.toByte(),
                 autoOff.coerceIn(0, 255).toByte(),
-                ((intervalMs shr 8) and 0xFF).toByte(),
-                (intervalMs and 0xFF).toByte()
+                ((transitionIntervalMs shr 8) and 0xFF).toByte(),  // Interval MSB
+                (transitionIntervalMs and 0xFF).toByte()           // Interval LSB
             )
         }
         
