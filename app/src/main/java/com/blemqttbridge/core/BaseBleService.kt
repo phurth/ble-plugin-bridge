@@ -2101,6 +2101,43 @@ class BaseBleService : Service() {
      * Check if BLE trace is currently active.
      */
     fun isTraceActive(): Boolean = traceEnabled
+
+    /**
+     * Get the last trace file for download (reads file content).
+     * Returns null if no trace file exists.
+     */
+    fun getTraceFileContent(): String? {
+        val file = traceFile ?: return null
+        if (!file.exists()) return null
+        return try {
+            file.readText()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read trace file: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Get trace file name (for Content-Disposition header).
+     */
+    fun getTraceFileName(): String? = traceFile?.name
+
+    /**
+     * Get trace status for web API.
+     */
+    fun getTraceStatus(): Map<String, Any?> {
+        val elapsed = if (traceEnabled && traceStartedAt > 0) {
+            System.currentTimeMillis() - traceStartedAt
+        } else 0L
+        return mapOf(
+            "active" to traceEnabled,
+            "fileName" to traceFile?.name,
+            "fileSize" to (traceFile?.length() ?: 0L),
+            "elapsedMs" to elapsed,
+            "maxDurationMs" to TRACE_MAX_DURATION_MS,
+            "hasTraceFile" to (traceFile?.exists() == true)
+        )
+    }
     
     /**
      * Update polling (HTTP) plugin status from external services.

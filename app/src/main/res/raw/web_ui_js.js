@@ -138,6 +138,7 @@ window.addEventListener('load', () => {
     loadPollingStatus();
     loadConfig();
     loadInstances();
+    checkTraceStatus();
     // Auto-refresh status every 5 seconds
     setInterval(async () => {
         try {
@@ -1506,38 +1507,163 @@ async function saveField(pluginId, fieldName) {
     }
 }
 
-async function loadDebugLog() {
-    const container = document.getElementById('debug-log');
-    container.style.display = 'block';
-    container.textContent = 'Loading...';
+
+
+// ============================================================
+// BLE Trace Controls
+// ============================================================
+
+let tracePollingInterval = null;
+
+async function startBleTrace() {
     try {
-        const response = await fetch('/api/logs/debug');
-        const text = await response.text();
-        container.textContent = text;
+        document.getElementById('trace-start-btn').disabled = true;
+        document.getElementById('trace-status').textContent = 'Starting...';
+        const response = await fetch('/api/trace/start', { method: 'POST' });
+        const result = await response.json();
+        if (result.success) {
+            updateTraceUI(true);
+            startTracePolling();
+        } else {
+            document.getElementById('trace-status').textContent = 'Failed: ' + (result.error || 'Unknown error');
+            document.getElementById('trace-start-btn').disabled = false;
+        }
     } catch (error) {
-        container.textContent = 'Failed to load debug log: ' + error.message;
+        document.getElementById('trace-status').textContent = 'Error: ' + error.message;
+        document.getElementById('trace-start-btn').disabled = false;
     }
 }
 
-async function loadBleTrace() {
-    const container = document.getElementById('ble-trace');
-    container.style.display = 'block';
-    container.textContent = 'Loading...';
+async function stopBleTrace() {
     try {
-        const response = await fetch('/api/logs/ble');
-        const text = await response.text();
-        container.textContent = text;
+        document.getElementById('trace-stop-btn').disabled = true;
+        document.getElementById('trace-status').textContent = 'Stopping...';
+        stopTracePolling();
+        const response = await fetch('/api/trace/stop', { method: 'POST' });
+        const result = await response.json();
+        updateTraceUI(false, result);
     } catch (error) {
-        container.textContent = 'Failed to load BLE trace: ' + error.message;
+        document.getElementById('trace-status').textContent = 'Error: ' + error.message;
+        document.getElementById('trace-stop-btn').disabled = false;
     }
+}
+
+function downloadTraceFile() {
+    window.location.href = '/api/trace/download';
+}
+
+function updateTraceUI(active, status) {
+    const startBtn = document.getElementById('trace-start-btn');
+    const stopBtn = document.getElementById('trace-stop-btn');
+    const downloadBtn = document.getElementById('trace-download-btn');
+    const statusSpan = document.getElementById('trace-status');
+    const infoDiv = document.getElementById('trace-info');
+    const infoText = document.getElementById('trace-info-text');
+
+    if (active) {
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-block';
+        stopBtn.disabled = false;
+        downloadBtn.style.display = 'none';
+        statusSpan.textContent = '● Recording...';
+        statusSpan.style.color = '#dc3545';
+        infoDiv.style.display = 'none';
+    } else {
+        startBtn.style.display = 'inline-block';
+        startBtn.disabled = false;
+        stopBtn.style.display = 'none';
+        statusSpan.style.color = '#666';
+
+        if (status && status.hasTraceFile) {
+            downloadBtn.style.display = 'inline-block';
+            const sizeKB = Math.round((status.fileSize || 0) / 1024);
+            statusSpan.textContent = 'Trace complete';
+            infoDiv.style.display = 'block';
+            infoText.textContent = 'File: ' + (status.fileName || 'trace.log') + ' (' + sizeKB + ' KB)';
+        } else {
+            downloadBtn.style.display = 'none';
+            statusSpan.textContent = '';
+            infoDiv.style.display = 'none';
+        }
+    }
+}
+
+function formatTraceElapsed(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return min + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+function startTracePolling() {
+    stopTracePolling();
+    tracePollingInterval = setInterval(async () => {
+        try {
+            const response = await fetch('/api/trace/status');
+            const status = await response.json();
+            if (status.active) {
+                const elapsed = formatTraceElapsed(status.elapsedMs || 0);
+                const maxDur = formatTraceElapsed(status.maxDurationMs || 600000);
+                const sizeKB = Math.round((status.fileSize || 0) / 1024);
+                document.getElementById('trace-status').textContent =
+                    '● Recording... ' + elapsed + ' / ' + maxDur + '  (' + sizeKB + ' KB)';
+            } else {
+                // Trace stopped (timer expired or size limit)
+                stopTracePolling();
+                updateTraceUI(false, status);
+            }
+        } catch (_) {}
+    }, 2000);
+}
+
+function stopTracePolling() {
+    if (tracePollingInterval) {
+        clearInterval(tracePollingInterval);
+        tracePollingInterval = null;
+    }
+}
+
+// Check trace status on page load
+async function checkTraceStatus() {
+    try {
+        const response = await fetch('/api/trace/status');
+        const status = await response.json();
+        if (status.active) {
+            updateTraceUI(true);
+            startTracePolling();
+        } else if (status.hasTraceFile) {
+            updateTraceUI(false, status);
+        }
+    } catch (_) {}
 }
 
 function downloadDebugLog() {
-    window.open('/api/logs/debug', '_blank');
-}
-
-function downloadBleTrace() {
-    window.open('/api/logs/ble', '_blank');
+    const btn = document.getElementById('debug-log-download-btn');
+    const status = document.getElementById('debug-log-status');
+    btn.disabled = true;
+    status.textContent = 'Preparing...';
+    // Use fetch to trigger download so we can show status
+    fetch('/api/logs/debug/download')
+        .then(response => {
+            if (!response.ok) throw new Error('Failed to create debug log');
+            return response.blob();
+        })
+        .then(blob => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'debug_log.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+            status.textContent = 'Downloaded';
+            setTimeout(() => { status.textContent = ''; }, 3000);
+        })
+        .catch(error => {
+            status.textContent = 'Error: ' + error.message;
+        })
+        .finally(() => {
+            btn.disabled = false;
+        });
 }
 
 // Close modals when clicking outside

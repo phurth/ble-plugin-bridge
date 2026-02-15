@@ -168,16 +168,29 @@
 
         <div class="card">
             <h2>Debug Log</h2>
-            <button onclick="loadDebugLog()">Load/Refresh Debug Log</button>
-            <button onclick="downloadDebugLog()">Download Debug Log</button>
-            <div id="debug-log" class="log-container" style="display:none; margin-top: 15px;"></div>
+            <div id="debug-log-controls">
+                <button id="debug-log-download-btn" onclick="downloadDebugLog()" style="background-color: #007bff;">⬇ Download Debug Log</button>
+                <span id="debug-log-status" style="margin-left: 12px; font-size: 14px; color: #666;"></span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #888;">
+                Captures service status, plugin states, and recent service events
+            </div>
         </div>
 
         <div class="card">
             <h2>BLE Trace</h2>
-            <button onclick="loadBleTrace()">Load/Refresh BLE Trace</button>
-            <button onclick="downloadBleTrace()">Download BLE Trace</button>
-            <div id="ble-trace" class="log-container" style="display:none; margin-top: 15px;"></div>
+            <div id="trace-controls">
+                <button id="trace-start-btn" onclick="startBleTrace()" style="background-color: #28a745;">▶ Start Trace</button>
+                <button id="trace-stop-btn" onclick="stopBleTrace()" style="background-color: #dc3545; display: none;">⏹ Stop Trace</button>
+                <button id="trace-download-btn" onclick="downloadTraceFile()" style="background-color: #007bff; display: none;">⬇ Download Trace</button>
+                <span id="trace-status" style="margin-left: 12px; font-size: 14px; color: #666;"></span>
+            </div>
+            <div id="trace-info" style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px; display: none;">
+                <div id="trace-info-text" style="font-size: 13px; color: #555;"></div>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #888;">
+                Max duration: 10 minutes · Captures all BLE GATT events
+            </div>
         </div>
 
         <!-- Android TV Power Fix Section -->

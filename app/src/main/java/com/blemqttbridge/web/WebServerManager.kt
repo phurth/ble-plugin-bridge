@@ -130,7 +130,12 @@ class WebServerManager(
                 uri == "/api/instances/remove" && method == Method.POST -> handleInstanceRemove(session)
                 uri == "/api/instances/update" && method == Method.POST -> handleInstanceUpdate(session)
                 uri == "/api/logs/debug" -> serveDebugLog()
+                uri == "/api/logs/debug/download" && method == Method.GET -> serveDebugLogDownload()
                 uri == "/api/logs/ble" -> serveBleTrace()
+                uri == "/api/trace/start" && method == Method.POST -> handleTraceStart()
+                uri == "/api/trace/stop" && method == Method.POST -> handleTraceStop()
+                uri == "/api/trace/status" && method == Method.GET -> serveTraceStatus()
+                uri == "/api/trace/download" && method == Method.GET -> serveTraceDownload()
                 uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
                 uri == "/api/control/mqtt" && method == Method.POST -> handleMqttControl(session)
                 uri == "/api/config/plugin" && method == Method.POST -> handlePluginConfig(session)
@@ -474,6 +479,36 @@ class WebServerManager(
         )
     }
 
+    private fun serveDebugLogDownload(): Response {
+        return try {
+            val service = getService() ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND,
+                "text/plain",
+                "Service not running"
+            )
+            val file = service.exportDebugLog() ?: return newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "text/plain",
+                "Failed to create debug log"
+            )
+            val content = file.readText()
+            val response = newFixedLengthResponse(
+                Response.Status.OK,
+                "application/octet-stream",
+                content
+            )
+            response.addHeader("Content-Disposition", "attachment; filename=\"${file.name}\"")
+            response
+        } catch (e: Exception) {
+            Log.e(TAG, "Error downloading debug log", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "text/plain",
+                "Error: ${e.message}"
+            )
+        }
+    }
+
     private fun serveBleTrace(): Response {
         val traceText = getService()?.exportBleTraceToString() ?: "Service not running"
         return newFixedLengthResponse(
@@ -481,6 +516,120 @@ class WebServerManager(
             "text/plain; charset=utf-8",
             traceText
         )
+    }
+
+    private fun handleTraceStart(): Response {
+        return try {
+            val service = getService() ?: return newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"Service not running"}"""
+            )
+            if (service.isTraceActive()) {
+                return newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    """{"success":true,"message":"Trace already running"}"""
+                )
+            }
+            val file = service.startBleTrace()
+            if (file != null) {
+                newFixedLengthResponse(
+                    Response.Status.OK,
+                    "application/json",
+                    """{"success":true,"fileName":"${file.name}"}"""
+                )
+            } else {
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR,
+                    "application/json",
+                    """{"success":false,"error":"Failed to start trace"}"""
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting trace", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handleTraceStop(): Response {
+        return try {
+            val service = getService() ?: return newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"Service not running"}"""
+            )
+            service.stopBleTrace("web UI")
+            val status = service.getTraceStatus()
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                org.json.JSONObject(status).toString()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping trace", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun serveTraceStatus(): Response {
+        return try {
+            val service = getService() ?: return newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"active":false,"hasTraceFile":false}"""
+            )
+            val status = service.getTraceStatus()
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                org.json.JSONObject(status).toString()
+            )
+        } catch (e: Exception) {
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun serveTraceDownload(): Response {
+        return try {
+            val service = getService() ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND,
+                "text/plain",
+                "Service not running"
+            )
+            val content = service.getTraceFileContent() ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND,
+                "text/plain",
+                "No trace file available"
+            )
+            val fileName = service.getTraceFileName() ?: "trace.log"
+            val response = newFixedLengthResponse(
+                Response.Status.OK,
+                "application/octet-stream",
+                content
+            )
+            response.addHeader("Content-Disposition", "attachment; filename=\"$fileName\"")
+            response
+        } catch (e: Exception) {
+            Log.e(TAG, "Error downloading trace", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "text/plain",
+                "Error: ${e.message}"
+            )
+        }
     }
 
     private fun handleServiceControl(session: IHTTPSession): Response {
