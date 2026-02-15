@@ -3332,6 +3332,40 @@ class OneControlGattCallback(
         }
     }
     
+    // ========== METADATA REFRESH ==========
+    
+    /**
+     * Refresh device metadata by re-requesting GetDevices + GetDevicesMetadata.
+     * Resets tracking guards so metadata will be re-fetched and discovery re-published.
+     * Triggered via HA button entity or MQTT command: onecontrol/{MAC}/command/refresh_metadata
+     */
+    fun refreshMetadata(): Result<Unit> {
+        Log.i(TAG, "🔄 Metadata refresh requested")
+        mqttPublisher.logServiceEvent("🔄 Metadata refresh requested")
+        
+        if (!isConnected || !isAuthenticated || currentGatt == null) {
+            Log.w(TAG, "🔄 Cannot refresh metadata - not ready (connected=$isConnected, auth=$isAuthenticated)")
+            mqttPublisher.logServiceEvent("🔄 Cannot refresh metadata - not connected/authenticated")
+            return Result.failure(Exception("Not connected or authenticated"))
+        }
+        
+        // Reset ONLY the metadata request guards — keep haDiscoveryPublished and
+        // deviceMetadata intact so incoming status events don't re-publish with hex names
+        metadataRequested = false
+        metadataRequestedTableIds.clear()
+        
+        Log.i(TAG, "🔄 Reset metadata guards, re-sending GetDevicesMetadata")
+        mqttPublisher.logServiceEvent("🔄 Reset metadata guards, re-sending GetDevicesMetadata")
+        
+        // Re-send metadata request — when the response arrives,
+        // handleGetDevicesMetadataResponse() will update deviceMetadata and call
+        // republishDiscoveryWithFriendlyName() for all already-published entities
+        sendGetDevicesMetadataCommand()
+        metadataRequested = true
+        
+        return Result.success(Unit)
+    }
+    
     /**
      * Handle MQTT command - parses topic and routes to appropriate control method
      * Command topics: onecontrol/{MAC}/command/{type}/{tableId}/{deviceId}
@@ -3342,6 +3376,11 @@ class OneControlGattCallback(
         if (!isConnected || !isAuthenticated || currentGatt == null) {
             Log.w(TAG, "❌ Cannot handle command - not ready (connected=$isConnected, auth=$isAuthenticated)")
             return Result.failure(Exception("Not connected or authenticated"))
+        }
+        
+        // Handle special commands that don't follow the {type}/{tableId}/{deviceId} pattern
+        if (commandTopic.endsWith("/command/refresh_metadata")) {
+            return refreshMetadata()
         }
         
         // Parse topic: command/{type}/{tableId}/{deviceId} or command/{type}/{tableId}/{deviceId}/brightness
@@ -4498,6 +4537,28 @@ class OneControlGattCallback(
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
             Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
         }
+        
+        // Publish "Refresh Metadata" button entity
+        val refreshButtonId = "refresh_metadata"
+        val refreshUniqueId = "onecontrol_${macId}_diag_$refreshButtonId"
+        val refreshDiscoveryTopic = "$prefix/button/$nodeId/$refreshButtonId/config"
+        val refreshCommandTopic = "$prefix/$baseTopic/command/refresh_metadata"
+        
+        val refreshPayload = JSONObject().apply {
+            put("name", "Refresh Metadata")
+            put("unique_id", refreshUniqueId)
+            put("command_topic", refreshCommandTopic)
+            put("payload_press", "PRESS")
+            put("availability_topic", "$prefix/$baseTopic/availability")
+            put("payload_available", "online")
+            put("payload_not_available", "offline")
+            put("entity_category", "diagnostic")
+            put("icon", "mdi:refresh")
+            put("device", deviceInfo)
+        }.toString()
+        
+        mqttPublisher.publishDiscovery(refreshDiscoveryTopic, refreshPayload)
+        Log.i(TAG, "📡 Published diagnostic discovery: $refreshButtonId (button)")
         
         diagnosticsDiscoveryPublished = true
         
