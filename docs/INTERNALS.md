@@ -2,9 +2,9 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.6  
-> **Last Updated:** January 29, 2026  
-> **Notable Addition:** Service Separation Architecture and Peplink Router Plugin documentation  
+> **Current Version:** v2.6.2.1  
+> **Last Updated:** February 15, 2026  
+> **Notable Addition:** Metadata Refresh button entity, web UI BLE trace start/stop/download  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -59,6 +59,7 @@
    - [Guard Checks in republishDiscoveryWithFriendlyName()](#guard-checks-in-republishdiscoverywithfriendlyname)
    - [Friendly Name Race Condition](#friendly-name-race-condition)
    - [Device Metadata Retrieval](#device-metadata-retrieval-getdevicesmetadata)
+   - [Metadata Refresh](#metadata-refresh-v262)
 
 6. [EasyTouch Thermostat Protocol](#6-easytouch-thermostat-protocol)
    - [Overview](#overview-2)
@@ -1949,6 +1950,25 @@ The `metadataRequested` flag ensures the command is only sent once per connectio
 **Race condition handling:** Device status events arrive immediately after authentication, but metadata takes ~500-1500ms to retrieve. Devices discovered before metadata arrives use fallback names (e.g., "Switch 0805"). Once metadata arrives, `republishDiscoveryWithFriendlyName()` updates these entities with friendly names.
 
 **File:** `OneControlDevicePlugin.kt`, methods `loadMetadataFromCache()`, `saveMetadataToCache()`, `sendGetDevicesMetadataCommand()`, `handleGetDevicesMetadataResponse()`
+
+#### Metadata Refresh (v2.6.2)
+
+Metadata can be re-fetched on demand without a full BLE reconnect. This is useful when:
+- Initial metadata retrieval was incomplete (BLE instability during first connection)
+- New devices were added to the OneControl system after initial discovery
+- Friendly names appear as generic IDs (e.g., "Switch 0805") indicating metadata was missed
+
+**Implementation:** `refreshMetadata()` in `OneControlDevicePlugin.kt` resets the `metadataRequested` and `metadataRequestedTables` guards, then re-sends `GetDevicesMetadata` for all known table IDs. Incoming metadata responses flow through the existing `handleGetDevicesMetadataResponse()` pipeline, updating `deviceMetadata` and calling `republishDiscoveryWithFriendlyName()` to update HA entities with correct names.
+
+**HA Integration:** Exposed as a **button entity** via MQTT discovery:
+- Entity category: `diagnostic` (appears under device diagnostic section in HA)
+- Icon: `mdi:refresh`
+- Command topic: `{baseTopic}/command/refresh_metadata`
+- Subscribes in `subscribeToCommands()` alongside existing command topics
+
+**Web UI:** Not exposed in the web UI — triggered only via the HA button entity.
+
+**File:** `OneControlDevicePlugin.kt`, method `refreshMetadata()`
 
 ---
 
