@@ -599,17 +599,22 @@ class OneControlGattCallback(
     // 3. Suppress incoming HvacStatus updates that don't match desired values
     // 4. Clear pending when gateway confirms (matching status) or window expires
     data class PendingHvacCommand(
+        val tableId: Byte,
+        val deviceId: Byte,
         val heatMode: Int,
         val heatSource: Int,
         val fanMode: Int,
         val lowTripTempF: Int,
         val highTripTempF: Int,
         val isSetpointChange: Boolean,
-        val timestamp: Long
+        val timestamp: Long,
+        val retryCount: Int = 0
     )
     private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
     private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
-    private val HVAC_SETPOINT_PENDING_WINDOW_MS = 60000L  // Allow longer for setpoint changes to apply
+    private val HVAC_SETPOINT_PENDING_WINDOW_MS = 20000L  // Allow longer for setpoint changes (with retries)
+    private val HVAC_SETPOINT_RETRY_DELAY_MS = 5000L  // Verify setpoint after 5s, retry if not confirmed
+    private val HVAC_SETPOINT_MAX_RETRIES = 3  // Max retry attempts for unconfirmed setpoints
 
     // Pending HVAC setpoint send: debounce rapid slider changes
     data class PendingHvacSetpointSend(
@@ -3670,14 +3675,15 @@ class OneControlGattCallback(
         }
 
         val nowTs = System.currentTimeMillis()
-        pendingHvacSetpointSend[zoneKey] = PendingHvacSetpointSend(subTopic, payload, nowTs)
+        val debounceKey = "$zoneKey:$subTopic"
+        pendingHvacSetpointSend[debounceKey] = PendingHvacSetpointSend(subTopic, payload, nowTs)
         Log.i(TAG, "⏳ HVAC setpoint scheduled: zone=$zoneKey subTopic=$subTopic payload=$payload")
         mqttPublisher.logServiceEvent("⏳ HVAC setpoint scheduled: zone=$zoneKey subTopic=$subTopic payload=$payload")
 
         handler.postDelayed({
-            val entry = pendingHvacSetpointSend[zoneKey]
+            val entry = pendingHvacSetpointSend[debounceKey]
             if (entry != null && entry.timestamp == nowTs) {
-                pendingHvacSetpointSend.remove(zoneKey)
+                pendingHvacSetpointSend.remove(debounceKey)
                 sendHvacCommand(tableId, deviceId, entry.subTopic, entry.payload)
             }
         }, HVAC_SETPOINT_DEBOUNCE_MS)
@@ -3818,15 +3824,24 @@ class OneControlGattCallback(
             if (result == true) {
                 // Register pending command — state is guaranteed initialized (checked above).
                 // Use real device values to suppress stale gateway echo-backs during processing.
+                val sentTimestamp = System.currentTimeMillis()
                 pendingHvacCommands[zoneKey] = PendingHvacCommand(
+                    tableId = effectiveTableId,
+                    deviceId = deviceId,
                     heatMode = heatMode,
                     heatSource = heatSource,
                     fanMode = fanMode,
                     lowTripTempF = lowTrip,
                     highTripTempF = highTrip,
                     isSetpointChange = isSetpointChange,
-                    timestamp = System.currentTimeMillis()
+                    timestamp = sentTimestamp
                 )
+                
+                // Schedule verification + retry for setpoint commands
+                // WRITE_TYPE_NO_RESPONSE can silently fail — verify via gateway status
+                if (isSetpointChange) {
+                    scheduleSetpointVerification(zoneKey)
+                }
                 
                 // Optimistic MQTT publish — give HA immediate feedback
                 // Uses same topic structure as handleHvacStatus
@@ -3885,6 +3900,84 @@ class OneControlGattCallback(
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send HVAC command: ${e.message}", e)
             return Result.failure(e)
+        }
+    }
+    
+    /**
+     * Schedule a verification check for a pending HVAC setpoint command.
+     * If the gateway hasn't confirmed the setpoint after HVAC_SETPOINT_RETRY_DELAY_MS,
+     * retry the command. WRITE_TYPE_NO_RESPONSE writes can be silently dropped by
+     * the BLE stack or gateway — this ensures eventual delivery.
+     */
+    private fun scheduleSetpointVerification(zoneKey: String) {
+        handler.postDelayed({
+            val pending = pendingHvacCommands[zoneKey]
+            if (pending != null && pending.isSetpointChange) {
+                if (pending.retryCount < HVAC_SETPOINT_MAX_RETRIES) {
+                    retryHvacSetpoint(zoneKey, pending)
+                } else {
+                    Log.w(TAG, "⚠️ HVAC setpoint retries exhausted ($HVAC_SETPOINT_MAX_RETRIES) for zone $zoneKey — clearing pending")
+                    mqttPublisher.logServiceEvent(
+                        "⚠️ HVAC setpoint retries exhausted ($HVAC_SETPOINT_MAX_RETRIES) for zone $zoneKey"
+                    )
+                    pendingHvacCommands.remove(zoneKey)
+                }
+            }
+            // If pending is null, the gateway already confirmed — nothing to do
+        }, HVAC_SETPOINT_RETRY_DELAY_MS)
+    }
+    
+    /**
+     * Retry an unconfirmed HVAC setpoint command.
+     * Uses the exact values from the original PendingHvacCommand — no re-merging
+     * from hvacZoneStates — to ensure we resend the intended setpoint.
+     */
+    private fun retryHvacSetpoint(zoneKey: String, pending: PendingHvacCommand) {
+        val writeChar = dataWriteChar ?: return
+        val gatt = currentGatt ?: return
+        
+        val commandId = getNextCommandId()
+        val effectiveTableId = if (pending.tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+            deviceTableId
+        } else {
+            pending.tableId
+        }
+        
+        val command = MyRvLinkCommandBuilder.buildActionHvac(
+            clientCommandId = commandId,
+            deviceTableId = effectiveTableId,
+            deviceId = pending.deviceId,
+            heatMode = pending.heatMode,
+            heatSource = pending.heatSource,
+            fanMode = pending.fanMode,
+            lowTripTempF = pending.lowTripTempF,
+            highTripTempF = pending.highTripTempF
+        )
+        
+        val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+        writeChar.value = encoded
+        writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        val result = gatt.writeCharacteristic(writeChar)
+        
+        val newRetryCount = pending.retryCount + 1
+        Log.w(TAG, "🔄 HVAC setpoint retry $newRetryCount/$HVAC_SETPOINT_MAX_RETRIES: " +
+            "zone=$zoneKey low=${pending.lowTripTempF} high=${pending.highTripTempF} result=$result")
+        mqttPublisher.logServiceEvent(
+            "🔄 HVAC setpoint retry $newRetryCount/$HVAC_SETPOINT_MAX_RETRIES: " +
+                "zone=$zoneKey low=${pending.lowTripTempF} high=${pending.highTripTempF} result=$result"
+        )
+        
+        if (result == true) {
+            // Update pending with new timestamp and retry count
+            pendingHvacCommands[zoneKey] = pending.copy(
+                timestamp = System.currentTimeMillis(),
+                retryCount = newRetryCount
+            )
+            // Schedule next verification
+            scheduleSetpointVerification(zoneKey)
+        } else {
+            Log.e(TAG, "❌ HVAC setpoint retry write failed for zone $zoneKey")
+            pendingHvacCommands.remove(zoneKey)
         }
     }
     
