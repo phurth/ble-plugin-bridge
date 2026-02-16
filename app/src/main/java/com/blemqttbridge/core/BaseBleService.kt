@@ -133,6 +133,8 @@ class BaseBleService : Service() {
     // Uses ConcurrentHashMap for thread safety: mutated from serviceScope coroutines,
     // main thread (disconnectAll), and BLE callbacks (handleDeviceDisconnect).
     private val connectedDevices = java.util.concurrent.ConcurrentHashMap<String, Pair<BluetoothGatt, String>>()
+    // Guard against concurrent connectToDevice calls for the same MAC
+    private val connectingDevices = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     
     // Instance to plugin type mapping: instanceId -> pluginType (e.g., "easytouch_b1241e" -> "easytouch")
     private val instancePluginTypes = mutableMapOf<String, String>()
@@ -1471,6 +1473,22 @@ class BaseBleService : Service() {
      * This allows device-specific protocols to be fully isolated without forwarding layers.
      */
     private suspend fun connectToDevice(device: BluetoothDevice, pluginId: String) {
+        Log.i(TAG, "Connecting to ${device.address} (plugin: $pluginId)")
+        
+        // Guard against concurrent connection attempts to the same device
+        if (!connectingDevices.add(device.address)) {
+            Log.w(TAG, "⚠️ Already connecting to ${device.address} — skipping duplicate attempt")
+            return
+        }
+        
+        try {
+        connectToDeviceInternal(device, pluginId)
+        } finally {
+            connectingDevices.remove(device.address)
+        }
+    }
+    
+    private suspend fun connectToDeviceInternal(device: BluetoothDevice, pluginId: String) {
         Log.i(TAG, "Connecting to ${device.address} (plugin: $pluginId)")
         
         // CRITICAL: Close any existing GATT connection first to prevent resource leaks

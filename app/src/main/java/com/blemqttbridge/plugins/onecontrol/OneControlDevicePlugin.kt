@@ -165,6 +165,14 @@ class OneControlDevicePlugin : BleDevicePlugin {
         onDisconnect: (BluetoothDevice, Int) -> Unit
     ): BluetoothGattCallback {
         Log.i(TAG, "Creating GATT callback for ${device.address}")
+        
+        // Invalidate any previous callback to prevent stale instances from processing events
+        val oldCallback = gattCallback
+        if (oldCallback is OneControlGattCallback) {
+            Log.w(TAG, "⚠️ Invalidating old callback ${oldCallback.hashCode()} before creating new one")
+            oldCallback.invalidate()
+        }
+        
         val callback = OneControlGattCallback(device, context, mqttPublisher, instanceId, onDisconnect, gatewayPin, gatewayCypher)
         Log.i(TAG, "Created callback with hashCode=${callback.hashCode()}")
         // Keep strong reference to prevent GC
@@ -325,6 +333,13 @@ class OneControlGattCallback(
     private var consecutivePeerDisconnects = 0
     private var lastPeerDisconnectTime = 0L
     
+    // Invalidation flag - set when BaseBleService creates a new callback for this device.
+    // Prevents stale callback instances (from old connections or 133-retry loops) from
+    // processing events and creating duplicate state.
+    @Volatile
+    var isInvalidated = false
+        private set
+    
     // Diagnostic status tracking (for HA sensors)
     private var lastDataTimestampMs: Long = 0L
     private val DATA_HEALTH_TIMEOUT_MS = 15_000L  // consider healthy if data seen within 15s
@@ -376,6 +391,9 @@ class OneControlGattCallback(
     private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
     private var metadataRequested = false
     private val metadataRequestedTableIds: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private var metadataRetryCount = 0
+    private val MAX_METADATA_RETRIES = 3
+    private val METADATA_RETRY_DELAY_MS = 2000L
     
     init {
         // Load cached metadata immediately so friendly names are available from first state update
@@ -642,7 +660,24 @@ class OneControlGattCallback(
     private var watchdogRunnable: Runnable? = null
     private var lastSuccessfulOperationTime: Long = System.currentTimeMillis()
     
+    /**
+     * Invalidate this callback instance. Called when BaseBleService creates a new callback
+     * for the same device (on reconnect). Prevents stale instances from processing events.
+     */
+    fun invalidate() {
+        Log.i(TAG, "🚫 Callback ${this.hashCode()} invalidated")
+        isInvalidated = true
+        handler.removeCallbacksAndMessages(null)  // Cancel all pending timers (heartbeat, metadata, etc.)
+        stopHeartbeat()
+        stopWatchdog()
+        stopActiveStreamReading()
+    }
+    
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        if (isInvalidated) {
+            Log.w(TAG, "🚫 Ignoring onConnectionStateChange on invalidated callback ${this.hashCode()}")
+            return
+        }
         val stateStr = when(newState) {
             BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
             BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
@@ -770,6 +805,10 @@ class OneControlGattCallback(
     }
     
     override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+        if (isInvalidated) {
+            Log.w(TAG, "⚠️ onMtuChanged ignored — callback invalidated, callback=${this.hashCode()}")
+            return
+        }
         if (status == BluetoothGatt.GATT_SUCCESS) {
             Log.i(TAG, "✅ MTU changed to $mtu")
         } else {
@@ -808,6 +847,10 @@ class OneControlGattCallback(
     private var mtuReady = false
     
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        if (isInvalidated) {
+            Log.w(TAG, "⚠️ onServicesDiscovered ignored — callback invalidated, callback=${this.hashCode()}")
+            return
+        }
         mqttPublisher.logBleEvent("SERVICES_DISCOVERED: status=$status, count=${gatt.services.size}")
         Log.i(TAG, "📋 Services discovered: status=$status, gatt=${gatt.hashCode()}, currentGatt=${currentGatt?.hashCode()}")
         
@@ -1039,6 +1082,10 @@ class OneControlGattCallback(
      * Tracks pending subscriptions and triggers onAllNotificationsSubscribed when done
      */
     override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+        if (isInvalidated) {
+            Log.w(TAG, "⚠️ onDescriptorWrite ignored — callback invalidated, callback=${this.hashCode()}")
+            return
+        }
         val charUuid = descriptor.characteristic.uuid.toString().lowercase()
         val descriptorUuid = descriptor.uuid.toString().lowercase()
         if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -1238,6 +1285,7 @@ class OneControlGattCallback(
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray
     ) {
+        if (isInvalidated) return
         val uuid = characteristic.uuid.toString().lowercase()
         val hex = value.joinToString(" ") { "%02X".format(it) }
         mqttPublisher.logBleEvent("NOTIFY $uuid: $hex")
@@ -1251,6 +1299,7 @@ class OneControlGattCallback(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic
     ) {
+        if (isInvalidated) return
         val data = characteristic.value
         if (data != null) {
             val uuid = characteristic.uuid.toString().lowercase()
@@ -1274,6 +1323,7 @@ class OneControlGattCallback(
      * boundaries and wrong tableId/deviceId values in parsed events.
      */
     private fun handleCharacteristicNotification(uuid: UUID, data: ByteArray) {
+        if (isInvalidated) return  // Silently drop — stale callback
         if (data.isEmpty()) {
             Log.w(TAG, "📨 Empty notification from $uuid")
             return
@@ -2903,6 +2953,18 @@ class OneControlGattCallback(
         
         if (isComplete) pendingCommands.remove(commandId)
         
+        // Don't dispatch error responses to handlers that expect data
+        if (!isSuccess && isComplete) {
+            val errorCode = if (data.size > 4) data[4].toInt() and 0xFF else -1
+            Log.w(TAG, "📦 Command error: cmdType=$commandType, errorCode=0x${errorCode.toString(16)}")
+            mqttPublisher.logServiceEvent("📦 Command error: cmdType=$commandType, errorCode=0x${errorCode.toString(16)}")
+            if (commandType == 0x02) {
+                // GetDevicesMetadata rejected by gateway — retry with backoff
+                retryGetDevicesMetadata()
+            }
+            return
+        }
+        
         when (commandType) {
             0x01 -> handleGetDevicesResponse(data)
             0x02 -> handleGetDevicesMetadataResponse(data)
@@ -3360,10 +3422,36 @@ class OneControlGattCallback(
         // Re-send metadata request — when the response arrives,
         // handleGetDevicesMetadataResponse() will update deviceMetadata and call
         // republishDiscoveryWithFriendlyName() for all already-published entities
+        metadataRetryCount = 0  // Reset retry count for manual refresh
         sendGetDevicesMetadataCommand()
         metadataRequested = true
         
         return Result.success(Unit)
+    }
+    
+    /**
+     * Retry GetDevicesMetadata after gateway rejection.
+     * Some gateways reject the command if sent too soon after connection or during
+     * other in-flight commands. Retries with increasing delay up to MAX_METADATA_RETRIES.
+     */
+    private fun retryGetDevicesMetadata() {
+        metadataRetryCount++
+        if (metadataRetryCount > MAX_METADATA_RETRIES) {
+            Log.w(TAG, "🔍 GetDevicesMetadata failed after $MAX_METADATA_RETRIES retries — using cached/fallback names")
+            mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata failed after $MAX_METADATA_RETRIES retries")
+            return
+        }
+        val delayMs = METADATA_RETRY_DELAY_MS * metadataRetryCount
+        Log.i(TAG, "🔍 Retrying GetDevicesMetadata (attempt $metadataRetryCount/$MAX_METADATA_RETRIES) in ${delayMs}ms")
+        mqttPublisher.logServiceEvent("🔍 Retrying GetDevicesMetadata in ${delayMs}ms (attempt $metadataRetryCount)")
+        metadataRequestedTableIds.clear()
+        handler.postDelayed({
+            if (isConnected && isAuthenticated && currentGatt != null) {
+                sendGetDevicesMetadataCommand()
+            } else {
+                Log.w(TAG, "🔍 Retry skipped — not connected")
+            }
+        }, delayMs)
     }
     
     /**
@@ -4459,6 +4547,14 @@ class OneControlGattCallback(
         seedValue = null
         currentGatt = null
         gatewayInfoReceived = false
+        // Reset metadata state so it's re-requested on reconnect
+        metadataRequested = false
+        metadataRequestedTableIds.clear()
+        allNotificationsSubscribed = false
+        notificationSubscriptionsPending = 0
+        metadataRetryCount = 0
+        pendingCommands.clear()
+        nextCommandId = 1u
     }
     
     /**
