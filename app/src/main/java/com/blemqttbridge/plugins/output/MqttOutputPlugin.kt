@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
+import com.blemqttbridge.core.BaseBleService
 import com.blemqttbridge.core.MemoryManager
 import com.blemqttbridge.core.discovery.DiscoveryBuilder
 import com.blemqttbridge.core.discovery.DiscoveryBuilderFactory
@@ -104,6 +105,52 @@ class MqttOutputPlugin(
     override fun getTopicPrefix(): String = _topicPrefix
     private var connectOptions: MqttConnectOptions? = null
 
+    private fun appendMqttServiceEvent(message: String) {
+        try {
+            BaseBleService.getInstance()?.getMqttPublisher()?.logServiceEvent(message)
+        } catch (_: Exception) {
+            // Best-effort only; never fail MQTT path due to debug logging.
+        }
+    }
+
+    private fun payloadPreview(payload: String, maxLen: Int = 120): String {
+        val singleLine = payload.replace("\n", " ").replace("\r", " ")
+        return if (singleLine.length <= maxLen) singleLine else "${singleLine.take(maxLen)}…"
+    }
+
+    private fun shouldLogInboundCommand(topic: String): Boolean {
+        val lower = topic.lowercase()
+        return lower.contains("/onecontrol/") && lower.contains("/command/")
+    }
+
+    private fun isHvacCommandTopic(topic: String): Boolean {
+        val lower = topic.lowercase()
+        return lower.contains("/onecontrol/") && lower.contains("/command/climate/")
+    }
+
+    private fun isHvacStateTopic(topic: String): Boolean {
+        val lower = topic.lowercase()
+        if (!lower.contains("/onecontrol/") || !lower.contains("/device/")) return false
+        return lower.contains("/state/mode") ||
+            lower.contains("/state/fan_mode") ||
+            lower.contains("/state/preset_mode") ||
+            lower.contains("/state/action") ||
+            lower.contains("/state/target_temperature") ||
+            lower.contains("/state/target_temperature_low") ||
+            lower.contains("/state/target_temperature_high")
+    }
+
+    private fun shouldLogOutboundTopic(topic: String): Boolean {
+        val lower = topic.lowercase()
+        val isOneControl = lower.contains("/onecontrol/") || lower.contains("onecontrol_")
+        if (!isOneControl) return false
+        return lower.contains("/command/") ||
+            lower.contains("refresh_metadata") ||
+            lower.contains("metadata") ||
+            isHvacStateTopic(lower) ||
+            lower.endsWith("/config")
+    }
+
     override fun setConnectionStatusListener(listener: OutputPluginInterface.ConnectionStatusListener?) {
         connectionStatusListener = listener
         listener?.onConnectionStatusChanged(isConnected())
@@ -178,6 +225,10 @@ class MqttOutputPlugin(
                     override fun messageArrived(topic: String, message: MqttMessage) {
                         val payload = String(message.payload)
                         Log.w(TAG, "📨 MESSAGE ARRIVED: $topic = $payload")
+                        if (shouldLogInboundCommand(topic)) {
+                            val category = if (isHvacCommandTopic(topic)) "🌡️ MQTT IN hvac" else "📨 MQTT IN"
+                            appendMqttServiceEvent("$category: $topic payload=${payloadPreview(payload)}")
+                        }
 
                         commandCallbacks.forEach { (pattern, callback) ->
                             val regex = Regex(pattern.replace("+", "[^/]+").replace("#", ".*"))
@@ -268,11 +319,20 @@ class MqttOutputPlugin(
 
     override suspend fun publishState(topic: String, payload: String, retained: Boolean) {
         val fullTopic = "$_topicPrefix/$topic"
+        if (shouldLogOutboundTopic(fullTopic)) {
+            val category = if (isHvacStateTopic(fullTopic)) "🌡️ MQTT OUT hvac state" else "📤 MQTT OUT state"
+            appendMqttServiceEvent("$category: topic=$fullTopic retained=$retained len=${payload.length} payload=${payloadPreview(payload)}")
+        }
         publish(fullTopic, payload, retained)
     }
 
     override suspend fun publishDiscovery(topic: String, payload: String) {
         Log.i(TAG, "🔍 publishDiscovery() START: topic=$topic, payloadLen=${payload.length}")
+        if (shouldLogOutboundTopic(topic)) {
+            appendMqttServiceEvent(
+                "📤 MQTT OUT discovery: topic=$topic retained=true len=${payload.length}"
+            )
+        }
         publishedDiscoveryTopics.add(topic)
         Log.d(TAG, "🔍 publishDiscovery() calling publish()...")
         publish(topic, payload, retained = true)
@@ -286,6 +346,9 @@ class MqttOutputPlugin(
         try {
             val fullPattern = "$_topicPrefix/$topicPattern"
             Log.i(TAG, "📢 subscribeToCommands called: pattern=$fullPattern, mqttClient=${mqttClient != null}, connected=${mqttClient?.isConnected}")
+            if (shouldLogInboundCommand(fullPattern)) {
+                appendMqttServiceEvent("📡 MQTT SUB request: $fullPattern")
+            }
             commandCallbacks[fullPattern] = callback
 
             val client = mqttClient
@@ -299,6 +362,9 @@ class MqttOutputPlugin(
                 client.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
                         Log.i(TAG, "✅ Subscribed to: $fullPattern")
+                        if (shouldLogInboundCommand(fullPattern)) {
+                            appendMqttServiceEvent("✅ MQTT SUB ok: $fullPattern")
+                        }
                         if (continuation.isActive) {
                             continuation.resume(Unit)
                         }
@@ -306,6 +372,9 @@ class MqttOutputPlugin(
 
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "❌ Subscribe failed: $fullPattern", exception)
+                        if (shouldLogInboundCommand(fullPattern)) {
+                            appendMqttServiceEvent("❌ MQTT SUB failed: $fullPattern (${exception?.message ?: "unknown"})")
+                        }
                         if (continuation.isActive) {
                             continuation.resumeWithException(
                                 exception ?: Exception("Subscribe failed")
@@ -1000,14 +1069,23 @@ class MqttOutputPlugin(
                 client.subscribe(topic, QOS, null, object : IMqttActionListener {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
                         Log.i(TAG, "Resubscribed to: $topic")
+                        if (shouldLogInboundCommand(topic)) {
+                            appendMqttServiceEvent("🔄 MQTT RESUB ok: $topic")
+                        }
                     }
 
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "Failed to resubscribe to: $topic", exception)
+                        if (shouldLogInboundCommand(topic)) {
+                            appendMqttServiceEvent("❌ MQTT RESUB failed: $topic (${exception?.message ?: "unknown"})")
+                        }
                     }
                 })
             } catch (e: Exception) {
                 Log.e(TAG, "Error resubscribing to $topic", e)
+                if (shouldLogInboundCommand(topic)) {
+                    appendMqttServiceEvent("❌ MQTT RESUB exception: $topic (${e.message ?: "unknown"})")
+                }
             }
         }
     }
