@@ -58,6 +58,10 @@ class OneControlDevicePlugin : BleDevicePlugin {
         private val SEED_CHARACTERISTIC_UUID = UUID.fromString("00000011-0200-a58e-e411-afe28044e62c")
         private val UNLOCK_STATUS_CHARACTERISTIC_UUID = UUID.fromString("00000012-0200-a58e-e411-afe28044e62c")
         private val KEY_CHARACTERISTIC_UUID = UUID.fromString("00000013-0200-a58e-e411-afe28044e62c")
+
+        // CAN service (used for clear lockout request sequence 0x55 -> 0xAA)
+        private val CAN_SERVICE_UUID = UUID.fromString("00000000-0200-a58e-e411-afe28044e62c")
+        private val CAN_WRITE_CHARACTERISTIC_UUID = UUID.fromString("00000001-0200-a58e-e411-afe28044e62c")
         
         // Device identification
         private const val DEVICE_NAME_PREFIX = "LCI"
@@ -275,6 +279,8 @@ class OneControlGattCallback(
         private val UNLOCK_STATUS_CHARACTERISTIC_UUID = UUID.fromString("00000012-0200-a58e-e411-afe28044e62c")
         private val KEY_CHARACTERISTIC_UUID = UUID.fromString("00000013-0200-a58e-e411-afe28044e62c")
         private val AUTH_STATUS_CHARACTERISTIC_UUID = UUID.fromString("00000014-0200-a58e-e411-afe28044e62c")
+        private val CAN_SERVICE_UUID = UUID.fromString("00000000-0200-a58e-e411-afe28044e62c")
+        private val CAN_WRITE_CHARACTERISTIC_UUID = UUID.fromString("00000001-0200-a58e-e411-afe28044e62c")
         
         // Descriptor UUID for enabling notifications
         private val CLIENT_CHARACTERISTIC_CONFIG_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -344,10 +350,16 @@ class OneControlGattCallback(
     private var lastDataTimestampMs: Long = 0L
     private val DATA_HEALTH_TIMEOUT_MS = 15_000L  // consider healthy if data seen within 15s
     private var diagnosticsDiscoveryPublished = false
+    // Last observed system lockout level from DeviceLockStatus event (0x04)
+    // null = not observed yet
+    private var systemLockoutLevel: Int? = null
+    private val LOCKOUT_CLEAR_THROTTLE_MS = 5000L
+    private var lastLockoutClearRequestMs: Long = 0L
     
     // Characteristic references
     private var dataReadChar: BluetoothGattCharacteristic? = null
     private var dataWriteChar: BluetoothGattCharacteristic? = null
+    private var canWriteChar: BluetoothGattCharacteristic? = null
     private var seedChar: BluetoothGattCharacteristic? = null
     private var unlockStatusChar: BluetoothGattCharacteristic? = null
     private var keyChar: BluetoothGattCharacteristic? = null
@@ -607,12 +619,14 @@ class OneControlGattCallback(
         val lowTripTempF: Int,
         val highTripTempF: Int,
         val isSetpointChange: Boolean,
+        val isPresetChange: Boolean,
         val timestamp: Long,
         val retryCount: Int = 0
     )
     private val pendingHvacCommands = mutableMapOf<String, PendingHvacCommand>()  // zoneKey -> pending
     private val HVAC_PENDING_WINDOW_MS = 8000L  // Suppress mismatching status for 8s after command
     private val HVAC_SETPOINT_PENDING_WINDOW_MS = 20000L  // Allow longer for setpoint changes (with retries)
+    private val HVAC_PRESET_PENDING_WINDOW_MS = 70000L  // Hold preset guard longer to suppress delayed bounce-back
     private val HVAC_SETPOINT_RETRY_DELAY_MS = 5000L  // Verify setpoint after 5s, retry if not confirmed
     private val HVAC_SETPOINT_MAX_RETRIES = 3  // Max retry attempts for unconfirmed setpoints
 
@@ -892,6 +906,19 @@ class OneControlGattCallback(
         } else {
             Log.e(TAG, "❌ Data service not found!")
             return
+        }
+
+        // Find CAN service (optional for lockout clear request)
+        val canService = gatt.getService(CAN_SERVICE_UUID)
+        if (canService != null) {
+            canWriteChar = canService.getCharacteristic(CAN_WRITE_CHARACTERISTIC_UUID)
+            if (canWriteChar != null) {
+                Log.i(TAG, "✅ Found CAN write characteristic (00000001)")
+            } else {
+                Log.w(TAG, "⚠️ CAN service found but write characteristic (00000001) missing")
+            }
+        } else {
+            Log.w(TAG, "⚠️ CAN service not found (lockout clear command unavailable)")
         }
         
         // Mark services as discovered
@@ -1994,6 +2021,8 @@ class OneControlGattCallback(
                 val age = System.currentTimeMillis() - pendingCmd.timestamp
                 val windowMs = if (pendingCmd.isSetpointChange) {
                     HVAC_SETPOINT_PENDING_WINDOW_MS
+                } else if (pendingCmd.isPresetChange) {
+                    HVAC_PRESET_PENDING_WINDOW_MS
                 } else {
                     HVAC_PENDING_WINDOW_MS
                 }
@@ -2008,21 +2037,28 @@ class OneControlGattCallback(
                         highMatches
                     if (!matches) {
                         Log.d(TAG, "🚫 Suppressing HVAC status (pending command, age=${age}ms): " +
-                            "got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
-                            "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}")
+                            "got mode=$heatMode source=$heatSource low=$lowTripTempF high=$highTripTempF, " +
+                            "want mode=${pendingCmd.heatMode} source=${pendingCmd.heatSource} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}")
                         mqttPublisher.logServiceEvent(
-                            "🚫 Suppressing HVAC status (age=${age}ms): got mode=$heatMode low=$lowTripTempF high=$highTripTempF, " +
-                                "want mode=${pendingCmd.heatMode} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}"
+                            "🚫 Suppressing HVAC status (age=${age}ms): got mode=$heatMode source=$heatSource low=$lowTripTempF high=$highTripTempF, " +
+                                "want mode=${pendingCmd.heatMode} source=${pendingCmd.heatSource} low=${pendingCmd.lowTripTempF} high=${pendingCmd.highTripTempF}"
                         )
                         offset += BYTES_PER_DEVICE
                         continue  // Skip storing and publishing this zone's stale status
                     }
-                    // Matches! Gateway confirmed our command — clear pending
-                    Log.i(TAG, "✅ HVAC command confirmed by gateway (age=${age}ms)")
-                    mqttPublisher.logServiceEvent("✅ HVAC command confirmed by gateway (age=${age}ms)")
+                    if (pendingCmd.isPresetChange) {
+                        // Keep preset guard active for full window; delayed old status can arrive 30-60s later.
+                        Log.d(TAG, "🛡️ HVAC preset guard active (age=${age}ms/${windowMs}ms), holding pending")
+                    } else {
+                        // Matches! Gateway confirmed our command — clear pending
+                        Log.i(TAG, "✅ HVAC command confirmed by gateway (age=${age}ms)")
+                        mqttPublisher.logServiceEvent("✅ HVAC command confirmed by gateway (age=${age}ms)")
+                        pendingHvacCommands.remove(zoneKey)
+                    }
+                } else {
+                    // Window expired
+                    pendingHvacCommands.remove(zoneKey)
                 }
-                // Clear pending (either confirmed or window expired)
-                pendingHvacCommands.remove(zoneKey)
             }
             
             // --- Behavioral capability detection ---
@@ -2558,18 +2594,65 @@ class OneControlGattCallback(
      */
     private fun handleDeviceLockStatus(data: ByteArray) {
         if (data.size < 4) return
-        
+
+        val baseTopic = "onecontrol/${device.address}"
+
+        // Preferred parse path (matches official app):
+        // [0]=event(0x04), [1]=systemLockoutLevel, [6]=tableId, [7]=deviceCount, [8..]=bitfield lock bytes
+        if (data.size >= 8) {
+            val lockoutLevel = data[1].toInt() and 0xFF
+            val tableId = data[6].toInt() and 0xFF
+            val deviceCount = data[7].toInt() and 0xFF
+            val lockByteCount = (deviceCount + 7) / 8
+
+            systemLockoutLevel = lockoutLevel
+            mqttPublisher.publishState("$baseTopic/system/lockout_level", lockoutLevel.toString(), true)
+            publishDiagnosticsState()
+
+            Log.i(TAG, "📦 DeviceLockStatus table=$tableId devices=$deviceCount systemLockoutLevel=$lockoutLevel")
+
+            if (data.size >= 8 + lockByteCount) {
+                for (idx in 0 until deviceCount) {
+                    val deviceId = idx
+                    val statusByte = data[8 + (idx / 8)].toInt() and 0xFF
+                    val bitMask = 1 shl (idx % 8)
+                    val locked = (statusByte and bitMask) != 0
+
+                    val json = JSONObject().apply {
+                        put("device_table_id", tableId)
+                        put("device_id", deviceId)
+                        put("locked", locked)
+                        put("system_lockout_level", lockoutLevel)
+                    }
+                    mqttPublisher.publishState("$baseTopic/device/$tableId/$deviceId/lock", json.toString(), true)
+                }
+            } else {
+                Log.w(TAG, "⚠️ DeviceLockStatus payload too short for bitfield: size=${data.size}, expected>=${8 + lockByteCount}")
+            }
+
+            return
+        }
+
+        // Legacy fallback path (older assumed format)
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
         val locked = (data[3].toInt() and 0xFF) != 0
-        
-        Log.i(TAG, "📦 DeviceLock $tableId:$deviceId locked=$locked")
-        
-        val baseTopic = "onecontrol/${device.address}"
+        val status = data[3].toInt() and 0xFF
+
+        // Best-effort lockout derivation when only legacy payload is available
+        if (systemLockoutLevel == null) {
+            systemLockoutLevel = if (status != 0) 1 else 0
+            mqttPublisher.publishState("$baseTopic/system/lockout_level", systemLockoutLevel.toString(), true)
+            publishDiagnosticsState()
+        }
+
+        Log.i(TAG, "📦 DeviceLock (legacy) $tableId:$deviceId locked=$locked")
+
         val json = JSONObject().apply {
             put("device_table_id", tableId)
             put("device_id", deviceId)
             put("locked", locked)
+            systemLockoutLevel?.let { put("system_lockout_level", it) }
         }
         mqttPublisher.publishState("$baseTopic/device/$tableId/$deviceId/lock", json.toString(), true)
     }
@@ -3433,6 +3516,79 @@ class OneControlGattCallback(
         
         return Result.success(Unit)
     }
+
+    /**
+     * Request clear of in-motion lockout condition.
+     *
+     * Mirrors official sequence:
+     *  - Send 0x55 (arm clear window)
+     *  - Send 0xAA (clear request)
+     *
+     * This is a request only. Hardware/network conditions can refuse or reassert lockout.
+     */
+    private fun requestLockoutClear(): Result<Unit> {
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastLockoutClearRequestMs
+        if (elapsed < LOCKOUT_CLEAR_THROTTLE_MS) {
+            val remaining = LOCKOUT_CLEAR_THROTTLE_MS - elapsed
+            val msg = "Lockout clear throttled, try again in ${remaining}ms"
+            Log.w(TAG, "⏱️ $msg")
+            mqttPublisher.logServiceEvent("⏱️ $msg")
+            return Result.failure(Exception(msg))
+        }
+
+        if (!isConnected || !isAuthenticated || currentGatt == null) {
+            Log.w(TAG, "❌ Cannot clear lockout - not ready (connected=$isConnected, auth=$isAuthenticated)")
+            return Result.failure(Exception("Not connected or authenticated"))
+        }
+
+        val canChar = canWriteChar
+        val dataChar = dataWriteChar
+        if (canChar == null && dataChar == null) {
+            return Result.failure(Exception("No writable characteristic available for lockout clear"))
+        }
+
+        return try {
+            val armResult = if (canChar != null) {
+                canChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                canChar.value = byteArrayOf(0x55.toByte())
+                currentGatt?.writeCharacteristic(canChar)
+            } else {
+                val encodedArm = CobsDecoder.encode(byteArrayOf(0x55.toByte()), prependStartFrame = true, useCrc = true)
+                dataChar!!.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                dataChar.value = encodedArm
+                currentGatt?.writeCharacteristic(dataChar)
+            }
+
+            handler.postDelayed({
+                try {
+                    val clearResult = if (canChar != null) {
+                        canChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        canChar.value = byteArrayOf(0xAA.toByte())
+                        currentGatt?.writeCharacteristic(canChar)
+                    } else {
+                        val encodedClear = CobsDecoder.encode(byteArrayOf(0xAA.toByte()), prependStartFrame = true, useCrc = true)
+                        dataChar!!.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        dataChar.value = encodedClear
+                        currentGatt?.writeCharacteristic(dataChar)
+                    }
+                    val transport = if (canChar != null) "can" else "data"
+                    Log.i(TAG, "🛡️ Lockout clear request sent via $transport: arm=$armResult clear=$clearResult")
+                    mqttPublisher.logServiceEvent("🛡️ Lockout clear request sent via $transport (0x55→0xAA): arm=$armResult clear=$clearResult")
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Lockout clear step2 failed: ${e.message}", e)
+                    mqttPublisher.logServiceEvent("❌ Lockout clear step2 failed: ${e.message}")
+                }
+            }, 100)
+
+            lastLockoutClearRequestMs = now
+            mqttPublisher.publishState("onecontrol/${device.address}/diag/last_lockout_clear_request", now.toString(), true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to request lockout clear: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
     
     /**
      * Retry GetDevicesMetadata after gateway rejection.
@@ -3474,6 +3630,9 @@ class OneControlGattCallback(
         // Handle special commands that don't follow the {type}/{tableId}/{deviceId} pattern
         if (commandTopic.endsWith("/command/refresh_metadata")) {
             return refreshMetadata()
+        }
+        if (commandTopic.endsWith("/command/clear_lockout")) {
+            return requestLockoutClear()
         }
         
         // Parse topic: command/{type}/{tableId}/{deviceId} or command/{type}/{tableId}/{deviceId}/brightness
@@ -3649,6 +3808,7 @@ class OneControlGattCallback(
             "temperature", "temperature_high", "temperature_low" -> true
             else -> false
         }
+        val isPresetChange = subTopic == "preset_mode"
 
         return if (isSetpointChange) {
             scheduleHvacSetpointCommand(tableId, deviceId, subTopic, payload)
@@ -3718,6 +3878,7 @@ class OneControlGattCallback(
             "temperature", "temperature_high", "temperature_low" -> true
             else -> false
         }
+        val isPresetChange = subTopic == "preset_mode"
 
         // Apply the change based on subTopic
         when (subTopic) {
@@ -3834,6 +3995,7 @@ class OneControlGattCallback(
                     lowTripTempF = lowTrip,
                     highTripTempF = highTrip,
                     isSetpointChange = isSetpointChange,
+                    isPresetChange = isPresetChange,
                     timestamp = sentTimestamp
                 )
                 
@@ -3876,8 +4038,10 @@ class OneControlGattCallback(
                 // Also publish mode/fan/preset optimistically
                 val haMode = when (heatMode) { 0 -> "off"; 1 -> "heat"; 2 -> "cool"; 3 -> "heat_cool"; else -> "off" }
                 val haFanMode = when (fanMode) { 0 -> "auto"; 1 -> "high"; 2 -> "low"; else -> "auto" }
+                val haPreset = when (heatSource) { 0 -> "Prefer Gas"; 1 -> "Prefer Heat Pump"; else -> "none" }
                 mqttPublisher.publishState("$baseTopic/state/mode", haMode, true)
                 mqttPublisher.publishState("$baseTopic/state/fan_mode", haFanMode, true)
+                mqttPublisher.publishState("$baseTopic/state/preset_mode", haPreset, true)
                 
                 Log.i(TAG, "📤 Optimistic HVAC state published, suppressing stale updates for ${HVAC_PENDING_WINDOW_MS}ms")
                 
@@ -4703,7 +4867,8 @@ class OneControlGattCallback(
         val diagnostics = listOf(
             Triple("authenticated", "Authenticated", "diag/authenticated"),
             Triple("connected", "Connected", "diag/connected"),
-            Triple("data_healthy", "Data Healthy", "diag/data_healthy")
+            Triple("data_healthy", "Data Healthy", "diag/data_healthy"),
+            Triple("lockout_active", "In-Motion Lockout", "diag/lockout_active")
         )
         
         diagnostics.forEach { (objectId, name, stateTopic) ->
@@ -4748,6 +4913,28 @@ class OneControlGattCallback(
         
         mqttPublisher.publishDiscovery(refreshDiscoveryTopic, refreshPayload)
         Log.i(TAG, "📡 Published diagnostic discovery: $refreshButtonId (button)")
+
+        // Publish "Clear Lockout" button entity
+        val clearLockoutButtonId = "clear_lockout"
+        val clearLockoutUniqueId = "onecontrol_${macId}_diag_$clearLockoutButtonId"
+        val clearLockoutDiscoveryTopic = "$prefix/button/$nodeId/$clearLockoutButtonId/config"
+        val clearLockoutCommandTopic = "$prefix/$baseTopic/command/clear_lockout"
+
+        val clearLockoutPayload = JSONObject().apply {
+            put("name", "Clear Lockout")
+            put("unique_id", clearLockoutUniqueId)
+            put("command_topic", clearLockoutCommandTopic)
+            put("payload_press", "PRESS")
+            put("availability_topic", "$prefix/$baseTopic/availability")
+            put("payload_available", "online")
+            put("payload_not_available", "offline")
+            put("entity_category", "diagnostic")
+            put("icon", "mdi:shield-off")
+            put("device", deviceInfo)
+        }.toString()
+
+        mqttPublisher.publishDiscovery(clearLockoutDiscoveryTopic, clearLockoutPayload)
+        Log.i(TAG, "📡 Published diagnostic discovery: $clearLockoutButtonId (button)")
         
         diagnosticsDiscoveryPublished = true
         
@@ -4770,12 +4957,17 @@ class OneControlGattCallback(
     private fun publishDiagnosticsState() {
         val isPaired = isAuthenticated  // Use protocol-level auth, not OS bonding
         val dataHealthy = computeDataHealthy()
+        val lockoutActive = (systemLockoutLevel ?: 0) > 0
         val baseTopic = "onecontrol/${device.address}"
         
         // Publish to MQTT
         mqttPublisher.publishState("$baseTopic/diag/authenticated", if (isPaired) "ON" else "OFF", true)
         mqttPublisher.publishState("$baseTopic/diag/connected", if (isConnected) "ON" else "OFF", true)
         mqttPublisher.publishState("$baseTopic/diag/data_healthy", if (dataHealthy) "ON" else "OFF", true)
+        mqttPublisher.publishState("$baseTopic/diag/lockout_active", if (lockoutActive) "ON" else "OFF", true)
+        systemLockoutLevel?.let {
+            mqttPublisher.publishState("$baseTopic/system/lockout_level", it.toString(), true)
+        }
         
         // Update UI status for this plugin
         mqttPublisher.updatePluginStatus(
@@ -4785,7 +4977,7 @@ class OneControlGattCallback(
             dataHealthy = dataHealthy
         )
         
-        Log.d(TAG, "📡 Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy")
+        Log.d(TAG, "📡 Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, lockout=${systemLockoutLevel ?: "unknown"}")
     }
     
     /**
