@@ -361,11 +361,7 @@ class BaseBleService : Service() {
                     if (mqtt != null) {
                         mqtt.subscribeToCommands(topicPattern, callback)
                     } else {
-                        // Queue subscription until MQTT connects
-                        Log.w(TAG, "⏳ MQTT not ready, queuing subscription: $topicPattern")
-                        synchronized(pendingSubscriptions) {
-                            pendingSubscriptions.add(PendingSubscription(topicPattern, callback))
-                        }
+                        queuePendingSubscription(topicPattern, callback)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to subscribe to commands: $topicPattern", e)
@@ -519,6 +515,22 @@ class BaseBleService : Service() {
                 Log.d(TAG, "✅ Retried subscription: ${sub.topicPattern}")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to retry subscription: ${sub.topicPattern}", e)
+            }
+        }
+    }
+
+    /**
+     * Queue a command subscription to be retried when MQTT is connected.
+     * Deduplicates by topic pattern to avoid duplicate callback registration.
+     */
+    private fun queuePendingSubscription(topicPattern: String, callback: (String, String) -> Unit) {
+        synchronized(pendingSubscriptions) {
+            val alreadyQueued = pendingSubscriptions.any { it.topicPattern == topicPattern }
+            if (!alreadyQueued) {
+                pendingSubscriptions.add(PendingSubscription(topicPattern, callback))
+                Log.w(TAG, "⏳ MQTT not ready, queuing subscription: $topicPattern")
+            } else {
+                Log.d(TAG, "⏳ Subscription already queued, skipping duplicate: $topicPattern")
             }
         }
     }
@@ -1604,9 +1616,8 @@ class BaseBleService : Service() {
      */
     private fun subscribeToDeviceCommands(device: BluetoothDevice, pluginId: String, plugin: BleDevicePlugin?) {
         Log.i(TAG, "📡 subscribeToDeviceCommands called for $pluginId, plugin=${plugin != null}")
-        val output = getMqttPublisherFromService()
-        if (output == null || plugin == null) {
-            Log.w(TAG, "❌ Cannot subscribe to commands - mqtt=${output != null}, plugin=${plugin != null}")
+        if (plugin == null) {
+            Log.w(TAG, "❌ Cannot subscribe to commands - plugin=false")
             return
         }
         
@@ -1614,26 +1625,35 @@ class BaseBleService : Service() {
         val commandTopicPattern = plugin.getCommandTopicPattern(device)
         
         Log.i(TAG, "📡 Subscribing to command topic: $commandTopicPattern")
+
+        val commandCallback: (String, String) -> Unit = { topic, payload ->
+            Log.i(TAG, "📥 MQTT command received: $topic = $payload")
+
+            // Route command to plugin
+            serviceScope.launch {
+                try {
+                    val result = plugin.handleCommand(device, topic, payload)
+                    if (result.isFailure) {
+                        Log.w(TAG, "❌ Plugin command failed: ${result.exceptionOrNull()?.message}")
+                    } else {
+                        Log.i(TAG, "✅ Plugin command succeeded")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Command handling error", e)
+                }
+            }
+        }
+
+        val output = getMqttPublisherFromService()
+        if (output == null) {
+            queuePendingSubscription(commandTopicPattern, commandCallback)
+            Log.w(TAG, "⏳ Deferred device command subscription until MQTT is ready: $commandTopicPattern")
+            return
+        }
         
         serviceScope.launch {
             try {
-                output.subscribeToCommands(commandTopicPattern) { topic, payload ->
-                    Log.i(TAG, "📥 MQTT command received: $topic = $payload")
-                    
-                    // Route command to plugin
-                    serviceScope.launch {
-                        try {
-                            val result = plugin.handleCommand(device, topic, payload)
-                            if (result.isFailure) {
-                                Log.w(TAG, "❌ Plugin command failed: ${result.exceptionOrNull()?.message}")
-                            } else {
-                                Log.i(TAG, "✅ Plugin command succeeded")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "❌ Command handling error", e)
-                        }
-                    }
-                }
+                output.subscribeToCommands(commandTopicPattern, commandCallback)
                 Log.i(TAG, "📡 Successfully subscribed to: $commandTopicPattern")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to subscribe to command topics", e)

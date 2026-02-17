@@ -403,8 +403,10 @@ class OneControlGattCallback(
     private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
     private var metadataRequested = false
     private val metadataRequestedTableIds: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private var metadataRequestInFlight = false
+    private var metadataRetryScheduled = false
     private var metadataRetryCount = 0
-    private val MAX_METADATA_RETRIES = 3
+    private val MAX_METADATA_RETRIES = 1
     private val METADATA_RETRY_DELAY_MS = 2000L
     
     init {
@@ -3040,6 +3042,9 @@ class OneControlGattCallback(
         }
         
         if (isComplete) pendingCommands.remove(commandId)
+        if (commandType == 0x02 && isComplete) {
+            metadataRequestInFlight = false
+        }
         
         // Don't dispatch error responses to handlers that expect data
         if (!isSuccess && isComplete) {
@@ -3051,6 +3056,11 @@ class OneControlGattCallback(
                 retryGetDevicesMetadata()
             }
             return
+        }
+
+        if (commandType == 0x02 && isComplete) {
+            metadataRetryCount = 0
+            metadataRetryScheduled = false
         }
         
         when (commandType) {
@@ -3372,6 +3382,12 @@ class OneControlGattCallback(
      */
     private fun sendGetDevicesMetadataCommand() {
         Log.i(TAG, "🔍 sendGetDevicesMetadataCommand()")
+
+        if (metadataRequestInFlight) {
+            Log.i(TAG, "🔍 Metadata request already in-flight - skipping duplicate send")
+            mqttPublisher.logServiceEvent("🔍 Metadata request already in-flight - skipping duplicate send")
+            return
+        }
         
         if (!isConnected || currentGatt == null) {
             Log.w(TAG, "🔍 Cannot send - not connected")
@@ -3391,6 +3407,7 @@ class OneControlGattCallback(
             
             // Track pending command
             pendingCommands[commandId.toInt()] = 0x02
+            metadataRequestInFlight = true
             
             Log.i(TAG, "🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
             mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
@@ -3405,11 +3422,13 @@ class OneControlGattCallback(
             val result = currentGatt?.writeCharacteristic(writeChar)
             if (result != true) {
                 metadataRequestedTableIds.remove(tableIdInt)
+                metadataRequestInFlight = false
             }
             
             Log.i(TAG, "🔍 Sent GetDevicesMetadata: result=$result")
             mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata: result=$result")
         } catch (e: Exception) {
+            metadataRequestInFlight = false
             Log.e(TAG, "🔍 Failed: ${e.message}", e)
         }
     }
@@ -3503,6 +3522,8 @@ class OneControlGattCallback(
         // deviceMetadata intact so incoming status events don't re-publish with hex names
         metadataRequested = false
         metadataRequestedTableIds.clear()
+        metadataRequestInFlight = false
+        metadataRetryScheduled = false
         
         Log.i(TAG, "🔄 Reset metadata guards, re-sending GetDevicesMetadata")
         mqttPublisher.logServiceEvent("🔄 Reset metadata guards, re-sending GetDevicesMetadata")
@@ -3596,6 +3617,10 @@ class OneControlGattCallback(
      * other in-flight commands. Retries with increasing delay up to MAX_METADATA_RETRIES.
      */
     private fun retryGetDevicesMetadata() {
+        if (metadataRetryScheduled) {
+            Log.i(TAG, "🔍 Metadata retry already scheduled - skipping duplicate")
+            return
+        }
         metadataRetryCount++
         if (metadataRetryCount > MAX_METADATA_RETRIES) {
             Log.w(TAG, "🔍 GetDevicesMetadata failed after $MAX_METADATA_RETRIES retries — using cached/fallback names")
@@ -3605,8 +3630,9 @@ class OneControlGattCallback(
         val delayMs = METADATA_RETRY_DELAY_MS * metadataRetryCount
         Log.i(TAG, "🔍 Retrying GetDevicesMetadata (attempt $metadataRetryCount/$MAX_METADATA_RETRIES) in ${delayMs}ms")
         mqttPublisher.logServiceEvent("🔍 Retrying GetDevicesMetadata in ${delayMs}ms (attempt $metadataRetryCount)")
-        metadataRequestedTableIds.clear()
+        metadataRetryScheduled = true
         handler.postDelayed({
+            metadataRetryScheduled = false
             if (isConnected && isAuthenticated && currentGatt != null) {
                 sendGetDevicesMetadataCommand()
             } else {
@@ -4807,6 +4833,8 @@ class OneControlGattCallback(
         // Reset metadata state so it's re-requested on reconnect
         metadataRequested = false
         metadataRequestedTableIds.clear()
+        metadataRequestInFlight = false
+        metadataRetryScheduled = false
         allNotificationsSubscribed = false
         notificationSubscriptionsPending = 0
         metadataRetryCount = 0
