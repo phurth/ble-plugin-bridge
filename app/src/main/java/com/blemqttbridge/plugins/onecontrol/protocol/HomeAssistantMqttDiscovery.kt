@@ -258,6 +258,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "light.$objectId")  // Replace deprecated object_id
             put("device", getDeviceInfo(gatewayMac, appVersion))
 
@@ -301,6 +302,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "light.$objectId")
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -351,6 +353,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "switch.$objectId")  // Replace deprecated object_id
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -407,6 +410,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "cover.$objectId")  // Replace deprecated object_id
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -464,6 +468,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "sensor.$objectId")
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -492,6 +497,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", sensorName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "sensor.${sanitizeName(sensorName)}")  // Replace deprecated object_id
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -524,6 +530,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "sensor.$objectId")
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -552,6 +559,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "switch.$objectId")
             put("device", getDeviceInfo(gatewayMac, appVersion))
             
@@ -584,6 +592,7 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("unique_id", uniqueId)
             put("name", deviceName)
+            put("has_entity_name", false)  // Prevent HA from prepending device name
             put("default_entity_id", "binary_sensor.$objectId")
             put("device", getDeviceInfo(gatewayMac, appVersion))
             

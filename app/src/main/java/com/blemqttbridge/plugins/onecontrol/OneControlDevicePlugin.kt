@@ -3285,6 +3285,42 @@ class OneControlGattCallback(
         }
         // Note: If cover discovery was deferred (no haDiscoveryPublished entry),
         // it will be published on next cover status event now that metadata is loaded
+
+        // GUARD: Only republish RGB light if it was already published
+        if (haDiscoveryPublished.contains("rgb_light_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub RGB light: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val commandTopic = "$baseTopic/command/rgb/$tableId/$deviceId"
+            val discovery = HomeAssistantMqttDiscovery.getRgbLightDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/rgb_light_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        // GUARD: Only republish climate if it was already published
+        if (haDiscoveryPublished.contains("climate_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub climate: $friendlyName")
+            val zoneKey = "$tableId:$deviceId"
+            val includePresets = hvacPresetDiscoveryState[zoneKey] ?: false
+            val discovery = HomeAssistantMqttDiscovery.getClimateDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
+                commandBaseTopic = "$prefix/$baseTopic/command/climate/$tableId/$deviceId",
+                includePresets = includePresets,
+                appVersion = appVersion
+            )
+            val discoveryTopic = "$prefix/climate/onecontrol_ble_${device.address.replace(":", "").lowercase()}/climate_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
     }
     
     /**
