@@ -3478,6 +3478,8 @@ class OneControlGattCallback(
         val normalized = tableId and 0xFF
         if (normalized == 0) return
         if (metadataRequestedTableIds.contains(normalized)) return
+        // If the main metadata request path is already active/pending, don't race it
+        if (metadataRequested || metadataRequestInFlight) return
         if (!isConnected || currentGatt == null) return
         val writeChar = dataWriteChar ?: return
         Log.i(TAG, "🔍 Requesting metadata for observed tableId=0x${normalized.toString(16)}")
@@ -4941,6 +4943,7 @@ class OneControlGattCallback(
             
             val payload = JSONObject().apply {
                 put("name", name)
+                put("has_entity_name", false)
                 put("unique_id", uniqueId)
                 put("state_topic", "$prefix/$baseTopic/$stateTopic")
                 put("payload_on", "ON")
@@ -4964,6 +4967,7 @@ class OneControlGattCallback(
         
         val refreshPayload = JSONObject().apply {
             put("name", "Refresh Metadata")
+            put("has_entity_name", false)
             put("unique_id", refreshUniqueId)
             put("command_topic", refreshCommandTopic)
             put("payload_press", "PRESS")
@@ -4986,6 +4990,7 @@ class OneControlGattCallback(
 
         val clearLockoutPayload = JSONObject().apply {
             put("name", "Clear Lockout")
+            put("has_entity_name", false)
             put("unique_id", clearLockoutUniqueId)
             put("command_topic", clearLockoutCommandTopic)
             put("payload_press", "PRESS")
