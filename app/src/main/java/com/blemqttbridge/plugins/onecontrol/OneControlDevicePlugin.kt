@@ -412,6 +412,7 @@ class OneControlGattCallback(
     init {
         // Load cached metadata immediately so friendly names are available from first state update
         loadMetadataFromCache()
+        loadDiscoveryFromCache()
     }
     
     /**
@@ -484,6 +485,171 @@ class OneControlGattCallback(
             Log.e(TAG, "💾 Error saving metadata to cache: ${e.message}", e)
             mqttPublisher.logServiceEvent("💾 Error saving metadata to cache: ${e.message}")
         }
+    }
+
+    /**
+     * Load Home Assistant discovery keys from persistent cache.
+     * This allows us to republish all previously known entities on reconnect/startup.
+     */
+    private fun loadDiscoveryFromCache() {
+        try {
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            val cacheKey = "discovery_${device.address.replace(":", "")}" 
+            val cached = prefs.getString(cacheKey, null)
+
+            if (cached != null) {
+                val jsonArray = JSONArray(cached)
+                var loadedCount = 0
+                for (i in 0 until jsonArray.length()) {
+                    val key = jsonArray.optString(i, "")
+                    if (key.isNotEmpty()) {
+                        haDiscoveryPublished.add(key)
+                        loadedCount++
+                    }
+                }
+                Log.i(TAG, "💾 Loaded $loadedCount cached discovery keys for ${device.address}")
+                mqttPublisher.logServiceEvent("💾 Loaded $loadedCount cached discovery keys for ${device.address}")
+            } else {
+                Log.d(TAG, "💾 No cached discovery keys found for ${device.address}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "💾 Error loading cached discovery keys: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Save Home Assistant discovery keys to persistent cache.
+     */
+    private fun saveDiscoveryToCache() {
+        try {
+            val jsonArray = JSONArray()
+            haDiscoveryPublished.sorted().forEach { jsonArray.put(it) }
+
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            val cacheKey = "discovery_${device.address.replace(":", "")}" 
+            prefs.edit().putString(cacheKey, jsonArray.toString()).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "💾 Error saving discovery keys: ${e.message}", e)
+        }
+    }
+
+    private fun addDiscoveryKey(discoveryKey: String): Boolean {
+        val added = haDiscoveryPublished.add(discoveryKey)
+        if (added) {
+            saveDiscoveryToCache()
+        }
+        return added
+    }
+
+    private fun removeDiscoveryKey(discoveryKey: String) {
+        if (haDiscoveryPublished.remove(discoveryKey)) {
+            saveDiscoveryToCache()
+        }
+    }
+
+    private fun entityUniqueIdPrefix(entityType: EntityType): String {
+        return when (entityType) {
+            EntityType.SWITCH -> "switch"
+            EntityType.LIGHT -> "light"
+            EntityType.RGB_LIGHT -> "rgb"
+            EntityType.COVER_SENSOR -> "cover_state"
+            EntityType.TANK_SENSOR -> "tank"
+            EntityType.SYSTEM_SENSOR -> "system"
+            EntityType.GENERATOR_STATE -> "gen_state"
+            EntityType.GENERATOR_BATTERY -> "gen_batt"
+            EntityType.GENERATOR_TEMP -> "gen_temp"
+            EntityType.GENERATOR_QUIET -> "gen_quiet"
+            EntityType.GENERATOR_SWITCH -> "gen_switch"
+            EntityType.RUNTIME_HOURS -> "runtime"
+            EntityType.CLIMATE -> "climate"
+        }
+    }
+
+    private fun buildEntityUniqueId(entityType: EntityType, deviceAddr: Int): String {
+        val macClean = device.address.replace(":", "").lowercase()
+        val metadata = deviceMetadata[deviceAddr]
+        val suffix = if (metadata != null) {
+            "fn%04x_i%02x".format(metadata.functionName and 0xFFFF, metadata.functionInstance and 0xFF)
+        } else {
+            deviceAddr.toString(16)
+        }
+        return "onecontrol_ble_${macClean}_${entityUniqueIdPrefix(entityType)}_$suffix"
+    }
+
+    private fun applyResilientUniqueId(discovery: JSONObject, entityType: EntityType, deviceAddr: Int) {
+        discovery.put("unique_id", buildEntityUniqueId(entityType, deviceAddr))
+    }
+
+    private fun buildEntityObjectId(entityType: EntityType, deviceAddr: Int): String {
+        val metadata = deviceMetadata[deviceAddr]
+        val suffix = if (metadata != null) {
+            "fn%04x_i%02x".format(metadata.functionName and 0xFFFF, metadata.functionInstance and 0xFF)
+        } else {
+            "addr%04x".format(deviceAddr and 0xFFFF)
+        }
+        return "${entityType.topicPrefix}_$suffix"
+    }
+
+    private fun applyResilientEntityId(discovery: JSONObject, entityType: EntityType, deviceAddr: Int) {
+        val objectId = buildEntityObjectId(entityType, deviceAddr)
+        val domain = entityType.haComponent
+        discovery.put("default_entity_id", "$domain.$objectId")
+        if (entityType == EntityType.CLIMATE) {
+            discovery.put("object_id", objectId)
+        }
+    }
+
+    private fun fallbackTypeForDiscoveryKey(discoveryKey: String): String {
+        return when {
+            discoveryKey.startsWith("switch_") || discoveryKey.startsWith("gen_switch_") -> "Switch"
+            discoveryKey.startsWith("light_") -> "Light"
+            discoveryKey.startsWith("rgb_light_") -> "RGB Light"
+            discoveryKey.startsWith("cover_state_") -> "Cover"
+            discoveryKey.startsWith("tank_") -> "Tank"
+            discoveryKey.startsWith("climate_") -> "Climate"
+            discoveryKey.startsWith("gen_state_") ||
+                discoveryKey.startsWith("gen_batt_") ||
+                discoveryKey.startsWith("gen_temp_") ||
+                discoveryKey.startsWith("gen_quiet_") ||
+                discoveryKey.startsWith("runtime_") -> "Generator"
+            else -> "Device"
+        }
+    }
+
+    /**
+     * Re-publish discovery for all cached entities.
+     * This restores full HA entity availability immediately on restart/reconnect.
+     */
+    private fun republishDiscoveryFromCache() {
+        if (haDiscoveryPublished.isEmpty()) {
+            Log.d(TAG, "📢 No cached discovery keys to republish")
+            return
+        }
+
+        val deviceHexes = haDiscoveryPublished
+            .mapNotNull { key ->
+                val hex = key.substringAfterLast("_", "")
+                if (hex.length == 4 && hex.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) hex else null
+            }
+            .toSet()
+
+        var republishedDevices = 0
+        deviceHexes.forEach { keyHex ->
+            val tableId = keyHex.substring(0, 2).toIntOrNull(16) ?: return@forEach
+            val deviceId = keyHex.substring(2, 4).toIntOrNull(16) ?: return@forEach
+            val deviceAddr = (tableId shl 8) or deviceId
+            if (!deviceMetadata.containsKey(deviceAddr)) {
+                Log.d(TAG, "📢 Skipping cached discovery republish for $tableId:$deviceId until metadata is available")
+                return@forEach
+            }
+            val fallbackKey = haDiscoveryPublished.firstOrNull { it.endsWith("_$keyHex") } ?: ""
+            val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackTypeForDiscoveryKey(fallbackKey))
+            republishDiscoveryWithFriendlyName(tableId, deviceId, friendlyName)
+            republishedDevices++
+        }
+
+        Log.i(TAG, "📢 Re-published discovery from cache for $republishedDevices device addresses")
+        mqttPublisher.logServiceEvent("📢 Re-published discovery from cache for $republishedDevices device addresses")
     }
     
     /**
@@ -564,10 +730,15 @@ class OneControlGattCallback(
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackType)
         
         // Publish HA discovery if not already done
-        if (haDiscoveryPublished.add(discoveryKey)) {
+        val metadata = deviceMetadata[deviceAddr]
+        if (metadata == null) {
+            Log.d(TAG, "📢 Deferring HA discovery for $entityType $tableId:$deviceId until metadata arrives")
+        } else if (addDiscoveryKey(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for $entityType $tableId:$deviceId ($friendlyName)")
             try {
                 val discovery = discoveryProvider(friendlyName, deviceAddr, prefix, baseTopic)
+            applyResilientUniqueId(discovery, entityType, deviceAddr)
+                applyResilientEntityId(discovery, entityType, deviceAddr)
                 val macForTopic = device.address.replace(":", "").lowercase()
                 val discoveryTopic = "$prefix/${entityType.haComponent}/onecontrol_ble_$macForTopic/${entityType.topicPrefix}_$keyHex/config"
                 Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
@@ -578,7 +749,7 @@ class OneControlGattCallback(
             } catch (e: Exception) {
                 Log.e(TAG, "📢 Discovery publish failed: ${e.message}", e)
                 // Remove from set so we can retry
-                haDiscoveryPublished.remove(discoveryKey)
+                removeDiscoveryKey(discoveryKey)
             }
         }
         
@@ -1303,6 +1474,10 @@ class OneControlGattCallback(
         
         // Publish ready state to MQTT
         mqttPublisher.publishState("onecontrol/${device.address}/status", "ready", true)
+
+        // Re-publish all previously discovered entities so HA immediately sees
+        // the full gateway inventory after service restart/reconnect.
+        handler.postDelayed({ republishDiscoveryFromCache() }, 1200)
         
         // NOTE: Command subscriptions are handled by BaseBleService.subscribeToDeviceCommands()
         // which routes MQTT commands to this plugin's handleCommand() method
@@ -2217,7 +2392,7 @@ class OneControlGattCallback(
             val discoveryKey = "climate_${"%02x%02x".format(tableId, deviceId)}"
             val prevIncludePresets = hvacPresetDiscoveryState[zoneKey]
             if (prevIncludePresets != null && prevIncludePresets != includePresets) {
-                haDiscoveryPublished.remove(discoveryKey)
+                removeDiscoveryKey(discoveryKey)
                 Log.i(TAG, "🔁 HVAC presets changed for $zoneKey: $prevIncludePresets -> $includePresets (republish discovery)")
             }
             hvacPresetDiscoveryState[zoneKey] = includePresets
@@ -2506,7 +2681,7 @@ class OneControlGattCallback(
             
             // Publish HA discovery for voltage sensor if not already done
             val voltageDiscoveryKey = "system_voltage"
-            if (haDiscoveryPublished.add(voltageDiscoveryKey)) {
+            if (addDiscoveryKey(voltageDiscoveryKey)) {
                 Log.i(TAG, "📢 Publishing HA discovery for system voltage sensor")
                 val prefix = mqttPublisher.topicPrefix
                 val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
@@ -2530,7 +2705,7 @@ class OneControlGattCallback(
             
             // Publish HA discovery for temperature sensor if not already done
             val tempDiscoveryKey = "system_temperature"
-            if (haDiscoveryPublished.add(tempDiscoveryKey)) {
+            if (addDiscoveryKey(tempDiscoveryKey)) {
                 Log.i(TAG, "📢 Publishing HA discovery for system temperature sensor")
                 val prefix = mqttPublisher.topicPrefix
                 val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
@@ -2983,7 +3158,10 @@ class OneControlGattCallback(
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "tank_$keyHex"
         val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Tank")
-        if (haDiscoveryPublished.add(discoveryKey)) {
+        val deviceAddr = (tableId shl 8) or deviceId
+        if (!deviceMetadata.containsKey(deviceAddr)) {
+            Log.d(TAG, "📢 Deferring tank discovery for $tableId:$deviceId until metadata arrives")
+        } else if (addDiscoveryKey(discoveryKey)) {
             Log.i(TAG, "📢 Publishing HA discovery for tank sensor V2 $tableId:$deviceId ($friendlyName)")
             // Discovery payload needs full topic path
             val prefix = mqttPublisher.topicPrefix
@@ -2996,6 +3174,8 @@ class OneControlGattCallback(
                 icon = "mdi:gauge",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.TANK_SENSOR, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.TANK_SENSOR, deviceAddr)
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3226,6 +3406,8 @@ class OneControlGattCallback(
                 commandTopic = "$prefix/$commandTopic",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.SWITCH, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.SWITCH, deviceAddr)
             val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3247,6 +3429,8 @@ class OneControlGattCallback(
                 effectTopic = "$prefix/$effectTopic",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.LIGHT, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.LIGHT, deviceAddr)
             val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3263,6 +3447,8 @@ class OneControlGattCallback(
                 icon = "mdi:gauge",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.TANK_SENSOR, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.TANK_SENSOR, deviceAddr)
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3280,6 +3466,8 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.COVER_SENSOR, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.COVER_SENSOR, deviceAddr)
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3300,6 +3488,8 @@ class OneControlGattCallback(
                 baseTopic = "$prefix/$baseTopic/device/$tableId/$deviceId",
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.RGB_LIGHT, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.RGB_LIGHT, deviceAddr)
             val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/rgb_light_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
@@ -3318,7 +3508,104 @@ class OneControlGattCallback(
                 includePresets = includePresets,
                 appVersion = appVersion
             )
+            applyResilientUniqueId(discovery, EntityType.CLIMATE, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.CLIMATE, deviceAddr)
             val discoveryTopic = "$prefix/climate/onecontrol_ble_${device.address.replace(":", "").lowercase()}/climate_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("gen_state_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub generator state: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/generator_state"
+            val attrTopic = "$baseTopic/device/$tableId/$deviceId/generator_attributes"
+            val discovery = discoveryBuilder.buildGeneratorStateSensor(
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                attributesTopic = "$prefix/$attrTopic"
+            )
+            applyResilientUniqueId(discovery, EntityType.GENERATOR_STATE, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.GENERATOR_STATE, deviceAddr)
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/gen_state_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("gen_switch_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub generator switch: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val commandTopic = "$baseTopic/command/generator/$tableId/$deviceId"
+            val discovery = discoveryBuilder.buildGeneratorSwitch(
+                deviceAddr = deviceAddr,
+                deviceName = "$friendlyName Switch",
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic"
+            )
+            applyResilientUniqueId(discovery, EntityType.GENERATOR_SWITCH, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.GENERATOR_SWITCH, deviceAddr)
+            val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/gen_switch_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("gen_batt_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub generator battery: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/battery_voltage"
+            val discovery = discoveryBuilder.buildSensor(
+                sensorName = "$friendlyName Battery",
+                stateTopic = "$prefix/$stateTopic",
+                unit = "V",
+                deviceClass = "voltage",
+                icon = "mdi:car-battery"
+            )
+            applyResilientUniqueId(discovery, EntityType.GENERATOR_BATTERY, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.GENERATOR_BATTERY, deviceAddr)
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/gen_batt_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("gen_temp_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub generator temperature: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/generator_temperature"
+            val discovery = discoveryBuilder.buildSensor(
+                sensorName = "$friendlyName Temperature",
+                stateTopic = "$prefix/$stateTopic",
+                unit = "°C",
+                deviceClass = "temperature",
+                icon = "mdi:thermometer"
+            )
+            applyResilientUniqueId(discovery, EntityType.GENERATOR_TEMP, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.GENERATOR_TEMP, deviceAddr)
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/gen_temp_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("gen_quiet_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub generator quiet hours: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/quiet_hours"
+            val discovery = discoveryBuilder.buildBinarySensor(
+                deviceAddr = deviceAddr,
+                deviceName = "$friendlyName Quiet Hours",
+                stateTopic = "$prefix/$stateTopic",
+                icon = "mdi:volume-off"
+            )
+            applyResilientUniqueId(discovery, EntityType.GENERATOR_QUIET, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.GENERATOR_QUIET, deviceAddr)
+            val discoveryTopic = "$prefix/binary_sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/gen_quiet_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+
+        if (haDiscoveryPublished.contains("runtime_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub runtime hours: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/runtime_hours"
+            val discovery = discoveryBuilder.buildSensor(
+                sensorName = "$friendlyName Runtime",
+                stateTopic = "$prefix/$stateTopic",
+                unit = "h",
+                deviceClass = "duration",
+                icon = "mdi:timer-cog-outline"
+            )
+            applyResilientUniqueId(discovery, EntityType.RUNTIME_HOURS, deviceAddr)
+            applyResilientEntityId(discovery, EntityType.RUNTIME_HOURS, deviceAddr)
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/runtime_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
     }
