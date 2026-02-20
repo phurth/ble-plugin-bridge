@@ -32,6 +32,16 @@ let editingFields = {}; // Track which fields are currently being edited
 let instanceToRemove = null;
 let instanceToRemoveIsPolling = false;
 
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 // Track recently toggled switches to avoid re-rendering during state transition
 let recentlyToggledSwitches = new Set();
 const TOGGLE_DEBOUNCE_MS = 3000;
@@ -489,6 +499,16 @@ function renderPluginSection(grouped, pluginStatuses, isBleSection) {
                             <span class="instance-name">${displayName}</span>
                         </div>
                         <div class="instance-actions">
+                            ${pluginType === 'onecontrol' ? `
+                            <button class="icon-btn table-icon-btn" onclick="openOneControlDeviceTable()" title="view device table" aria-label="view device table">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                                    <line x1="3" y1="10" x2="21" y2="10"></line>
+                                    <line x1="9" y1="10" x2="9" y2="20"></line>
+                                    <line x1="15" y1="10" x2="15" y2="20"></line>
+                                </svg>
+                            </button>
+                            ` : ''}
                             <button class="icon-btn edit-icon-btn" onclick="showEditInstanceDialog('${instance.instanceId}')" ${buttonsDisabled ? 'disabled' : ''} title="Edit">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
@@ -905,6 +925,61 @@ async function showEditInstanceDialog(instanceId) {
 
 function closeEditInstanceDialog() {
     document.getElementById('editInstanceModal').classList.remove('show');
+}
+
+async function openOneControlDeviceTable() {
+    const modal = document.getElementById('oneControlDeviceTableModal');
+    const body = document.getElementById('onecontrol-device-table-body');
+    const summary = document.getElementById('onecontrol-device-table-summary');
+    if (!modal || !body || !summary) return;
+
+    modal.classList.add('show');
+    body.innerHTML = '<tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--text-secondary);">Loading...</td></tr>';
+    summary.textContent = '';
+
+    try {
+        const response = await fetch('/api/plugins/onecontrol/device-table');
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || 'Failed to load device table');
+        }
+
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        if (rows.length === 0) {
+            body.innerHTML = '<tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--text-secondary);">No devices observed yet.</td></tr>';
+        } else {
+            body.innerHTML = rows.map(row => {
+                const tableId = row.tableId ?? '';
+                const deviceId = row.deviceId ?? '';
+                const deviceAddr = row.deviceAddr ?? '';
+                const functionName = row.functionName === null ? '-' : row.functionName;
+                const mappedName = row.mappedFriendlyName ?? '';
+                const match = row.noMatch ? 'No' : 'Yes';
+
+                return `
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color);">${escapeHtml(tableId)}</td>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color);">${escapeHtml(deviceId)}</td>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color); font-family: monospace;">${escapeHtml(deviceAddr)}</td>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color);">${escapeHtml(functionName)}</td>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color);">${escapeHtml(mappedName)}</td>
+                        <td style="padding: 8px; border-bottom: 1px solid var(--border-color);">${match}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        const gatewayMac = data.gatewayMac || 'Not configured';
+        summary.textContent = `Gateway: ${gatewayMac} • Rows: ${data.count || 0} • Discovery-only: ${data.discoveryOnlyCount || 0}`;
+    } catch (error) {
+        body.innerHTML = `<tr><td colspan="6" style="padding: 12px; text-align: center; color: #d32f2f;">${escapeHtml(error.message)}</td></tr>`;
+        summary.textContent = '';
+    }
+}
+
+function closeOneControlDeviceTable() {
+    document.getElementById('oneControlDeviceTableModal')?.classList.remove('show');
 }
 
 async function confirmEditInstance() {
@@ -1671,12 +1746,15 @@ window.onclick = function(event) {
     const addModal = document.getElementById('addInstanceModal');
     const editModal = document.getElementById('editInstanceModal');
     const removeModal = document.getElementById('confirmRemoveModal');
+    const oneControlTableModal = document.getElementById('oneControlDeviceTableModal');
     if (event.target === addModal) {
         closeAddInstanceDialog();
     } else if (event.target === editModal) {
         closeEditInstanceDialog();
     } else if (event.target === removeModal) {
         closeRemoveDialog();
+    } else if (event.target === oneControlTableModal) {
+        closeOneControlDeviceTable();
     }
 }
 

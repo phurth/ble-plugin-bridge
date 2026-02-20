@@ -13,6 +13,7 @@ import com.blemqttbridge.core.PollingPluginConfig
 import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.data.AppSettings
+import com.blemqttbridge.plugins.onecontrol.protocol.FunctionNameMapper
 import com.blemqttbridge.plugins.peplink.PeplinkPlugin
 import com.blemqttbridge.util.ConfigValidator
 import fi.iki.elonen.NanoHTTPD
@@ -125,6 +126,7 @@ class WebServerManager(
                 uri == "/api/status" -> serveStatus()
                 uri == "/api/config" -> serveConfig()
                 uri == "/api/plugins" -> servePlugins()
+                uri == "/api/plugins/onecontrol/device-table" && method == Method.GET -> serveOneControlDeviceTable()
                 uri == "/api/instances" && method == Method.GET -> serveInstances()
                 uri == "/api/instances/add" && method == Method.POST -> handleInstanceAdd(session)
                 uri == "/api/instances/remove" && method == Method.POST -> handleInstanceRemove(session)
@@ -468,6 +470,134 @@ class WebServerManager(
         }
         
         newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
+    }
+
+    private fun serveOneControlDeviceTable(): Response = runBlocking {
+        try {
+            val settings = AppSettings(context)
+            val gatewayMac = settings.oneControlGatewayMac.first()
+            val macCandidates = linkedSetOf<String>()
+
+            fun addMacCandidate(rawMac: String?) {
+                if (rawMac.isNullOrBlank()) return
+                val normalized = rawMac.replace(":", "").trim()
+                if (normalized.isBlank()) return
+                macCandidates.add(normalized)
+                macCandidates.add(normalized.uppercase())
+                macCandidates.add(normalized.lowercase())
+            }
+
+            addMacCandidate(gatewayMac)
+
+            // Support instance-based setups where AppSettings.oneControlGatewayMac may be blank
+            val allInstances = ServiceStateManager.getAllInstances(context)
+            allInstances.values
+                .filter { it.pluginType == "onecontrol" || it.pluginType == "onecontrol_v2" }
+                .forEach { addMacCandidate(it.deviceMac) }
+
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+
+            // Fallback: include any cache-backed MAC keys already present in SharedPreferences
+            prefs.all.keys.forEach { key ->
+                when {
+                    key.startsWith("metadata_") -> addMacCandidate(key.removePrefix("metadata_"))
+                    key.startsWith("discovery_") -> addMacCandidate(key.removePrefix("discovery_"))
+                }
+            }
+
+            val metadataByAddr = linkedMapOf<Int, JSONObject>()
+            var metadataEntries = 0
+
+            for (candidate in macCandidates) {
+                val metadataRaw = prefs.getString("metadata_$candidate", null) ?: continue
+                val metadataArray = JSONArray(metadataRaw)
+                for (i in 0 until metadataArray.length()) {
+                    val item = metadataArray.optJSONObject(i) ?: continue
+                    val deviceAddr = item.optInt("deviceAddr", -1)
+                    if (deviceAddr < 0) continue
+                    metadataByAddr[deviceAddr] = item
+                    metadataEntries++
+                }
+            }
+
+            val discoveredAddrs = linkedSetOf<Int>()
+            for (candidate in macCandidates) {
+                val discoveryRaw = prefs.getString("discovery_$candidate", null) ?: continue
+                val discoveryArray = JSONArray(discoveryRaw)
+                for (i in 0 until discoveryArray.length()) {
+                    val key = discoveryArray.optString(i, "")
+                    val keyHex = key.substringAfterLast("_", "")
+                    if (keyHex.length != 4 || !keyHex.all { ch -> ch.isDigit() || ch.lowercaseChar() in 'a'..'f' }) {
+                        continue
+                    }
+                    val tableId = keyHex.substring(0, 2).toIntOrNull(16) ?: continue
+                    val deviceId = keyHex.substring(2, 4).toIntOrNull(16) ?: continue
+                    discoveredAddrs.add((tableId shl 8) or deviceId)
+                }
+            }
+
+            val allAddrs = linkedSetOf<Int>()
+            allAddrs.addAll(metadataByAddr.keys)
+            allAddrs.addAll(discoveredAddrs)
+
+            val sortedAddrs = allAddrs.sortedWith(compareBy({ (it shr 8) and 0xFF }, { it and 0xFF }))
+            val rows = JSONArray()
+            var discoveryOnlyCount = 0
+
+            for (deviceAddr in sortedAddrs) {
+                val metadata = metadataByAddr[deviceAddr]
+                val tableId = metadata?.optInt("deviceTableId", (deviceAddr shr 8) and 0xFF) ?: ((deviceAddr shr 8) and 0xFF)
+                val deviceId = metadata?.optInt("deviceId", deviceAddr and 0xFF) ?: (deviceAddr and 0xFF)
+                val functionName = metadata?.optInt("functionName", -1) ?: -1
+                val functionInstance = metadata?.optInt("functionInstance", -1) ?: -1
+                val friendlyName = metadata?.optString("friendlyName", "") ?: ""
+                val hasMetadata = metadata != null
+                val knownFunction = hasMetadata && functionName >= 0 && FunctionNameMapper.isKnown(functionName)
+                val noMatch = !hasMetadata || !knownFunction || friendlyName.startsWith("Unknown")
+                val mappedName = when {
+                    hasMetadata && friendlyName.isNotBlank() -> friendlyName
+                    hasMetadata && functionName >= 0 && functionInstance >= 0 -> FunctionNameMapper.getFriendlyName(functionName, functionInstance)
+                    else -> "No metadata"
+                }
+
+                if (!hasMetadata) {
+                    discoveryOnlyCount++
+                }
+
+                rows.put(JSONObject().apply {
+                    put("tableId", tableId)
+                    put("deviceId", deviceId)
+                    put("deviceAddr", "0x%04X".format(deviceAddr and 0xFFFF))
+                    put("functionName", if (functionName >= 0) functionName else JSONObject.NULL)
+                    put("functionInstance", if (functionInstance >= 0) functionInstance else JSONObject.NULL)
+                    put("mappedFriendlyName", mappedName)
+                    put("noMatch", noMatch)
+                    put("hasMetadata", hasMetadata)
+                })
+            }
+
+            val responseJson = JSONObject().apply {
+                put("success", true)
+                put("gatewayMac", gatewayMac.ifBlank { macCandidates.firstOrNull()?.uppercase() ?: "Not configured" })
+                put("count", rows.length())
+                put("metadataEntries", metadataEntries)
+                put("discoveryOnlyCount", discoveryOnlyCount)
+                put("rows", rows)
+            }
+
+            newFixedLengthResponse(Response.Status.OK, "application/json", responseJson.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error serving OneControl device table", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                JSONObject().apply {
+                    put("success", false)
+                    put("error", e.message ?: "Unknown error")
+                    put("rows", JSONArray())
+                }.toString()
+            )
+        }
     }
 
     private fun serveDebugLog(): Response {

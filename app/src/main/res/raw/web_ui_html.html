@@ -133,6 +133,36 @@
             </div>
         </div>
 
+        <!-- OneControl Device Table Modal -->
+        <div id="oneControlDeviceTableModal" class="modal">
+            <div class="modal-content" style="max-width: 1100px; width: 95%;">
+                <h3>OneControl Device Table</h3>
+                <div class="modal-body">
+                    <div id="onecontrol-device-table-summary" style="margin-bottom: 10px; font-size: 13px; color: var(--text-secondary);"></div>
+                    <div style="max-height: 420px; overflow: auto; border: 1px solid var(--border-color); border-radius: 4px;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                            <thead>
+                                <tr style="background: var(--bg-secondary);">
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Table</th>
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Device</th>
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Addr</th>
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Function Name</th>
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Mapped Name</th>
+                                    <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Match?</th>
+                                </tr>
+                            </thead>
+                            <tbody id="onecontrol-device-table-body">
+                                <tr><td colspan="6" style="padding: 12px; text-align: center; color: var(--text-secondary);">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeOneControlDeviceTable()">Close</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Confirm Remove Modal -->
         <div id="confirmRemoveModal" class="modal">
             <div class="modal-content">

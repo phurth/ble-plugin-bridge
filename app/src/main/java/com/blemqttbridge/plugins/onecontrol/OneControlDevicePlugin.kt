@@ -355,6 +355,8 @@ class OneControlGattCallback(
     private var systemLockoutLevel: Int? = null
     private val LOCKOUT_CLEAR_THROTTLE_MS = 5000L
     private var lastLockoutClearRequestMs: Long = 0L
+    private val REFRESH_METADATA_DEDUP_WINDOW_MS = 2500L
+    private var lastRefreshMetadataRequestMs: Long = 0L
     
     // Characteristic references
     private var dataReadChar: BluetoothGattCharacteristic? = null
@@ -406,8 +408,11 @@ class OneControlGattCallback(
     private var metadataRequestInFlight = false
     private var metadataRetryScheduled = false
     private var metadataRetryCount = 0
-    private val MAX_METADATA_RETRIES = 1
-    private val METADATA_RETRY_DELAY_MS = 2000L
+    private val metadataSuccessByTable: MutableMap<Int, Int> = java.util.concurrent.ConcurrentHashMap()
+    private val metadataLearnedTableIds: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val metadataSuppressionLoggedTableIds: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val MAX_METADATA_RETRIES = 4
+    private val METADATA_RETRY_DELAY_MS = 1500L
     
     init {
         // Load cached metadata immediately so friendly names are available from first state update
@@ -445,6 +450,7 @@ class OneControlGattCallback(
                 
                 Log.i(TAG, "💾 Loaded $loadedCount cached metadata entries for ${device.address}")
                 mqttPublisher.logServiceEvent("💾 Loaded $loadedCount cached metadata entries for ${device.address}")
+                refreshMetadataLearnedTablesFromCache()
             } else {
                 Log.d(TAG, "💾 No cached metadata found for ${device.address}")
                 mqttPublisher.logServiceEvent("💾 No cached metadata found for ${device.address}")
@@ -530,6 +536,34 @@ class OneControlGattCallback(
             prefs.edit().putString(cacheKey, jsonArray.toString()).apply()
         } catch (e: Exception) {
             Log.e(TAG, "💾 Error saving discovery keys: ${e.message}", e)
+        }
+    }
+
+    private fun clearMetadataAndDiscoveryCacheForCurrentGateway(): Int {
+        val normalized = device.address.replace(":", "").trim()
+        if (normalized.isBlank()) return 0
+
+        return try {
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            val keysToRemove = prefs.all.keys.filter { key ->
+                val isRelevantPrefix = key.startsWith("metadata_") || key.startsWith("discovery_")
+                if (!isRelevantPrefix) return@filter false
+                val suffix = key.substringAfter('_', "")
+                suffix.equals(normalized, ignoreCase = true)
+            }
+
+            if (keysToRemove.isEmpty()) {
+                0
+            } else {
+                val editor = prefs.edit()
+                keysToRemove.forEach { editor.remove(it) }
+                editor.apply()
+                keysToRemove.size
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "💾 Error clearing metadata/discovery cache: ${e.message}", e)
+            mqttPublisher.logServiceEvent("💾 Error clearing metadata/discovery cache: ${e.message}")
+            0
         }
     }
 
@@ -651,6 +685,67 @@ class OneControlGattCallback(
         Log.i(TAG, "📢 Re-published discovery from cache for $republishedDevices device addresses")
         mqttPublisher.logServiceEvent("📢 Re-published discovery from cache for $republishedDevices device addresses")
     }
+
+    private fun collectKnownTableIds(): Set<Int> {
+        val tableIds = linkedSetOf<Int>()
+
+        val configured = deviceTableId.toInt() and 0xFF
+        if (configured != 0) {
+            tableIds.add(configured)
+        }
+
+        deviceMetadata.values.forEach { meta ->
+            val tableId = meta.deviceTableId and 0xFF
+            if (tableId != 0) {
+                tableIds.add(tableId)
+            }
+        }
+
+        haDiscoveryPublished.forEach { key ->
+            val hex = key.substringAfterLast("_", "")
+            if (hex.length == 4) {
+                val tableId = hex.substring(0, 2).toIntOrNull(16)
+                if (tableId != null && tableId != 0) {
+                    tableIds.add(tableId)
+                }
+            }
+        }
+
+        if (tableIds.isEmpty()) {
+            tableIds.add(DEFAULT_DEVICE_TABLE_ID.toInt() and 0xFF)
+        }
+
+        return tableIds
+    }
+
+    private fun refreshMetadataLearnedTablesFromCache() {
+        deviceMetadata.values.forEach { meta ->
+            val tableId = meta.deviceTableId and 0xFF
+            if (tableId != 0) {
+                metadataLearnedTableIds.add(tableId)
+            }
+        }
+    }
+
+    private fun hasEstablishedMetadataForTable(tableId: Int): Boolean {
+        val normalized = tableId and 0xFF
+        if (normalized == 0) return false
+        if (metadataLearnedTableIds.contains(normalized)) return true
+
+        val presentInCache = deviceMetadata.values.any { (it.deviceTableId and 0xFF) == normalized }
+        if (presentInCache) {
+            metadataLearnedTableIds.add(normalized)
+            return true
+        }
+        return false
+    }
+
+    private fun logMetadataSuppressionOnce(tableId: Int, source: String) {
+        if (metadataSuppressionLoggedTableIds.add(tableId)) {
+            Log.i(TAG, "🔍 Metadata already established for tableId=$tableId - suppressing auto-requests ($source)")
+            mqttPublisher.logServiceEvent("🔍 Metadata established table=$tableId - suppressing auto-requests ($source)")
+        }
+    }
     
     /**
      * Get friendly name for a device, or fallback to hex ID
@@ -762,6 +857,7 @@ class OneControlGattCallback(
 
     // Track pending commands by ID to match responses
     private val pendingCommands = mutableMapOf<Int, Int>()
+    private val pendingMetadataTableByCommandId = mutableMapOf<Int, Int>()
 
     // HVAC zone state tracking - needed to merge partial command updates
     // Key: "tableId:deviceId", Value: last known HVAC state
@@ -1461,14 +1557,8 @@ class OneControlGattCallback(
         // Send GetDevicesMetadata to get friendly names - ALWAYS send, no guards
         Log.i(TAG, "🔍 About to schedule GetDevicesMetadata timer for 1500ms")
         val timerPosted = handler.postDelayed({
-            Log.i(TAG, "🔍 Timer fired: metadataRequested=$metadataRequested, isConnected=$isConnected, isAuthenticated=$isAuthenticated")
-            if (!metadataRequested) {
-                metadataRequested = true
-                Log.i(TAG, "🔍 Sending GetDevicesMetadata for friendly names (from timer)")
-                sendGetDevicesMetadataCommand()
-            } else {
-                Log.i(TAG, "🔍 metadataRequested already true - skipping (was sent from elsewhere)")
-            }
+            Log.i(TAG, "🔍 Timer fired: isConnected=$isConnected, isAuthenticated=$isAuthenticated, requestedTables=${metadataRequestedTableIds.sorted()}")
+            sendGetDevicesMetadataCommand(reason = "startup-timer")
         }, 1500)
         Log.i(TAG, "🔍 Timer scheduled: result=$timerPosted")
         
@@ -1839,11 +1929,12 @@ class OneControlGattCallback(
                 mqttPublisher.updatePluginStatus(instanceId, true, true, true)
             }
             
-            // Trigger GetDevicesMetadata for friendly names
-            if (!metadataRequested) {
-                metadataRequested = true
-                Log.i(TAG, "🔍 Triggering GetDevicesMetadata from GatewayInformation")
-                handler.postDelayed({ sendGetDevicesMetadataCommand() }, 500)
+            val tableIdInt = deviceTableId.toInt() and 0xFF
+            if (hasEstablishedMetadataForTable(tableIdInt)) {
+                logMetadataSuppressionOnce(tableIdInt, "gateway-info")
+            } else {
+                Log.i(TAG, "🔍 Triggering GetDevicesMetadata from GatewayInformation tableId=$tableIdInt")
+                handler.postDelayed({ sendGetDevicesMetadataCommand(tableIdInt, reason = "gateway-info") }, 500)
             }
         }
         
@@ -3197,6 +3288,7 @@ class OneControlGattCallback(
         val commandId = (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
         val responseType = data[3].toInt() and 0xFF
         val commandType = pendingCommands[commandId]
+        val metadataTableId = pendingMetadataTableByCommandId[commandId]
         
         val isSuccess = responseType == 0x01 || responseType == 0x81
         val isComplete = responseType == 0x81 || responseType == 0x82
@@ -3221,7 +3313,12 @@ class OneControlGattCallback(
             return
         }
         
-        if (isComplete) pendingCommands.remove(commandId)
+        if (isComplete) {
+            pendingCommands.remove(commandId)
+            if (commandType == 0x02) {
+                pendingMetadataTableByCommandId.remove(commandId)
+            }
+        }
         if (commandType == 0x02 && isComplete) {
             metadataRequestInFlight = false
         }
@@ -3232,8 +3329,18 @@ class OneControlGattCallback(
             Log.w(TAG, "📦 Command error: cmdType=$commandType, errorCode=0x${errorCode.toString(16)}")
             mqttPublisher.logServiceEvent("📦 Command error: cmdType=$commandType, errorCode=0x${errorCode.toString(16)}")
             if (commandType == 0x02) {
-                // GetDevicesMetadata rejected by gateway — retry with backoff
-                retryGetDevicesMetadata()
+                if (metadataTableId != null && hasEstablishedMetadataForTable(metadataTableId)) {
+                    Log.i(TAG, "📦 Metadata already established for tableId=$metadataTableId - skipping retry after error")
+                    mqttPublisher.logServiceEvent("📦 Metadata already established table=$metadataTableId - suppressing retry")
+                } else {
+                    metadataTableId?.let {
+                        metadataRequestedTableIds.remove(it)
+                        Log.w(TAG, "📦 Clearing metadata requested-table guard after error: tableId=$it")
+                        mqttPublisher.logServiceEvent("📦 Metadata table guard cleared after error: tableId=$it")
+                    }
+                    // GetDevicesMetadata rejected by gateway — retry with backoff
+                    retryGetDevicesMetadata()
+                }
             }
             return
         }
@@ -3245,7 +3352,7 @@ class OneControlGattCallback(
         
         when (commandType) {
             0x01 -> handleGetDevicesResponse(data)
-            0x02 -> handleGetDevicesMetadataResponse(data)
+            0x02 -> handleGetDevicesMetadataResponse(data, metadataTableId)
         }
     }
     
@@ -3268,9 +3375,38 @@ class OneControlGattCallback(
      * Handle GetDevicesMetadata response - parses function names
      * Format: [0x02][cmdIdLo][cmdIdHi][respType][tableId][startId][count][entries]
      */
-    private fun handleGetDevicesMetadataResponse(data: ByteArray) {
+    private fun handleGetDevicesMetadataResponse(data: ByteArray, metadataTableIdHint: Int? = null) {
         if (data.size < 8) {
             Log.w(TAG, "📋 Metadata response too short: ${data.size}")
+            return
+        }
+
+        val responseType = data[3].toInt() and 0xFF
+
+        // Official app handles a completed response variant for GetDevicesMetadata:
+        // extended data = [crc32(4 bytes)][deviceCount(1 byte)]
+        // Raw frame format: [0x02][cmdIdLo][cmdIdHi][0x81][crc0][crc1][crc2][crc3][count]
+        if (responseType == 0x81 && data.size == 9) {
+            val crc32 = (data[4].toLong() and 0xFFL) or
+                ((data[5].toLong() and 0xFFL) shl 8) or
+                ((data[6].toLong() and 0xFFL) shl 16) or
+                ((data[7].toLong() and 0xFFL) shl 24)
+            val expectedCount = data[8].toInt() and 0xFF
+            val tableHint = metadataTableIdHint ?: (deviceTableId.toInt() and 0xFF).takeIf { it != 0 }
+            val parsedCount = tableHint?.let { metadataSuccessByTable[it] ?: 0 } ?: deviceMetadata.size
+
+            Log.i(
+                TAG,
+                "📋 Metadata completed: table=${tableHint ?: "unknown"}, expected=$expectedCount, parsed=$parsedCount, crc=0x${crc32.toString(16).uppercase().padStart(8, '0')}"
+            )
+            mqttPublisher.logServiceEvent(
+                "📋 Metadata completed table=${tableHint ?: "unknown"} expected=$expectedCount parsed=$parsedCount crc=0x${crc32.toString(16).uppercase().padStart(8, '0')}"
+            )
+
+            if (tableHint != null && expectedCount > 0 && parsedCount >= expectedCount) {
+                metadataLearnedTableIds.add(tableHint)
+                metadataRequestedTableIds.add(tableHint)
+            }
             return
         }
         
@@ -3368,6 +3504,18 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📋 Parsed $index entries, ${deviceMetadata.size} total")
         mqttPublisher.logServiceEvent("📋 Parsed $index entries, ${deviceMetadata.size} total")
+
+        val cumulative = (metadataSuccessByTable[tableId] ?: 0) + index
+        metadataSuccessByTable[tableId] = cumulative
+        Log.i(TAG, "📋 Metadata table $tableId parsed entries=$index cumulative=$cumulative requestedTables=${metadataRequestedTableIds.sorted()}")
+        mqttPublisher.logServiceEvent("📋 Metadata table $tableId parsed=$index cumulative=$cumulative")
+
+        if (deviceMetadata.values.any { (it.deviceTableId and 0xFF) == tableId }) {
+            metadataLearnedTableIds.add(tableId)
+            metadataRequestedTableIds.add(tableId)
+            Log.i(TAG, "📋 Metadata established for tableId=$tableId - future auto-requests suppressed")
+            mqttPublisher.logServiceEvent("📋 Metadata established for table=$tableId (auto-requests suppressed)")
+        }
         
         // Save metadata to persistent cache
         saveMetadataToCache()
@@ -3703,8 +3851,19 @@ class OneControlGattCallback(
     /**
      * Send GetDevicesMetadata command to get function names
      */
-    private fun sendGetDevicesMetadataCommand() {
-        Log.i(TAG, "🔍 sendGetDevicesMetadataCommand()")
+    private fun sendGetDevicesMetadataCommand(targetTableId: Int? = null, reason: String = "default") {
+        Log.i(TAG, "🔍 sendGetDevicesMetadataCommand(reason=$reason, targetTableId=${targetTableId ?: "auto"})")
+
+        val isManualRefresh = reason == "manual-refresh"
+
+        // For automatic paths, wait until GatewayInformation provides a valid table id.
+        // This avoids premature metadata commands (often table 0x08 fallback) on gateways
+        // that initialize more slowly and reject early requests.
+        if (!isManualRefresh && !gatewayInfoReceived) {
+            Log.i(TAG, "🔍 Skipping metadata request (reason=$reason) - waiting for GatewayInformation")
+            mqttPublisher.logServiceEvent("🔍 Metadata deferred (reason=$reason) - waiting for GatewayInformation")
+            return
+        }
 
         if (metadataRequestInFlight) {
             Log.i(TAG, "🔍 Metadata request already in-flight - skipping duplicate send")
@@ -3725,18 +3884,47 @@ class OneControlGattCallback(
         
         try {
             val commandId = getNextCommandId()
-            val tableId = if (deviceTableId != 0x00.toByte()) deviceTableId else DEFAULT_DEVICE_TABLE_ID
-            val command = encodeGetDevicesMetadataCommand(commandId, tableId)
+            val tableIdInt = when {
+                targetTableId != null -> targetTableId and 0xFF
+                deviceTableId != 0x00.toByte() -> deviceTableId.toInt() and 0xFF
+                else -> DEFAULT_DEVICE_TABLE_ID.toInt() and 0xFF
+            }
+
+            if (tableIdInt == 0) {
+                Log.w(TAG, "🔍 Skipping metadata request with invalid tableId=0 (reason=$reason)")
+                return
+            }
+
+            if (!isManualRefresh && !gatewayInfoReceived) {
+                Log.i(TAG, "🔍 Skipping metadata request (reason=$reason) - gateway table not ready")
+                mqttPublisher.logServiceEvent("🔍 Metadata deferred (reason=$reason) - gateway table not ready")
+                return
+            }
+
+            if (!isManualRefresh && hasEstablishedMetadataForTable(tableIdInt)) {
+                metadataRequestedTableIds.add(tableIdInt)
+                logMetadataSuppressionOnce(tableIdInt, reason)
+                return
+            }
+
+            if (metadataRequestedTableIds.contains(tableIdInt)) {
+                Log.i(TAG, "🔍 Metadata already requested for tableId=$tableIdInt, skipping (reason=$reason)")
+                mqttPublisher.logServiceEvent("🔍 Metadata already requested table=$tableIdInt (reason=$reason)")
+                return
+            }
+
+            val tableIdByte = tableIdInt.toByte()
+            val command = encodeGetDevicesMetadataCommand(commandId, tableIdByte)
             
             // Track pending command
             pendingCommands[commandId.toInt()] = 0x02
+            pendingMetadataTableByCommandId[commandId.toInt()] = tableIdInt
             metadataRequestInFlight = true
             
-            Log.i(TAG, "🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
-            mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
+            Log.i(TAG, "🔍 GetDevicesMetadata: cmdId=$commandId, tableId=$tableIdInt, reason=$reason")
+            mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata: cmdId=$commandId, tableId=$tableIdInt, reason=$reason")
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
-            val tableIdInt = tableId.toInt() and 0xFF
             metadataRequestedTableIds.add(tableIdInt)
             Log.i(TAG, "🔍 Encoded: ${encoded.joinToString(" ") { "%02X".format(it) }}")
             
@@ -3748,8 +3936,8 @@ class OneControlGattCallback(
                 metadataRequestInFlight = false
             }
             
-            Log.i(TAG, "🔍 Sent GetDevicesMetadata: result=$result")
-            mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata: result=$result")
+            Log.i(TAG, "🔍 Sent GetDevicesMetadata: tableId=$tableIdInt, result=$result")
+            mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata: tableId=$tableIdInt, result=$result")
         } catch (e: Exception) {
             metadataRequestInFlight = false
             Log.e(TAG, "🔍 Failed: ${e.message}", e)
@@ -3764,31 +3952,11 @@ class OneControlGattCallback(
     private fun ensureMetadataRequestedForTable(tableId: Int) {
         val normalized = tableId and 0xFF
         if (normalized == 0) return
+        if (hasEstablishedMetadataForTable(normalized)) return
         if (metadataRequestedTableIds.contains(normalized)) return
-        // If the main metadata request path is already active/pending, don't race it
-        if (metadataRequested || metadataRequestInFlight) return
-        if (!isConnected || currentGatt == null) return
-        val writeChar = dataWriteChar ?: return
         Log.i(TAG, "🔍 Requesting metadata for observed tableId=0x${normalized.toString(16)}")
         mqttPublisher.logServiceEvent("🔍 Requesting metadata for observed tableId=0x${normalized.toString(16)}")
-        try {
-            val commandId = getNextCommandId()
-            val command = encodeGetDevicesMetadataCommand(commandId, normalized.toByte())
-            pendingCommands[commandId.toInt()] = 0x02
-
-            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
-            metadataRequestedTableIds.add(normalized)
-            writeChar.value = encoded
-            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            val result = currentGatt?.writeCharacteristic(writeChar)
-            if (result != true) {
-                metadataRequestedTableIds.remove(normalized)
-            }
-            Log.i(TAG, "🔍 Sent GetDevicesMetadata (observed table): tableId=0x${normalized.toString(16)}, result=$result")
-            mqttPublisher.logServiceEvent("🔍 Sent GetDevicesMetadata (observed table): tableId=0x${normalized.toString(16)}, result=$result")
-        } catch (e: Exception) {
-            Log.e(TAG, "🔍 Failed to send GetDevicesMetadata (observed table): ${e.message}", e)
-        }
+        sendGetDevicesMetadataCommand(normalized, reason = "observed-table")
     }
     
     // ========== COMMAND HANDLING ==========
@@ -3843,22 +4011,40 @@ class OneControlGattCallback(
             return Result.failure(Exception("Not connected or authenticated"))
         }
         
-        // Reset ONLY the metadata request guards — keep haDiscoveryPublished and
-        // deviceMetadata intact so incoming status events don't re-publish with hex names
+        val removedCacheKeys = clearMetadataAndDiscoveryCacheForCurrentGateway()
+
+        // True refresh: clear in-memory metadata/discovery state so rebuilt data
+        // comes only from fresh gateway responses.
+        deviceMetadata.clear()
+        haDiscoveryPublished.clear()
         metadataRequested = false
         metadataRequestedTableIds.clear()
+        metadataLearnedTableIds.clear()
+        metadataSuppressionLoggedTableIds.clear()
+        metadataSuccessByTable.clear()
         metadataRequestInFlight = false
         metadataRetryScheduled = false
         
-        Log.i(TAG, "🔄 Reset metadata guards, re-sending GetDevicesMetadata")
-        mqttPublisher.logServiceEvent("🔄 Reset metadata guards, re-sending GetDevicesMetadata")
+        Log.i(TAG, "🔄 Cleared OneControl cache (keys removed=$removedCacheKeys), rebuilding metadata")
+        mqttPublisher.logServiceEvent("🔄 Cleared OneControl cache (keys removed=$removedCacheKeys), rebuilding metadata")
         
-        // Re-send metadata request — when the response arrives,
-        // handleGetDevicesMetadataResponse() will update deviceMetadata and call
-        // republishDiscoveryWithFriendlyName() for all already-published entities
+        // Re-send inventory + metadata requests.
         metadataRetryCount = 0  // Reset retry count for manual refresh
-        sendGetDevicesMetadataCommand()
-        metadataRequested = true
+        sendGetDevicesCommand()
+
+        val configuredTableId = deviceTableId.toInt() and 0xFF
+        val tableIds = if (configuredTableId != 0) {
+            listOf(configuredTableId)
+        } else {
+            listOf(DEFAULT_DEVICE_TABLE_ID.toInt() and 0xFF)
+        }
+        Log.i(TAG, "🔄 Refresh metadata table targets: $tableIds")
+        mqttPublisher.logServiceEvent("🔄 Refresh metadata tables: $tableIds")
+        tableIds.forEachIndexed { idx, tableId ->
+            handler.postDelayed({
+                sendGetDevicesMetadataCommand(tableId, reason = "manual-refresh")
+            }, idx * 350L)
+        }
         
         return Result.success(Unit)
     }
@@ -3952,14 +4138,27 @@ class OneControlGattCallback(
             mqttPublisher.logServiceEvent("🔍 GetDevicesMetadata failed after $MAX_METADATA_RETRIES retries")
             return
         }
-        val delayMs = METADATA_RETRY_DELAY_MS * metadataRetryCount
+        val delayMultiplier = 1L shl (metadataRetryCount - 1)
+        val delayMs = METADATA_RETRY_DELAY_MS * delayMultiplier
         Log.i(TAG, "🔍 Retrying GetDevicesMetadata (attempt $metadataRetryCount/$MAX_METADATA_RETRIES) in ${delayMs}ms")
         mqttPublisher.logServiceEvent("🔍 Retrying GetDevicesMetadata in ${delayMs}ms (attempt $metadataRetryCount)")
         metadataRetryScheduled = true
         handler.postDelayed({
             metadataRetryScheduled = false
             if (isConnected && isAuthenticated && currentGatt != null) {
-                sendGetDevicesMetadataCommand()
+                val knownTables = collectKnownTableIds()
+                    .filterNot { hasEstablishedMetadataForTable(it) }
+                    .sorted()
+                if (knownTables.isEmpty()) {
+                    Log.i(TAG, "🔍 Retry skipped — metadata already established for known tables")
+                    mqttPublisher.logServiceEvent("🔍 Retry skipped - metadata already established")
+                    return@postDelayed
+                }
+                knownTables.forEachIndexed { idx, tableId ->
+                    handler.postDelayed({
+                        sendGetDevicesMetadataCommand(tableId, reason = "retry")
+                    }, idx * 300L)
+                }
             } else {
                 Log.w(TAG, "🔍 Retry skipped — not connected")
             }
@@ -3980,6 +4179,14 @@ class OneControlGattCallback(
         
         // Handle special commands that don't follow the {type}/{tableId}/{deviceId} pattern
         if (commandTopic.endsWith("/command/refresh_metadata")) {
+            val now = System.currentTimeMillis()
+            val elapsed = now - lastRefreshMetadataRequestMs
+            if (elapsed in 0 until REFRESH_METADATA_DEDUP_WINDOW_MS) {
+                Log.w(TAG, "🔄 Ignoring duplicate refresh_metadata command (${elapsed}ms since last)")
+                mqttPublisher.logServiceEvent("🔄 Ignoring duplicate refresh_metadata command (${elapsed}ms)")
+                return Result.success(Unit)
+            }
+            lastRefreshMetadataRequestMs = now
             return refreshMetadata()
         }
         if (commandTopic.endsWith("/command/clear_lockout")) {
@@ -5160,10 +5367,12 @@ class OneControlGattCallback(
         metadataRequestedTableIds.clear()
         metadataRequestInFlight = false
         metadataRetryScheduled = false
+        metadataSuppressionLoggedTableIds.clear()
         allNotificationsSubscribed = false
         notificationSubscriptionsPending = 0
         metadataRetryCount = 0
         pendingCommands.clear()
+        pendingMetadataTableByCommandId.clear()
         nextCommandId = 1u
     }
     

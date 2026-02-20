@@ -100,6 +100,8 @@ class MqttOutputPlugin(
     private var _topicPrefix: String = "homeassistant"
     private var _discoveryFormat: String = "homeassistant"
     private val commandCallbacks = mutableMapOf<String, (String, String) -> Unit>()
+    private val activeCommandSubscriptions = mutableSetOf<String>()
+    private val pendingCommandSubscriptions = mutableSetOf<String>()
     private var connectionStatusListener: OutputPluginInterface.ConnectionStatusListener? = null
 
     override fun getTopicPrefix(): String = _topicPrefix
@@ -194,6 +196,10 @@ class MqttOutputPlugin(
                 setCallback(object : MqttCallbackExtended {
                     override fun connectionLost(cause: Throwable?) {
                         Log.w(TAG, "❌ MQTT connection lost", cause)
+                        synchronized(activeCommandSubscriptions) {
+                            activeCommandSubscriptions.clear()
+                            pendingCommandSubscriptions.clear()
+                        }
                         connectionStatusListener?.onConnectionStatusChanged(false)
                         Log.i(TAG, "⏳ Automatic reconnect will be attempted...")
                     }
@@ -351,6 +357,30 @@ class MqttOutputPlugin(
             }
             commandCallbacks[fullPattern] = callback
 
+            val alreadyActive = synchronized(activeCommandSubscriptions) {
+                activeCommandSubscriptions.contains(fullPattern)
+            }
+            if (alreadyActive) {
+                Log.i(TAG, "✅ Subscription already active, skipping duplicate subscribe: $fullPattern")
+                if (shouldLogInboundCommand(fullPattern)) {
+                    appendMqttServiceEvent("✅ MQTT SUB already active: $fullPattern")
+                }
+                continuation.resume(Unit)
+                return@suspendCancellableCoroutine
+            }
+
+            val alreadyPending = synchronized(activeCommandSubscriptions) {
+                pendingCommandSubscriptions.contains(fullPattern)
+            }
+            if (alreadyPending) {
+                Log.i(TAG, "⏳ Subscription already pending, skipping duplicate subscribe: $fullPattern")
+                if (shouldLogInboundCommand(fullPattern)) {
+                    appendMqttServiceEvent("⏳ MQTT SUB already pending: $fullPattern")
+                }
+                continuation.resume(Unit)
+                return@suspendCancellableCoroutine
+            }
+
             val client = mqttClient
             if (client == null || !client.isConnected) {
                 Log.e(TAG, "❌ Cannot subscribe - mqttClient is null or not connected!")
@@ -359,8 +389,15 @@ class MqttOutputPlugin(
             }
 
             try {
+                synchronized(activeCommandSubscriptions) {
+                    pendingCommandSubscriptions.add(fullPattern)
+                }
                 client.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        synchronized(activeCommandSubscriptions) {
+                            pendingCommandSubscriptions.remove(fullPattern)
+                            activeCommandSubscriptions.add(fullPattern)
+                        }
                         Log.i(TAG, "✅ Subscribed to: $fullPattern")
                         if (shouldLogInboundCommand(fullPattern)) {
                             appendMqttServiceEvent("✅ MQTT SUB ok: $fullPattern")
@@ -372,6 +409,10 @@ class MqttOutputPlugin(
 
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
                         Log.e(TAG, "❌ Subscribe failed: $fullPattern", exception)
+                        synchronized(activeCommandSubscriptions) {
+                            pendingCommandSubscriptions.remove(fullPattern)
+                            activeCommandSubscriptions.remove(fullPattern)
+                        }
                         if (shouldLogInboundCommand(fullPattern)) {
                             appendMqttServiceEvent("❌ MQTT SUB failed: $fullPattern (${exception?.message ?: "unknown"})")
                         }
@@ -384,6 +425,9 @@ class MqttOutputPlugin(
                 })
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Exception during subscribe call: $fullPattern", e)
+                synchronized(activeCommandSubscriptions) {
+                    pendingCommandSubscriptions.remove(fullPattern)
+                }
                 if (continuation.isActive) {
                     continuation.resumeWithException(e)
                 }
@@ -392,6 +436,10 @@ class MqttOutputPlugin(
 
             continuation.invokeOnCancellation {
                 try {
+                    synchronized(activeCommandSubscriptions) {
+                        pendingCommandSubscriptions.remove(fullPattern)
+                        activeCommandSubscriptions.remove(fullPattern)
+                    }
                     mqttClient?.unsubscribe(fullPattern)
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to unsubscribe on cancellation: $fullPattern", e)
@@ -971,6 +1019,10 @@ class MqttOutputPlugin(
             mqttClient?.close()
             mqttClient = null
             commandCallbacks.clear()
+            synchronized(activeCommandSubscriptions) {
+                activeCommandSubscriptions.clear()
+                pendingCommandSubscriptions.clear()
+            }
             connectionStatusListener?.onConnectionStatusChanged(false)
         } catch (e: Exception) {
             Log.e(TAG, "Error disconnecting MQTT", e)
@@ -1065,9 +1117,24 @@ class MqttOutputPlugin(
 
         Log.i(TAG, "Resubscribing to ${commandCallbacks.size} topic(s)")
         commandCallbacks.keys.forEach { topic ->
+            val skipResubscribe = synchronized(activeCommandSubscriptions) {
+                activeCommandSubscriptions.contains(topic)
+                    || pendingCommandSubscriptions.contains(topic)
+            }
+            if (skipResubscribe) {
+                Log.d(TAG, "Skipping resubscribe for already active topic: $topic")
+                return@forEach
+            }
             try {
+                synchronized(activeCommandSubscriptions) {
+                    pendingCommandSubscriptions.add(topic)
+                }
                 client.subscribe(topic, QOS, null, object : IMqttActionListener {
                     override fun onSuccess(asyncActionToken: IMqttToken?) {
+                        synchronized(activeCommandSubscriptions) {
+                            pendingCommandSubscriptions.remove(topic)
+                            activeCommandSubscriptions.add(topic)
+                        }
                         Log.i(TAG, "Resubscribed to: $topic")
                         if (shouldLogInboundCommand(topic)) {
                             appendMqttServiceEvent("🔄 MQTT RESUB ok: $topic")
@@ -1075,6 +1142,10 @@ class MqttOutputPlugin(
                     }
 
                     override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                        synchronized(activeCommandSubscriptions) {
+                            pendingCommandSubscriptions.remove(topic)
+                            activeCommandSubscriptions.remove(topic)
+                        }
                         Log.e(TAG, "Failed to resubscribe to: $topic", exception)
                         if (shouldLogInboundCommand(topic)) {
                             appendMqttServiceEvent("❌ MQTT RESUB failed: $topic (${exception?.message ?: "unknown"})")
@@ -1082,6 +1153,9 @@ class MqttOutputPlugin(
                     }
                 })
             } catch (e: Exception) {
+                synchronized(activeCommandSubscriptions) {
+                    pendingCommandSubscriptions.remove(topic)
+                }
                 Log.e(TAG, "Error resubscribing to $topic", e)
                 if (shouldLogInboundCommand(topic)) {
                     appendMqttServiceEvent("❌ MQTT RESUB exception: $topic (${e.message ?: "unknown"})")

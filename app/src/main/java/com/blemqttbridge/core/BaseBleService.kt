@@ -22,10 +22,13 @@ import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
 import com.blemqttbridge.plugins.mopeka.MopekaDevicePlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
+import com.blemqttbridge.plugins.onecontrol.protocol.FunctionNameMapper
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.utils.AndroidTvHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
@@ -63,6 +66,7 @@ class BaseBleService : Service() {
         // BLE timing constants
         private const val BLE_RECONNECT_DELAY_MS = 2000L
         private const val GATT_SETTLE_DELAY_MS = 500L
+        private const val START_SCAN_DEBOUNCE_MS = 3000L
         
         const val EXTRA_PLUGIN_ID = "plugin_id"
         
@@ -155,6 +159,8 @@ class BaseBleService : Service() {
     @Volatile
     private var isInitializing = false
     private val initializationLock = Any()
+    @Volatile
+    private var lastStartScanIntentAtMs: Long = 0L
     
     // Service debug logging (separate from BLE trace)
     private val serviceLogBuffer = ArrayDeque<String>()
@@ -312,6 +318,9 @@ class BaseBleService : Service() {
         
         override fun updatePluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
             val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
+            val previous = _pluginStatuses.value[pluginId]
+            val wasReady = previous?.connected == true && previous.authenticated
+            val isReady = connected && authenticated
             val newStatuses = _pluginStatuses.value.toMutableMap()
             newStatuses[pluginId] = status
             
@@ -327,7 +336,7 @@ class BaseBleService : Service() {
             }
             
             _pluginStatuses.value = newStatuses
-            if (connected && authenticated) {
+            if (!wasReady && isReady) {
                 appendServiceLog("Plugin ready: $pluginId (connected & authenticated)")
             }
         }
@@ -338,12 +347,15 @@ class BaseBleService : Service() {
          */
         fun updatePollingPluginStatus(pluginId: String, connected: Boolean, authenticated: Boolean, dataHealthy: Boolean) {
             val status = PluginStatus(pluginId, connected, authenticated, dataHealthy)
+            val previous = _pollingPluginStatuses.value[pluginId]
+            val wasReady = previous?.connected == true && previous.authenticated == true && previous.dataHealthy == true
+            val isReady = connected && authenticated && dataHealthy
             val newStatuses = _pollingPluginStatuses.value.toMutableMap()
             newStatuses[pluginId] = status
             
             Log.d(TAG, "📊 Updated polling plugin status: $pluginId - connected=$connected, authenticated=$authenticated, dataHealthy=$dataHealthy")
             _pollingPluginStatuses.value = newStatuses
-            if (connected && authenticated && dataHealthy) {
+            if (!wasReady && isReady) {
                 appendServiceLog("Polling plugin ready: $pluginId")
             }
         }
@@ -582,6 +594,14 @@ class BaseBleService : Service() {
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
+                val now = System.currentTimeMillis()
+                if (now - lastStartScanIntentAtMs < START_SCAN_DEBOUNCE_MS) {
+                    Log.i(TAG, "⚙️ Skipping ACTION_START_SCAN - debounced duplicate intent")
+                    appendServiceLog("Skipping duplicate START_SCAN (debounced)")
+                    return START_STICKY
+                }
+                lastStartScanIntentAtMs = now
+
                 synchronized(initializationLock) {
                     if (isInitializing) {
                         Log.i(TAG, "⚙️ Skipping ACTION_START_SCAN - already initializing")
@@ -2192,6 +2212,120 @@ class BaseBleService : Service() {
             appendServiceLog("Polling plugin ready: $pluginId")
         }
     }
+
+    private fun getOneControlDeviceTableDebugLines(): List<String> {
+        return try {
+            val lines = mutableListOf<String>()
+            lines.add("OneControl Device Table Snapshot:")
+
+            val settings = AppSettings(applicationContext)
+            val gatewayMac = runBlocking { settings.oneControlGatewayMac.first() }
+
+            val macCandidates = linkedSetOf<String>()
+            fun addMacCandidate(rawMac: String?) {
+                if (rawMac.isNullOrBlank()) return
+                val normalized = rawMac.replace(":", "").trim()
+                if (normalized.isBlank()) return
+                macCandidates.add(normalized)
+                macCandidates.add(normalized.uppercase())
+                macCandidates.add(normalized.lowercase())
+            }
+
+            addMacCandidate(gatewayMac)
+            ServiceStateManager.getAllInstances(applicationContext)
+                .values
+                .filter { it.pluginType == "onecontrol" || it.pluginType == "onecontrol_v2" }
+                .forEach { addMacCandidate(it.deviceMac) }
+
+            val prefs = applicationContext.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            prefs.all.keys.forEach { key ->
+                when {
+                    key.startsWith("metadata_") -> addMacCandidate(key.removePrefix("metadata_"))
+                    key.startsWith("discovery_") -> addMacCandidate(key.removePrefix("discovery_"))
+                }
+            }
+
+            val metadataByAddr = linkedMapOf<Int, JSONObject>()
+            val discoveryAddrs = linkedSetOf<Int>()
+
+            macCandidates.forEach { candidate ->
+                val metadataRaw = prefs.getString("metadata_$candidate", null)
+                if (!metadataRaw.isNullOrBlank()) {
+                    val metadataArray = JSONArray(metadataRaw)
+                    for (i in 0 until metadataArray.length()) {
+                        val item = metadataArray.optJSONObject(i) ?: continue
+                        val deviceAddr = item.optInt("deviceAddr", -1)
+                        if (deviceAddr < 0) continue
+                        metadataByAddr[deviceAddr] = item
+                    }
+                }
+
+                val discoveryRaw = prefs.getString("discovery_$candidate", null)
+                if (!discoveryRaw.isNullOrBlank()) {
+                    val discoveryArray = JSONArray(discoveryRaw)
+                    for (i in 0 until discoveryArray.length()) {
+                        val key = discoveryArray.optString(i, "")
+                        val keyHex = key.substringAfterLast("_", "")
+                        if (keyHex.length != 4 || !keyHex.all { ch -> ch.isDigit() || ch.lowercaseChar() in 'a'..'f' }) continue
+                        val tableId = keyHex.substring(0, 2).toIntOrNull(16) ?: continue
+                        val deviceId = keyHex.substring(2, 4).toIntOrNull(16) ?: continue
+                        discoveryAddrs.add((tableId shl 8) or deviceId)
+                    }
+                }
+            }
+
+            val allAddrs = linkedSetOf<Int>()
+            allAddrs.addAll(metadataByAddr.keys)
+            allAddrs.addAll(discoveryAddrs)
+            val sortedAddrs = allAddrs.sortedWith(compareBy({ (it shr 8) and 0xFF }, { it and 0xFF }))
+
+            val gatewayDisplay = gatewayMac.ifBlank { macCandidates.firstOrNull()?.uppercase() ?: "Not configured" }
+            lines.add("  Gateway: $gatewayDisplay")
+            lines.add("  Rows: ${sortedAddrs.size}")
+
+            if (sortedAddrs.isEmpty()) {
+                lines.add("  (No OneControl devices observed in cache)")
+                return lines
+            }
+
+            sortedAddrs.forEach { deviceAddr ->
+                val metadata = metadataByAddr[deviceAddr]
+                val tableId = metadata?.optInt("deviceTableId", (deviceAddr shr 8) and 0xFF) ?: ((deviceAddr shr 8) and 0xFF)
+                val deviceId = metadata?.optInt("deviceId", deviceAddr and 0xFF) ?: (deviceAddr and 0xFF)
+                val functionName = metadata?.optInt("functionName", -1) ?: -1
+                val functionInstance = metadata?.optInt("functionInstance", -1) ?: -1
+                val friendlyName = metadata?.optString("friendlyName", "") ?: ""
+                val hasMetadata = metadata != null
+                val knownFunction = hasMetadata && functionName >= 0 && FunctionNameMapper.isKnown(functionName)
+                val noMatch = !hasMetadata || !knownFunction || friendlyName.startsWith("Unknown")
+                val mappedName = when {
+                    hasMetadata && friendlyName.isNotBlank() -> friendlyName
+                    hasMetadata && functionName >= 0 && functionInstance >= 0 -> FunctionNameMapper.getFriendlyName(functionName, functionInstance)
+                    else -> "No metadata"
+                }
+                val functionNameDisplay = if (functionName >= 0) functionName.toString() else "-"
+                val functionInstanceDisplay = if (functionInstance >= 0) functionInstance.toString() else "-"
+                val matchDisplay = if (noMatch) "No" else "Yes"
+
+                lines.add(
+                    "  table=$tableId device=$deviceId addr=0x%04X fn=%s inst=%s mapped=\"%s\" match=%s".format(
+                        deviceAddr and 0xFFFF,
+                        functionNameDisplay,
+                        functionInstanceDisplay,
+                        mappedName,
+                        matchDisplay
+                    )
+                )
+            }
+
+            lines
+        } catch (e: Exception) {
+            listOf(
+                "OneControl Device Table Snapshot:",
+                "  Error collecting snapshot: ${e.message}"
+            )
+        }
+    }
     
     /**
      * Export debug log to a file.
@@ -2250,6 +2384,9 @@ class BaseBleService : Service() {
                 
                 out.appendLine("Active Plugins:")
                 getMqttPublisherFromService()?.let { out.appendLine("  MQTT: available") }
+                out.appendLine("")
+
+                getOneControlDeviceTableDebugLines().forEach { out.appendLine(it) }
                 out.appendLine("")
                 
                 out.appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
@@ -2313,6 +2450,9 @@ class BaseBleService : Service() {
             
             appendLine("Active Plugins:")
             getMqttPublisherFromService()?.let { appendLine("  MQTT: available") }
+            appendLine("")
+
+            getOneControlDeviceTableDebugLines().forEach { appendLine(it) }
             appendLine("")
             
             appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")

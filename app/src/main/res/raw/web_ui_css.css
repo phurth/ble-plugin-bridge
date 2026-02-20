@@ -501,6 +501,15 @@ button:hover { background: #1565c0; }
     align-items: center;
 }
 
+.table-icon-btn {
+    color: #1976d2;
+}
+
+.table-icon-btn:hover {
+    background: rgba(25, 118, 210, 0.1);
+    color: #1565c0;
+}
+
 @media (max-width: 480px) {
     .instance-actions {
         flex-direction: row;
