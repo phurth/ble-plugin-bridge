@@ -145,3 +145,4 @@ UI_IMPLEMENTATION.md
 # Test scripts (moved to scripts/ directory)
 # Note: scripts/ directory IS tracked in git for utility purposes
 
+.vscode/
