@@ -119,6 +119,16 @@ androidTest-results/
 context/
 archive/
 
+# ESPHome build artifacts
+.esphome/
+
+# Working context / analysis docs (local use only)
+WORKSPACE_CURRENT_STATE_ANALYSIS.md
+TEST_PLAN.md
+BT_ADAPTER_PINNING.md
+BT
+pairing_test.yml
+
 # Documentation (keeping README only for public repo)
 docs/
 ADB_CONTROL_GUIDE.md
