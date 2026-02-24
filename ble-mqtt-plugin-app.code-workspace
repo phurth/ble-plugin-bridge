@@ -5,6 +5,21 @@
 		},
 		{
 			"path": "../../../.gradle"
+		},
+		{
+			"path": "../ha-onecontrol"
+		},
+		{
+			"path": "../ha-gopower"
+		},
+		{
+			"path": "../ha-mopeka"
+		},
+		{
+			"path": "../ha-hughes"
+		},
+		{
+			"path": "../ha-easytouch"
 		}
 	],
 	"settings": {
