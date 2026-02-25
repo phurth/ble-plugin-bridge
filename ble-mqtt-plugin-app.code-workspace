@@ -20,6 +20,9 @@
 		},
 		{
 			"path": "../ha-easytouch"
+		},
+		{
+			"path": "../ha-peplink"
 		}
 	],
 	"settings": {
