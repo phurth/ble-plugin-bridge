@@ -1,3 +1,13 @@
+#NOTE: Development on this application has slowed in favor of HACS integrations. I've created HACS integrations for each plugin from this app:
+- https://github.com/phurth/ha-onecontrol
+- https://github.com/phurth/ha-easytouch
+- https://github.com/phurth/ha-mopeka
+- https://github.com/phurth/ha-gopower
+- https://github.com/phurth/ha-peplink
+- https://github.com/phurth/ha-hughes
+
+This app still has use, especially for OneControl users who have a PIN-based gateway and who must use a BT proxy (the HACS integration does not support that configuration).
+
 # BLE-MQTT Bridge (Android)
 
 ![Version](https://img.shields.io/badge/version-2.6.0--pre1-blue)
