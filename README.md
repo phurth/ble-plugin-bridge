@@ -1,4 +1,4 @@
-#NOTE: Development on this application has slowed in favor of HACS integrations. I've created HACS integrations for each plugin from this app:
+# NOTE: Development on this application has slowed in favor of HACS integrations. I've created HACS integrations for each plugin from this app:
 - https://github.com/phurth/ha-onecontrol
 - https://github.com/phurth/ha-easytouch
 - https://github.com/phurth/ha-mopeka
